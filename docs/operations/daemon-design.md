@@ -2,12 +2,12 @@
 
 The daemon is a thin orchestrator around the existing `safe-sync backup` behavior. It reads the same config from `~/.safe-sync/config.json`.
 
-It should not implement sync logic. It should decide when to call the backup command.
+It should not implement sync logic. It should decide when to call the backup command for the enabled configured folders.
 
 ## Inputs
 
-- Local path from config.
-- Filter file from config.
+- Enabled folder list from config.
+- Local path and filter file for each folder.
 - Debounce/cooldown/backoff settings from config.
 - File watcher events.
 - Fallback timer ticks.
@@ -27,7 +27,7 @@ The daemon stores a simple dirty flag:
 dirty = true
 ```
 
-It does not need a full queue of changed paths for the first implementation. Rclone scans the configured folder and decides what changed.
+It does not need a full queue of changed paths for the first implementation. Rclone scans the configured folders and decides what changed. The daemon only records which folder snapshots changed so status can say what woke it up.
 
 ## Ignore Policy
 
@@ -80,14 +80,15 @@ The first working daemon uses dependency-free polling so it works on macOS, Linu
 
 Loop behavior:
 
-1. Snapshot the configured local folder.
+1. Snapshot every enabled configured local folder.
 2. Ignore generated paths before comparing snapshots.
-3. Mark the daemon dirty when the snapshot changes.
+3. Mark the daemon dirty when any folder snapshot changes.
 4. Wait for the debounce window to be quiet.
-5. Run one normal guarded backup.
-6. Respect a minimum interval between runs.
-7. Enter backoff when rclone output indicates Dropbox rate limiting.
-8. Run a fallback backup after the fallback interval even if no change was noticed.
+5. Run normal guarded backups for all enabled folders.
+6. Refresh this machine's registry file after successful real backups.
+7. Respect a minimum interval between runs.
+8. Enter backoff when rclone output indicates Dropbox rate limiting or registry update failure.
+9. Run a fallback backup after the fallback interval even if no change was noticed.
 
 Service install is handled by the repo installer:
 

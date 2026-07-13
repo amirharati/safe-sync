@@ -3,15 +3,36 @@
   "debounce_seconds": 20,
   "fallback_interval_seconds": 1800,
   "filter_file": "~/.safe-sync/filter.txt",
-  "local_path": "~/test_sync",
+  "folders": [
+    {
+      "enabled": true,
+      "filter_file": "~/.safe-sync/filter.txt",
+      "id": "test_sync",
+      "label": "Test Sync",
+      "local_path": "~/test_sync",
+      "remote_path": "macbook/test_sync",
+      "trash_path": ".trash/macbook/test_sync"
+    },
+    {
+      "enabled": false,
+      "filter_file": "~/.safe-sync/filter.txt",
+      "id": "data",
+      "label": "Data",
+      "local_path": "~/data_to_backup",
+      "remote_path": "macbook/data",
+      "trash_path": ".trash/macbook/data"
+    }
+  ],
+  "install_id": "replace-with-generated-uuid",
   "lock_file": "~/.local/state/safe-sync/safe-sync.lock",
   "log_dir": "~/.local/log/safe-sync",
   "machine": "macbook",
+  "machine_id": "macbook",
+  "machine_label": "MacBook",
   "min_interval_seconds": 120,
   "poll_interval_seconds": 5,
   "rate_limit_backoff_seconds": 300,
   "rclone_max_duration_seconds": 120,
-  "remote_root": "dropbox:computer-backups/test/macbook/test_sync",
-  "status_path": "~/.local/state/safe-sync/status.json",
-  "trash_root": "dropbox:computer-backups/.trash/test/macbook"
+  "remote_base": "dropbox:computer-backups/test",
+  "status_path": "~/.local/state/safe-sync/status.json"
 }

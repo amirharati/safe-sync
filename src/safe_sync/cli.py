@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -156,10 +157,125 @@ def unsafe_local_path_reason(path: Path) -> str | None:
 
 
 def validate_local_path(config: dict[str, Any]) -> None:
-    path = resolved_path(str(config["local_path"]))
-    reason = unsafe_local_path_reason(path)
-    if reason and not config.get("allow_unsafe_local_path"):
-        raise SystemExit(f"{reason}\nSet allow_unsafe_local_path=true only if you are certain.")
+    for folder in enabled_folders(config):
+        path = resolved_path(str(folder["local_path"]))
+        reason = unsafe_local_path_reason(path)
+        if reason and not config.get("allow_unsafe_local_path") and not folder.get("allow_unsafe_local_path"):
+            raise SystemExit(f"{reason}\nSet allow_unsafe_local_path=true only if you are certain.")
+
+
+def safe_id(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower()).strip("-")
+    return cleaned or "default"
+
+
+def default_install_id() -> str:
+    return str(uuid.uuid4())
+
+
+def remote_join(base: str, path: str) -> str:
+    return f"{base.rstrip('/')}/{path.strip('/')}"
+
+
+def legacy_folder(config: dict[str, Any]) -> dict[str, Any]:
+    machine_id = str(config.get("machine_id") or config.get("machine") or machine_name())
+    local_path = str(config.get("local_path", "~/test_sync"))
+    folder_id = safe_id(config.get("folder_id") or Path(local_path).expanduser().name or "default")
+    remote_base = str(config.get("remote_base", "dropbox:computer-backups/test"))
+    remote_root = str(config.get("remote_root", remote_join(remote_base, f"{machine_id}/{folder_id}")))
+    trash_root = str(config.get("trash_root", remote_join(remote_base, f".trash/{machine_id}/{folder_id}")))
+    return {
+        "id": folder_id,
+        "label": config.get("folder_label", folder_id),
+        "local_path": local_path,
+        "remote_root": remote_root,
+        "trash_root": trash_root,
+        "remote_path": remote_root.split(":", 1)[1].lstrip("/") if ":" in remote_root else remote_root,
+        "trash_path": trash_root.split(":", 1)[1].lstrip("/") if ":" in trash_root else trash_root,
+        "filter_file": str(config.get("filter_file", DEFAULT_FILTER)),
+        "enabled": True,
+    }
+
+
+def normalized_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    machine_id = str(normalized.get("machine_id") or normalized.get("machine") or machine_name())
+    normalized.setdefault("machine", machine_id)
+    normalized["machine_id"] = machine_id
+    normalized.setdefault("machine_label", machine_id)
+    normalized.setdefault("install_id", default_install_id())
+    normalized.setdefault("remote_base", "dropbox:computer-backups/test")
+    if not normalized.get("folders"):
+        normalized["folders"] = [legacy_folder(normalized)]
+    for folder in normalized["folders"]:
+        folder["id"] = safe_id(str(folder.get("id") or Path(str(folder.get("local_path", "default"))).name))
+        folder.setdefault("label", folder["id"])
+        folder.setdefault("enabled", True)
+        folder.setdefault("filter_file", str(normalized.get("filter_file", DEFAULT_FILTER)))
+        folder.setdefault("remote_path", f"{machine_id}/{folder['id']}")
+        folder.setdefault("trash_path", f".trash/{machine_id}/{folder['id']}")
+        folder.setdefault("remote_root", remote_join(str(normalized["remote_base"]), str(folder["remote_path"])))
+        folder.setdefault("trash_root", remote_join(str(normalized["remote_base"]), str(folder["trash_path"])))
+    return normalized
+
+
+def enabled_folders(config: dict[str, Any]) -> list[dict[str, Any]]:
+    return [folder for folder in normalized_config(config)["folders"] if folder.get("enabled", True)]
+
+
+def folder_config(config: dict[str, Any], folder: dict[str, Any]) -> dict[str, Any]:
+    merged = normalized_config(config)
+    merged.update({
+        "folder_id": folder["id"],
+        "local_path": folder["local_path"],
+        "remote_root": folder["remote_root"],
+        "trash_root": folder["trash_root"],
+        "filter_file": folder.get("filter_file", merged.get("filter_file", str(DEFAULT_FILTER))),
+    })
+    return merged
+
+
+def selected_folders(config: dict[str, Any], folder_id: str | None, all_folders: bool = False) -> list[dict[str, Any]]:
+    folders = enabled_folders(config)
+    if all_folders or folder_id is None:
+        return folders
+    wanted = safe_id(folder_id)
+    matches = [folder for folder in folders if folder["id"] == wanted]
+    if not matches:
+        known = ", ".join(folder["id"] for folder in folders) or "none"
+        raise SystemExit(f"Unknown or disabled folder '{folder_id}'. Known enabled folders: {known}")
+    return matches
+
+
+def registry_path(config: dict[str, Any]) -> str:
+    cfg = normalized_config(config)
+    base = str(cfg["remote_base"])
+    return remote_join(base, f".registry/computers/{cfg['machine_id']}.json")
+
+
+def registry_dir(config: dict[str, Any]) -> str:
+    return remote_join(str(normalized_config(config)["remote_base"]), ".registry/computers")
+
+
+def registry_doc(config: dict[str, Any]) -> dict[str, Any]:
+    cfg = normalized_config(config)
+    return {
+        "machine_id": cfg["machine_id"],
+        "machine_label": cfg.get("machine_label", cfg["machine_id"]),
+        "install_id": cfg.get("install_id"),
+        "safe_sync_version": "0.1",
+        "last_seen": now_iso(),
+        "folders": [
+            {
+                "id": folder["id"],
+                "label": folder.get("label", folder["id"]),
+                "remote_path": folder["remote_path"],
+                "trash_path": folder["trash_path"],
+                "enabled": bool(folder.get("enabled", True)),
+            }
+            for folder in cfg["folders"]
+        ],
+    }
 
 
 class Lock:
@@ -237,11 +353,25 @@ def ensure_filter_template(path: Path) -> None:
 
 def default_config(machine: str) -> dict[str, Any]:
     ensure_filter_template(DEFAULT_FILTER)
+    folder_id = "test_sync"
+    remote_base = "dropbox:computer-backups/test"
     return {
         "machine": machine,
-        "local_path": "~/test_sync",
-        "remote_root": f"dropbox:computer-backups/test/{machine}/test_sync",
-        "trash_root": f"dropbox:computer-backups/.trash/test/{machine}",
+        "machine_id": machine,
+        "machine_label": machine,
+        "install_id": default_install_id(),
+        "remote_base": remote_base,
+        "folders": [
+            {
+                "id": folder_id,
+                "label": "Test Sync",
+                "local_path": "~/test_sync",
+                "remote_path": f"{machine}/{folder_id}",
+                "trash_path": f".trash/{machine}/{folder_id}",
+                "filter_file": str(DEFAULT_FILTER),
+                "enabled": True,
+            }
+        ],
         "filter_file": str(DEFAULT_FILTER),
         "status_path": str(DEFAULT_STATUS),
         "log_dir": str(DEFAULT_LOG_DIR),
@@ -283,36 +413,55 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     config.setdefault("min_interval_seconds", 120)
     config.setdefault("fallback_interval_seconds", 1800)
     config.setdefault("rate_limit_backoff_seconds", 300)
-    dst.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    dst.write_text(json.dumps(normalized_config(config), indent=2, sort_keys=True) + "\n")
     print(f"migrated {src} -> {dst}")
     return 0
 
 
 def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
     with Lock(lock_file(config)):
-        save_status(config, state="syncing", last_start=now_iso(), last_command="backup", last_error=None)
+        save_status(
+            config,
+            state="syncing",
+            folder_id=config.get("folder_id"),
+            last_start=now_iso(),
+            last_command="backup",
+            last_error=None,
+        )
         try:
             preflight(config)
             code = run_command(config, backup_cmd(config, dry_run), dry_run=dry_run)
         except BaseException as exc:
-            save_status(config, state="error", last_error=str(exc), last_finish=now_iso())
+            save_status(config, state="error", folder_id=config.get("folder_id"), last_error=str(exc), last_finish=now_iso())
             raise
         if code == 0:
-            save_status(config, state="idle", last_success=now_iso(), last_finish=now_iso(), last_error=None)
+            save_status(config, state="idle", folder_id=config.get("folder_id"), last_success=now_iso(), last_finish=now_iso(), last_error=None)
         else:
-            save_status(config, state="error", last_error=f"rclone exit {code}", last_finish=now_iso())
+            save_status(config, state="error", folder_id=config.get("folder_id"), last_error=f"rclone exit {code}", last_finish=now_iso())
         return code
 
 
 def cmd_backup(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config).expanduser())
+    config = normalized_config(load_config(Path(args.config).expanduser()))
     validate_local_path(config)
-    return run_backup_with_config(config, args.dry_run)
+    folders = selected_folders(config, args.folder, args.all)
+    last_code = 0
+    for folder in folders:
+        print(f"folder: {folder['id']}")
+        last_code = run_backup_with_config(folder_config(config, folder), args.dry_run)
+        if last_code != 0:
+            return last_code
+    if not args.dry_run:
+        registry_code = update_registry(config)
+        if registry_code != 0:
+            save_status(config, state="error", last_error="registry update failed", last_finish=now_iso())
+            return registry_code
+    return last_code
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config).expanduser())
-    src = f"{config['remote_base'].rstrip('/')}/{args.machine}/{args.remote_path.strip('/')}" if "remote_base" in config else args.source
+    config = normalized_config(load_config(Path(args.config).expanduser()))
+    src = args.source
     dst = args.destination
     with Lock(lock_file(config)):
         save_status(config, state="syncing", last_start=now_iso(), last_command="pull", last_error=None)
@@ -394,27 +543,35 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config).expanduser())
+    config = normalized_config(load_config(Path(args.config).expanduser()))
     validate_local_path(config)
+    folders = enabled_folders(config)
+    if not folders:
+        raise SystemExit("No enabled folders configured")
+    first_folder = folders[0]
     checks = {
         "config": str(Path(args.config).expanduser()),
         "rclone": rclone_bin(config),
-        "filter_file": str(filter_file(config)),
-        "local_path": str(Path(config["local_path"]).expanduser()),
-        "remote_root": config["remote_root"],
-        "trash_root": config["trash_root"],
+        "filter_file": str(filter_file(folder_config(config, first_folder))),
+        "folders": ", ".join(folder["id"] for folder in folders),
+        "local_path": str(Path(first_folder["local_path"]).expanduser()),
+        "remote_root": first_folder["remote_root"],
+        "trash_root": first_folder["trash_root"],
         "poll_interval_seconds": str(config.get("poll_interval_seconds", 5)),
         "debounce_seconds": str(config.get("debounce_seconds", 20)),
         "fallback_interval_seconds": str(config.get("fallback_interval_seconds", 1800)),
     }
     for name, value in checks.items():
         print(f"{name}: {value}")
-    missing = [p for p in [filter_file(config), Path(config["local_path"]).expanduser()] if not p.exists()]
+    missing = []
+    for folder in enabled_folders(config):
+        fcfg = folder_config(config, folder)
+        missing.extend(p for p in [filter_file(fcfg), Path(fcfg["local_path"]).expanduser()] if not p.exists())
     if missing:
         for p in missing:
             print(f"missing: {p}", file=sys.stderr)
         return 1
-    preflight(config)
+    preflight(folder_config(config, first_folder))
     print("remote preflight: ok")
     return 0
 
@@ -509,28 +666,72 @@ def cmd_logs(args: argparse.Namespace) -> int:
         print(line)
     return 0
 
+
+def folder_snapshots(config: dict[str, Any]) -> dict[str, dict[str, tuple[int, int]]]:
+    snapshots: dict[str, dict[str, tuple[int, int]]] = {}
+    for folder in enabled_folders(config):
+        local_path = Path(folder["local_path"]).expanduser()
+        if not local_path.exists():
+            raise SystemExit(f"Local path does not exist for folder {folder['id']}: {local_path}")
+        snapshots[folder["id"]] = scan_tree(local_path)
+    return snapshots
+
+
+def update_registry(config: dict[str, Any]) -> int:
+    doc = json.dumps(registry_doc(config), indent=2, sort_keys=True) + "\n"
+    result = rclone_capture(config, ["rcat", registry_path(config)], input_text=doc)
+    if result.returncode != 0:
+        append_log(config, f"[{now_iso()}] registry update failed:\n{result.stdout or ''}\n")
+    return int(result.returncode)
+
+
+def run_all_backups(config: dict[str, Any], dry_run: bool) -> tuple[int, str | None]:
+    last_code = 0
+    for folder in enabled_folders(config):
+        code = run_backup_with_config(folder_config(config, folder), dry_run)
+        if code != 0:
+            return code, folder["id"]
+        last_code = code
+    if not dry_run:
+        registry_code = update_registry(config)
+        if registry_code != 0:
+            return registry_code, "registry"
+    return last_code, None
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config).expanduser())
+    config = normalized_config(load_config(Path(args.config).expanduser()))
     validate_local_path(config)
     settings = watch_settings_from_config(config, args)
     daemon = WatchDaemon(settings)
-    local_path = Path(config["local_path"]).expanduser()
-    if not local_path.exists():
-        raise SystemExit(f"Local path does not exist: {local_path}")
+    folders = enabled_folders(config)
+    if not folders:
+        raise SystemExit("No enabled folders configured")
 
-    previous_snapshot = scan_tree(local_path)
-    save_status(config, state="watching", watcher="polling", local_path=str(local_path), dry_run=args.dry_run, poll_interval_seconds=settings.poll_interval_seconds, debounce_seconds=settings.debounce_seconds, fallback_interval_seconds=settings.fallback_interval_seconds, last_error=None)
-    append_log(config, f"[{now_iso()}] daemon started watcher=polling dry_run={args.dry_run}\n")
+    previous_snapshots = folder_snapshots(config)
+    save_status(
+        config,
+        state="watching",
+        watcher="polling",
+        folders=[{"id": folder["id"], "local_path": str(Path(folder["local_path"]).expanduser())} for folder in folders],
+        dry_run=args.dry_run,
+        poll_interval_seconds=settings.poll_interval_seconds,
+        debounce_seconds=settings.debounce_seconds,
+        fallback_interval_seconds=settings.fallback_interval_seconds,
+        last_error=None,
+    )
+    append_log(config, f"[{now_iso()}] daemon started watcher=polling folders={','.join(folder['id'] for folder in folders)} dry_run={args.dry_run}\n")
 
     loops = 0
     while True:
         loops += 1
         now = time.monotonic()
-        current_snapshot = scan_tree(local_path)
-        if current_snapshot != previous_snapshot:
+        current_snapshots = folder_snapshots(config)
+        changed = [folder_id for folder_id, snapshot in current_snapshots.items() if snapshot != previous_snapshots.get(folder_id)]
+        if changed:
             daemon.mark_dirty(now)
-            previous_snapshot = current_snapshot
-            save_status(config, state="dirty", last_change=now_iso(), watcher="polling")
+            previous_snapshots = current_snapshots
+            save_status(config, state="dirty", changed_folders=changed, last_change=now_iso(), watcher="polling")
 
         if daemon.state.state == DaemonState.BACKOFF:
             if daemon.backoff_expired(now):
@@ -552,8 +753,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         if should_run:
             daemon.note_sync_started(now)
             save_status(config, state="syncing", last_start=now_iso(), last_command="daemon")
+            failed_folder = None
             try:
-                code = run_backup_with_config(config, args.dry_run)
+                code, failed_folder = run_all_backups(config, args.dry_run)
                 error_text = f"rclone exit {code}" if code != 0 else None
             except SystemExit as exc:
                 code = int(exc.code) if isinstance(exc.code, int) else 75
@@ -563,10 +765,11 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             rate_limited = should_backoff and looks_rate_limited(config)
             daemon.note_sync_finished(after, rate_limited=should_backoff)
             if code == 0:
+                previous_snapshots = folder_snapshots(config)
                 save_status(config, state="watching", last_success=now_iso(), last_error=None)
             else:
                 reason = "rate limited" if rate_limited else "remote/preflight failed"
-                save_status(config, state="backoff", last_error=f"{error_text}; {reason}")
+                save_status(config, state="backoff", failed_folder=failed_folder, last_error=f"{error_text}; {reason}")
             if args.once:
                 return code
 
@@ -647,6 +850,84 @@ case \"$(uname -s)\" in
 esac
 """
 
+def cmd_folders(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser()
+    config = normalized_config(load_config(config_path))
+    if args.folder_cmd == "list":
+        print(json.dumps(config["folders"], indent=2, sort_keys=True))
+        return 0
+    if args.folder_cmd == "add":
+        folder_id = safe_id(args.id)
+        if any(folder["id"] == folder_id for folder in config["folders"]):
+            raise SystemExit(f"Folder already exists: {folder_id}")
+        machine_id = config["machine_id"]
+        folder = {
+            "id": folder_id,
+            "label": args.label or folder_id,
+            "local_path": args.local_path,
+            "remote_path": args.remote_path or f"{machine_id}/{folder_id}",
+            "trash_path": args.trash_path or f".trash/{machine_id}/{folder_id}",
+            "filter_file": args.filter_file or str(DEFAULT_FILTER),
+            "enabled": not args.disabled,
+        }
+        folder.setdefault("remote_root", remote_join(str(config["remote_base"]), str(folder["remote_path"])))
+        folder.setdefault("trash_root", remote_join(str(config["remote_base"]), str(folder["trash_path"])))
+        validate_local_path({**config, "folders": [folder]})
+        config["folders"].append(folder)
+        config_path.write_text(json.dumps(normalized_config(config), indent=2, sort_keys=True) + "\n")
+        print(folder_id)
+        return 0
+    raise SystemExit(f"Unknown folders command: {args.folder_cmd}")
+
+
+def rclone_capture(config: dict[str, Any], cmd: list[str], input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [rclone_bin(config), *cmd],
+        input=input_text,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=int(config.get("command_timeout_seconds", 180)),
+    )
+
+
+def cmd_registry(args: argparse.Namespace) -> int:
+    config = normalized_config(load_config(Path(args.config).expanduser()))
+    if args.registry_cmd == "update":
+        result = rclone_capture(config, ["rcat", registry_path(config)], input_text=json.dumps(registry_doc(config), indent=2, sort_keys=True) + "\n")
+        print(result.stdout or "", end="")
+        if result.returncode == 0:
+            print(registry_path(config))
+        return int(result.returncode)
+    if args.registry_cmd == "path":
+        print(registry_path(config))
+        return 0
+    raise SystemExit(f"Unknown registry command: {args.registry_cmd}")
+
+
+def cmd_computers(args: argparse.Namespace) -> int:
+    config = normalized_config(load_config(Path(args.config).expanduser()))
+    result = rclone_capture(config, ["lsf", registry_dir(config), "--files-only"])
+    if result.returncode != 0:
+        print(result.stdout or "", end="")
+        return int(result.returncode)
+    computers = []
+    for name in (result.stdout or "").splitlines():
+        if not name.endswith(".json"):
+            continue
+        path = remote_join(registry_dir(config), name)
+        cat = rclone_capture(config, ["cat", path])
+        if cat.returncode != 0:
+            computers.append({"registry_file": name, "error": cat.stdout.strip()})
+            continue
+        try:
+            computers.append(json.loads(cat.stdout))
+        except json.JSONDecodeError:
+            computers.append({"registry_file": name, "error": "invalid json"})
+    print(json.dumps(computers, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_render_install(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser()
     load_config(config_path)
@@ -676,7 +957,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{backup,start,stop,restart,status,logs,pull,list,doctor}",
+        metavar="{backup,start,stop,restart,status,logs,folders,computers,pull,list,doctor}",
     )
 
     init = sub.add_parser("init-config")
@@ -690,6 +971,8 @@ def parser() -> argparse.ArgumentParser:
     migrate.set_defaults(func=cmd_migrate_config)
 
     backup = sub.add_parser("backup")
+    backup.add_argument("folder", nargs="?")
+    backup.add_argument("--all", action="store_true")
     backup.add_argument("--dry-run", action="store_true")
     backup.set_defaults(func=cmd_backup)
 
@@ -724,6 +1007,30 @@ def parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     status.set_defaults(func=cmd_status)
 
+    folders_cmd = sub.add_parser("folders")
+    folders_sub = folders_cmd.add_subparsers(dest="folder_cmd", required=True)
+    folders_list = folders_sub.add_parser("list")
+    folders_list.set_defaults(func=cmd_folders)
+    folders_add = folders_sub.add_parser("add")
+    folders_add.add_argument("id")
+    folders_add.add_argument("local_path")
+    folders_add.add_argument("--label")
+    folders_add.add_argument("--remote-path")
+    folders_add.add_argument("--trash-path")
+    folders_add.add_argument("--filter-file")
+    folders_add.add_argument("--disabled", action="store_true")
+    folders_add.set_defaults(func=cmd_folders)
+
+    computers = sub.add_parser("computers")
+    computers.set_defaults(func=cmd_computers)
+
+    registry = sub.add_parser("registry", help=argparse.SUPPRESS)
+    registry_sub = registry.add_subparsers(dest="registry_cmd", required=True)
+    registry_update = registry_sub.add_parser("update")
+    registry_update.set_defaults(func=cmd_registry)
+    registry_path_cmd = registry_sub.add_parser("path")
+    registry_path_cmd.set_defaults(func=cmd_registry)
+
     logs = sub.add_parser("logs")
     logs.add_argument("--lines", type=int, default=80)
     logs.set_defaults(func=cmd_logs)
@@ -738,7 +1045,7 @@ def parser() -> argparse.ArgumentParser:
 
     sub._choices_actions = [
         action for action in sub._choices_actions
-        if action.dest not in {"daemon", "render-install"}
+        if action.dest not in {"daemon", "render-install", "registry"}
     ]
     return p
 

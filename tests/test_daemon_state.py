@@ -1,7 +1,15 @@
 from pathlib import Path
 
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
-from safe_sync.cli import unsafe_local_path_reason
+from safe_sync.cli import (
+    enabled_folders,
+    folder_snapshots,
+    normalized_config,
+    registry_doc,
+    registry_path,
+    selected_folders,
+    unsafe_local_path_reason,
+)
 from safe_sync.path_filter import should_ignore_watch_event
 
 
@@ -68,3 +76,80 @@ def test_unsafe_local_path_guard_blocks_broad_paths():
     assert unsafe_local_path_reason(home)
     assert unsafe_local_path_reason(home / "projects")
     assert not unsafe_local_path_reason(home / "test_sync")
+
+
+def test_normalized_config_migrates_legacy_single_folder():
+    config = normalized_config({
+        "machine": "macbook",
+        "local_path": "~/test_sync",
+        "remote_root": "dropbox:computer-backups/test/macbook/test_sync",
+        "trash_root": "dropbox:computer-backups/test/.trash/macbook/test_sync",
+    })
+
+    assert config["machine_id"] == "macbook"
+    assert config["remote_base"] == "dropbox:computer-backups/test"
+    assert config["folders"][0]["id"] == "test_sync"
+    assert config["folders"][0]["remote_root"] == "dropbox:computer-backups/test/macbook/test_sync"
+    assert config["folders"][0]["trash_root"] == "dropbox:computer-backups/test/.trash/macbook/test_sync"
+
+
+def test_selected_folders_respects_enabled_state():
+    config = normalized_config({
+        "machine_id": "workstation",
+        "remote_base": "dropbox:computer-backups/test",
+        "folders": [
+            {"id": "projects", "local_path": "~/test_sync"},
+            {"id": "data", "local_path": "~/data", "enabled": False},
+        ],
+    })
+
+    assert [folder["id"] for folder in enabled_folders(config)] == ["projects"]
+    assert [folder["id"] for folder in selected_folders(config, None)] == ["projects"]
+    assert selected_folders(config, "projects")[0]["remote_root"] == "dropbox:computer-backups/test/workstation/projects"
+
+
+def test_registry_doc_lists_machine_owned_folders():
+    config = normalized_config({
+        "machine_id": "linuxbox",
+        "machine_label": "Linux Box",
+        "install_id": "install-123",
+        "remote_base": "dropbox:computer-backups/test",
+        "folders": [
+            {"id": "projects", "local_path": "~/projects-safe"},
+            {"id": "data", "local_path": "~/data-safe", "enabled": False},
+        ],
+    })
+
+    doc = registry_doc(config)
+
+    assert registry_path(config) == "dropbox:computer-backups/test/.registry/computers/linuxbox.json"
+    assert doc["machine_id"] == "linuxbox"
+    assert doc["machine_label"] == "Linux Box"
+    assert doc["install_id"] == "install-123"
+    assert [folder["id"] for folder in doc["folders"]] == ["projects", "data"]
+    assert doc["folders"][0]["remote_path"] == "linuxbox/projects"
+    assert doc["folders"][1]["enabled"] is False
+
+
+def test_folder_snapshots_tracks_multiple_roots(tmp_path):
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    (one / "a.txt").write_text("a")
+    (two / "b.txt").write_text("b")
+    (two / "node_modules").mkdir()
+    (two / "node_modules" / "ignored.js").write_text("ignored")
+
+    snapshots = folder_snapshots({
+        "machine_id": "test",
+        "remote_base": "dropbox:computer-backups/test",
+        "folders": [
+            {"id": "one", "local_path": str(one)},
+            {"id": "two", "local_path": str(two)},
+        ],
+    })
+
+    assert "a.txt" in snapshots["one"]
+    assert "b.txt" in snapshots["two"]
+    assert "node_modules/ignored.js" not in snapshots["two"]

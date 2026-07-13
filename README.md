@@ -6,9 +6,10 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 
 ## Core Idea
 
-- Each computer owns one remote backup folder.
-- Automatic jobs are mostly one-way backup from local to that computer's remote folder.
-- Cross-computer sharing is selective: pull or copy a file/folder when needed.
+- Each computer owns one machine identity and one or more remote backup folders.
+- Automatic jobs are mostly one-way backup from each configured local folder to that computer's remote folders.
+- Cross-computer sharing is selective: discover another computer, then pull or copy a file/folder when needed.
+- Each computer publishes its own registry file at `.registry/computers/<machine_id>.json`; no shared registry file is edited by multiple machines.
 - Deletes in owned backup folders are allowed only with recoverable trash.
 - No tool syncs `.git/` internals.
 - Build artifacts, dependency folders, and caches are ignored.
@@ -94,16 +95,40 @@ Run health check:
 safe-sync doctor
 ```
 
-Dry-run backup:
+List configured folders:
+
+```bash
+safe-sync folders list
+```
+
+Add another local folder to this machine's backup set:
+
+```bash
+safe-sync folders add data ~/data_to_backup --label Data
+```
+
+Dry-run backup for all enabled folders:
 
 ```bash
 safe-sync backup --dry-run
+```
+
+Dry-run backup for one folder:
+
+```bash
+safe-sync backup test_sync --dry-run
 ```
 
 Check status:
 
 ```bash
 safe-sync status
+```
+
+List known computers from the remote registry:
+
+```bash
+safe-sync computers
 ```
 
 Real backup to the disposable Dropbox test path:
