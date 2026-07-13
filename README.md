@@ -28,10 +28,10 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 Initial development and testing uses:
 
 ```text
-/Users/amir/test_sync
+~/test_sync
 ```
 
-Do not point early tests at `/Users/amir/projects`.
+Do not point early tests at `~/projects`.
 
 
 ## Code Layout
@@ -52,7 +52,7 @@ Run the CLI through `bin/safe-sync`; edit implementation code under `src/safe_sy
 From a downloaded/cloned repo:
 
 ```bash
-cd /Users/amir/projects/safe-sync
+cd ~/projects/safe-sync
 ./install.sh
 ```
 
@@ -82,7 +82,7 @@ safe-sync logs
 The local test config lives at:
 
 ```text
-/Users/amir/.safe-sync/config.json
+~/.safe-sync/config.json
 ```
 
 Run health check:

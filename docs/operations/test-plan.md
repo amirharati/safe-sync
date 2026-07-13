@@ -5,10 +5,10 @@
 Use this local folder for initial testing:
 
 ```text
-/Users/amir/test_sync
+~/test_sync
 ```
 
-Do not use `/Users/amir/projects` during early implementation.
+Do not use `~/projects` during early implementation.
 
 ## Test Remote
 
@@ -48,8 +48,8 @@ dist/bundle.js
 Dry run backup:
 
 ```bash
-rclone sync /Users/amir/test_sync dropbox:computer-backups/test/macbook/test_sync \
-  --filter-from /Users/amir/projects/safe-sync/config/filter.txt \
+rclone sync ~/test_sync dropbox:computer-backups/test/macbook/test_sync \
+  --filter-from ~/projects/safe-sync/config/filter.txt \
   --backup-dir dropbox:computer-backups/.trash/test/macbook/DRY-RUN \
   --dry-run
 ```
@@ -58,7 +58,7 @@ Expected:
 
 - Includes `README.md`, `src/app.py`, `data/results.csv`, `models/model.pt`.
 - Excludes `node_modules/`, `.venv/`, and `dist/`.
-- Does not touch `/Users/amir/projects`.
+- Does not touch `~/projects`.
 
 Real test backup should only happen after dry-run output is reviewed.
 

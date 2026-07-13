@@ -214,7 +214,7 @@ def default_config(machine: str) -> dict[str, Any]:
     ensure_filter_template(DEFAULT_FILTER)
     return {
         "machine": machine,
-        "local_path": "/Users/amir/test_sync",
+        "local_path": "~/test_sync",
         "remote_root": f"dropbox:computer-backups/test/{machine}/test_sync",
         "trash_root": f"dropbox:computer-backups/.trash/test/{machine}",
         "filter_file": str(DEFAULT_FILTER),

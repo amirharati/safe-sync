@@ -28,7 +28,7 @@ safe-sync list <machine> <path>
 safe-sync status
 ```
 
-Initial implementation must target `/Users/amir/test_sync` only. Do not run against `/Users/amir/projects` until the test folder workflow is proven.
+Initial implementation must target `~/test_sync` only. Do not run against `~/projects` until the test folder workflow is proven.
 
 ## Phase 2: Watch Daemon Skeleton
 
@@ -37,7 +37,7 @@ Add a daemon structure and render install files, but do not auto-install it yet.
 - Add watcher state machine docs.
 - Add config fields for debounce/cooldown/fallback/backoff.
 - Add placeholder modules for watch orchestration.
-- Keep `/Users/amir/test_sync` as the only target.
+- Keep `~/test_sync` as the only target.
 - Review design before full implementation.
 
 ## Phase 3: Watch Daemon Implementation

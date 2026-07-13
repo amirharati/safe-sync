@@ -6,7 +6,7 @@ Proposed
 
 ## Context
 
-The backup CLI works in dry-run mode against `/Users/amir/test_sync`. The next question is how the daemon should trigger backups.
+The backup CLI works in dry-run mode against `~/test_sync`. The next question is how the daemon should trigger backups.
 
 A simple timer is reliable but wasteful and slow to react. A pure file watcher is responsive but can miss events after sleep/wake, network outages, or watcher crashes. Dropbox can also rate-limit writes, so the daemon must avoid triggering many successive backups.
 
