@@ -137,6 +137,31 @@ def lock_file(config: dict[str, Any]) -> Path:
     return Path(config.get("lock_file", Path.home() / ".local" / "state" / "safe-sync" / "safe-sync.lock")).expanduser()
 
 
+def resolved_path(value: str) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def unsafe_local_path_reason(path: Path) -> str | None:
+    home = Path.home().resolve()
+    root = Path(path.anchor or "/").resolve()
+    dangerous = {root, home, home / "projects"}
+    if path in dangerous:
+        return f"refusing unsafe local_path: {path}"
+    try:
+        if path == Path.cwd().resolve():
+            return f"refusing current working directory as local_path: {path}"
+    except OSError:
+        pass
+    return None
+
+
+def validate_local_path(config: dict[str, Any]) -> None:
+    path = resolved_path(str(config["local_path"]))
+    reason = unsafe_local_path_reason(path)
+    if reason and not config.get("allow_unsafe_local_path"):
+        raise SystemExit(f"{reason}\nSet allow_unsafe_local_path=true only if you are certain.")
+
+
 class Lock:
     def __init__(self, path: Path):
         self.path = path
@@ -281,6 +306,7 @@ def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
 
 def cmd_backup(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config).expanduser())
+    validate_local_path(config)
     return run_backup_with_config(config, args.dry_run)
 
 
@@ -304,6 +330,44 @@ def cmd_list(args: argparse.Namespace) -> int:
     return run_command(config, [rclone_bin(config), "lsf", args.target, "--max-depth", str(args.depth)])
 
 
+def parse_status_time(value: Any) -> dt.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def status_health(config: dict[str, Any], service_state: str, sync_state: dict[str, Any]) -> dict[str, Any]:
+    daemon_seen_at = sync_state.get("updated_at")
+    last_error = sync_state.get("last_error")
+    if last_error:
+        health = "error"
+        reason = str(last_error)
+    elif service_state == "stopped":
+        health = "stopped"
+        reason = "daemon service is stopped"
+    elif service_state != "running":
+        health = "unknown"
+        reason = f"service state is {service_state}"
+    else:
+        seen = parse_status_time(daemon_seen_at)
+        if seen is None:
+            health = "stale"
+            reason = "daemon has not written status yet"
+        else:
+            age = (dt.datetime.now(dt.timezone.utc).astimezone() - seen).total_seconds()
+            stale_after = max(60, int(config.get("poll_interval_seconds", 5)) * 4 + 30)
+            if age > stale_after:
+                health = "stale"
+                reason = f"daemon status is {int(age)}s old"
+            else:
+                health = "ok"
+                reason = "daemon status is fresh"
+    return {"health": health, "reason": reason, "daemon_seen_at": daemon_seen_at}
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config).expanduser())
     status_path = Path(config.get("status_path", DEFAULT_STATUS)).expanduser()
@@ -317,16 +381,21 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     service_text = service_status_text()
     service_state = service_text.split(":", 1)[1].strip() if ":" in service_text else service_text
+    health = status_health(config, service_state, sync_state)
     print(json.dumps({
+        "daemon_seen_at": health["daemon_seen_at"],
+        "health": health["health"],
+        "health_reason": health["reason"],
+        "log": str(log_path(config)),
         "service_state": service_state,
         "sync_state": sync_state,
-        "log": str(log_path(config)),
     }, indent=2, sort_keys=True))
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config).expanduser())
+    validate_local_path(config)
     checks = {
         "config": str(Path(args.config).expanduser()),
         "rclone": rclone_bin(config),
@@ -442,6 +511,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def cmd_daemon(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config).expanduser())
+    validate_local_path(config)
     settings = watch_settings_from_config(config, args)
     daemon = WatchDaemon(settings)
     local_path = Path(config["local_path"]).expanduser()

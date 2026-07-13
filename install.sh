@@ -55,4 +55,12 @@ install_service_files "$TARGET"
 echo "Safe Sync installed."
 echo "Command: $TARGET"
 echo "Config: $CONFIG"
+case ":$PATH:" in
+  *":$(dirname "$TARGET"):"*)
+    ;;
+  *)
+    echo "Warning: $(dirname "$TARGET") is not in PATH for this shell."
+    echo "Add it to PATH or run: $TARGET"
+    ;;
+esac
 echo "Start daemon: safe-sync start"

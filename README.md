@@ -78,6 +78,8 @@ safe-sync status
 safe-sync logs
 ```
 
+Status includes separate service and sync health fields.
+
 ## Current CLI Test Commands
 
 The local test config lives at:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
+from safe_sync.cli import unsafe_local_path_reason
 from safe_sync.path_filter import should_ignore_watch_event
 
 
@@ -58,3 +59,12 @@ def test_scan_tree_detects_useful_changes(tmp_path):
 
     assert "data/results.csv" in snapshot
     assert "node_modules/pkg/index.js" not in snapshot
+
+
+def test_unsafe_local_path_guard_blocks_broad_paths():
+    home = Path.home().resolve()
+
+    assert unsafe_local_path_reason(Path("/").resolve())
+    assert unsafe_local_path_reason(home)
+    assert unsafe_local_path_reason(home / "projects")
+    assert not unsafe_local_path_reason(home / "test_sync")
