@@ -14,6 +14,7 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 - No tool syncs `.git/` internals.
 - Build artifacts, dependency folders, and caches are ignored.
 - Data, trained models, notebooks, configs, lockfiles, and experiment results are backed up.
+- Metadata preservation is opt-in to avoid needless Dropbox rewrites and rate-limit pressure.
 
 ## Docs
 

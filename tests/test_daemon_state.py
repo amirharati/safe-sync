@@ -108,6 +108,18 @@ def test_selected_folders_respects_enabled_state():
     assert selected_folders(config, "projects")[0]["remote_root"] == "dropbox:computer-backups/test/workstation/projects"
 
 
+def test_folder_config_uses_config_filter_default():
+    config = normalized_config({
+        "machine_id": "workstation",
+        "remote_base": "dropbox:computer-backups/test",
+        "filter_file": "/tmp/custom-filter.txt",
+        "folders": [
+            {"id": "projects", "local_path": "~/test_sync"},
+        ],
+    })
+
+    assert config["folders"][0]["filter_file"] == "/tmp/custom-filter.txt"
+
 def test_registry_doc_lists_machine_owned_folders():
     config = normalized_config({
         "machine_id": "linuxbox",
@@ -153,3 +165,18 @@ def test_folder_snapshots_tracks_multiple_roots(tmp_path):
     assert "a.txt" in snapshots["one"]
     assert "b.txt" in snapshots["two"]
     assert "node_modules/ignored.js" not in snapshots["two"]
+
+
+def test_backup_cmd_metadata_is_opt_in():
+    from safe_sync.cli import backup_cmd
+
+    base = {
+        "rclone_bin": "rclone",
+        "local_path": "~/test_sync",
+        "remote_root": "dropbox:computer-backups/test/mac/test_sync",
+        "trash_root": "dropbox:computer-backups/test/.trash/mac/test_sync",
+        "filter_file": "/tmp/filter.txt",
+    }
+
+    assert "--metadata" not in backup_cmd(base, dry_run=True)
+    assert "--metadata" in backup_cmd({**base, "preserve_metadata": True}, dry_run=True)

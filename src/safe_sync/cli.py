@@ -319,12 +319,14 @@ def backup_cmd(config: dict[str, Any], dry_run: bool) -> list[str]:
         rclone_bin(config), "sync", local, remote,
         "--filter-from", str(filter_file(config)),
         "--backup-dir", trash,
-        "--metadata", "--stats", "10s",
+        "--stats", "10s",
         "--max-duration", f"{int(config.get('rclone_max_duration_seconds', 120))}s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
         "--log-level", "INFO",
     ]
+    if config.get("preserve_metadata"):
+        cmd.append("--metadata")
     if dry_run:
         cmd.append("--dry-run")
     return cmd
@@ -334,12 +336,14 @@ def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool) -> list[
     cmd = [
         rclone_bin(config), "copy", src, dst,
         "--filter-from", str(filter_file(config)),
-        "--metadata", "--stats", "10s",
+        "--stats", "10s",
         "--max-duration", f"{int(config.get('rclone_max_duration_seconds', 120))}s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
         "--log-level", "INFO",
     ]
+    if config.get("preserve_metadata"):
+        cmd.append("--metadata")
     if dry_run:
         cmd.append("--dry-run")
     return cmd
@@ -383,6 +387,7 @@ def default_config(machine: str) -> dict[str, Any]:
         "min_interval_seconds": 120,
         "fallback_interval_seconds": 1800,
         "rate_limit_backoff_seconds": 300,
+        "preserve_metadata": False,
     }
 
 
@@ -867,7 +872,7 @@ def cmd_folders(args: argparse.Namespace) -> int:
             "local_path": args.local_path,
             "remote_path": args.remote_path or f"{machine_id}/{folder_id}",
             "trash_path": args.trash_path or f".trash/{machine_id}/{folder_id}",
-            "filter_file": args.filter_file or str(DEFAULT_FILTER),
+            "filter_file": args.filter_file or str(config.get("filter_file", DEFAULT_FILTER)),
             "enabled": not args.disabled,
         }
         folder.setdefault("remote_root", remote_join(str(config["remote_base"]), str(folder["remote_path"])))
@@ -881,8 +886,20 @@ def cmd_folders(args: argparse.Namespace) -> int:
 
 
 def rclone_capture(config: dict[str, Any], cmd: list[str], input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    guarded_cmd = [
+        rclone_bin(config),
+        *cmd,
+        "--timeout",
+        "30s",
+        "--contimeout",
+        "10s",
+        "--retries",
+        "1",
+        "--low-level-retries",
+        "1",
+    ]
     return subprocess.run(
-        [rclone_bin(config), *cmd],
+        guarded_cmd,
         input=input_text,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

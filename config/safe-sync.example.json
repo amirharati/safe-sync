@@ -31,6 +31,7 @@
   "machine_label": "MacBook",
   "min_interval_seconds": 120,
   "poll_interval_seconds": 5,
+  "preserve_metadata": false,
   "rate_limit_backoff_seconds": 300,
   "rclone_max_duration_seconds": 120,
   "remote_base": "dropbox:computer-backups/test",
