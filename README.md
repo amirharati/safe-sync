@@ -21,6 +21,7 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 - [Operating Model](docs/operations/operating-model.md)
 - [Daemon Design](docs/operations/daemon-design.md)
 - [Test Plan](docs/operations/test-plan.md)
+- [Dogfood Report](docs/operations/dogfood-report.md)
 - [Decisions](docs/decisions/0001-safe-sync-model.md)
 
 ## First Test Folder

@@ -308,11 +308,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = load_config(Path(args.config).expanduser())
     status_path = Path(config.get("status_path", DEFAULT_STATUS)).expanduser()
     if status_path.exists():
-        print(status_path.read_text(), end="")
+        try:
+            sync_state = json.loads(status_path.read_text())
+        except json.JSONDecodeError:
+            sync_state = {"state": "unknown", "status_path": str(status_path), "error": "status JSON is invalid"}
     else:
-        print(json.dumps({"state": "unknown", "status_path": str(status_path)}, indent=2))
-    print(service_status_text())
-    print(f"log: {log_path(config)}")
+        sync_state = {"state": "unknown", "status_path": str(status_path)}
+
+    service_text = service_status_text()
+    service_state = service_text.split(":", 1)[1].strip() if ":" in service_text else service_text
+    print(json.dumps({
+        "service_state": service_state,
+        "sync_state": sync_state,
+        "log": str(log_path(config)),
+    }, indent=2, sort_keys=True))
     return 0
 
 
