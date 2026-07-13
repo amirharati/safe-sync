@@ -1,0 +1,17 @@
+{
+  "command_timeout_seconds": 180,
+  "debounce_seconds": 20,
+  "fallback_interval_seconds": 1800,
+  "filter_file": "/Users/amir/.safe-sync/filter.txt",
+  "local_path": "/Users/amir/test_sync",
+  "lock_file": "/Users/amir/.local/state/safe-sync/safe-sync.lock",
+  "log_dir": "/Users/amir/.local/log/safe-sync",
+  "machine": "macbook",
+  "min_interval_seconds": 120,
+  "poll_interval_seconds": 5,
+  "rate_limit_backoff_seconds": 300,
+  "rclone_max_duration_seconds": 120,
+  "remote_root": "dropbox:computer-backups/test/macbook/test_sync",
+  "status_path": "/Users/amir/.local/state/safe-sync/status.json",
+  "trash_root": "dropbox:computer-backups/.trash/test/macbook"
+}

@@ -1,0 +1,131 @@
+# Safe Sync filter
+#
+# Exclude reinstallable/generated build, dependency, and cache artifacts.
+# Keep source, docs, configs, lockfiles, data, models, checkpoints, notebooks,
+# experiment outputs, and logs.
+
+# VCS internals
+- **/.git/**
+
+# OS/editor noise
+- ._*
+- .DS_Store
+- .fseventsd
+- Thumbs.db
+- desktop.ini
+- *.tmp
+- *.temp
+- *.swp
+- *.swo
+- ~$*
+- **/*.pid
+- **/*.sock
+
+# Dependency folders and package caches
+- node_modules/**
+- **/node_modules/**
+- .pnpm-store/**
+- **/.pnpm-store/**
+- .yarn/cache/**
+- **/.yarn/cache/**
+- .yarn/unplugged/**
+- **/.yarn/unplugged/**
+- .bun/**
+- **/.bun/**
+- vendor/bundle/**
+- **/vendor/bundle/**
+- Pods/**
+- **/Pods/**
+- .venv/**
+- **/.venv/**
+- venv/**
+- **/venv/**
+- __pypackages__/**
+- **/__pypackages__/**
+- .eggs/**
+- **/.eggs/**
+- **/*.egg-info/**
+
+# Build outputs and framework caches
+- dist/**
+- **/dist/**
+- build/**
+- **/build/**
+- out/**
+- **/out/**
+- coverage/**
+- **/coverage/**
+- .nyc_output/**
+- **/.nyc_output/**
+- .next/**
+- **/.next/**
+- .nuxt/**
+- **/.nuxt/**
+- .svelte-kit/**
+- **/.svelte-kit/**
+- .angular/cache/**
+- **/.angular/cache/**
+- .webpack/**
+- **/.webpack/**
+- .serverless/**
+- **/.serverless/**
+- .aws-sam/**
+- **/.aws-sam/**
+- .expo/**
+- **/.expo/**
+- .cache/**
+- **/.cache/**
+- .pytest_cache/**
+- **/.pytest_cache/**
+- .mypy_cache/**
+- **/.mypy_cache/**
+- .ruff_cache/**
+- **/.ruff_cache/**
+- .tox/**
+- **/.tox/**
+- .nox/**
+- **/.nox/**
+- .parcel-cache/**
+- **/.parcel-cache/**
+- .turbo/**
+- **/.turbo/**
+- .vite/**
+- **/.vite/**
+- .gradle/**
+- **/.gradle/**
+- target/**
+- **/target/**
+- .dart_tool/**
+- **/.dart_tool/**
+- **/.packages
+- DerivedData/**
+- **/DerivedData/**
+- CMakeFiles/**
+- **/CMakeFiles/**
+- **/cmake-build-*/**
+- buck-out/**
+- **/buck-out/**
+- bazel-bin/**
+- **/bazel-bin/**
+- bazel-out/**
+- **/bazel-out/**
+- bazel-testlogs/**
+- **/bazel-testlogs/**
+- .stack-work/**
+- **/.stack-work/**
+- .cabal-sandbox/**
+- **/.cabal-sandbox/**
+- .ipynb_checkpoints/**
+- **/.ipynb_checkpoints/**
+
+# Compiled/intermediate artifacts
+- __pycache__/**
+- **/__pycache__/**
+- **/*.pyc
+- **/*.pyo
+- **/*.o
+- **/*.obj
+- **/*.so
+- **/*.dylib
+- **/*.dll
+- **/*.class

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+.env/
+
+# OS/editor noise
+.DS_Store
+._*
+*.swp
+*.swo
+*~
+
+# Runtime/local generated files
+.safe-sync/
+*.log
+*.pid
+*.sock
+
+# Build artifacts
+dist/
+build/
+out/
+*.egg-info/
+
+# Generated service files are installed by ./install.sh, not kept in repo
+install/
