@@ -168,6 +168,39 @@ Migrate an older config, if needed:
 safe-sync migrate-config
 ```
 
+## Tray UI Development
+
+The tray UI lives under `ui/` and is a Tauri v2 app. It is currently a placeholder tray/menu skeleton; real Safe Sync status wiring is the next checkpoint.
+
+Install UI dependencies once:
+
+```bash
+cd /path/to/safe-sync/ui
+npm install
+```
+
+Check the frontend build:
+
+```bash
+npm run build
+```
+
+Check the Rust/Tauri side:
+
+```bash
+cd src-tauri
+cargo check
+```
+
+Run the tray app during development:
+
+```bash
+cd /path/to/safe-sync/ui
+npm run tauri dev
+```
+
+The UI dependency lockfiles are committed. Generated folders such as `ui/node_modules/`, `ui/dist/`, and `ui/src-tauri/target/` are ignored.
+
 ## Install Internals
 
 Service templates are rendered from `src/safe_sync/service.py`; generated launchd/systemd files are not kept in the repo.

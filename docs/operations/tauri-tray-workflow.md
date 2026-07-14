@@ -75,12 +75,23 @@ Goal: create the smallest Tauri app under `ui/` and understand the generated str
 
 Expected behavior:
 
-- App builds/runs locally.
+- App builds locally with `npm run build`.
+- Rust/Tauri checks with `cd ui/src-tauri && cargo check`.
 - No real sync actions yet.
-- A placeholder tray menu appears.
-- A simple window can open for diagnostics if needed.
+- A placeholder tray menu appears when run with `npm run tauri dev`.
+- A small status window can open from the tray for diagnostics.
 
-Review point: inspect `ui/package.json`, `ui/src-tauri/tauri.conf.json`, and `ui/src-tauri/src/` together.
+Current files to review:
+
+- `ui/package.json` for npm scripts and JS dependencies.
+- `ui/package-lock.json` for reproducible npm installs.
+- `ui/src-tauri/Cargo.toml` for Rust/Tauri dependencies.
+- `ui/src-tauri/Cargo.lock` for reproducible Rust dependency resolution.
+- `ui/src-tauri/tauri.conf.json` for app identity and hidden status window config.
+- `ui/src-tauri/src/lib.rs` for tray menu setup.
+- `ui/src/main.ts`, `ui/index.html`, and `ui/src/styles.css` for the placeholder status window.
+
+Review point: inspect the generated `ui/` structure together before wiring real Safe Sync commands.
 
 ### Checkpoint 3: Tray Reads Status
 
