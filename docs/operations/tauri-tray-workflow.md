@@ -52,10 +52,18 @@ safe-sync autostart backend disable
 
 Expected behavior:
 
-- macOS uses the existing launchd service definition.
-- Linux uses the existing systemd user service definition.
+- macOS uses the existing launchd service definition plus `launchctl enable/disable` for persistent autostart state.
+- Linux returns a clear TODO/unsupported message for now.
 - Windows returns a clear TODO/unsupported message for now.
-- Tests cover command routing and platform-specific command construction where practical.
+- Tests cover macOS command routing and unsupported-platform behavior.
+
+Current macOS output shape:
+
+```text
+backend autostart: enabled (running)
+backend autostart: enabled (stopped)
+backend autostart: not installed
+```
 
 Review point: confirm command names and output before UI calls them.
 

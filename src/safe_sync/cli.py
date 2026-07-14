@@ -600,17 +600,85 @@ def launchd_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / "com.safe-sync.daemon.plist"
 
 
+def launchd_label() -> str:
+    return "com.safe-sync.daemon"
+
+
+def launchd_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def launchd_service_target() -> str:
+    return f"{launchd_domain()}/{launchd_label()}"
+
+
+def launchd_disabled() -> bool | None:
+    result = subprocess.run(["launchctl", "print-disabled", launchd_domain()], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if result.returncode != 0:
+        return None
+    pattern = rf'"{re.escape(launchd_label())}"\s*=>\s*(true|false)'
+    match = re.search(pattern, result.stdout or "")
+    if not match:
+        return False
+    return match.group(1) == "true"
+
+
 def service_status_text() -> str:
     system = os_name()
     if system == "Darwin":
-        label = "com.safe-sync.daemon"
-        result = subprocess.run(["launchctl", "list", label], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        result = subprocess.run(["launchctl", "list", launchd_label()], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         return "service: running" if result.returncode == 0 else "service: stopped"
     if system == "Linux":
         result = subprocess.run(["systemctl", "--user", "is-active", "safe-sync.service"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         state = (result.stdout or "unknown").strip()
         return f"service: {state}"
     return f"service: unsupported OS {system}"
+
+
+def backend_autostart_status_text(system: str | None = None) -> str:
+    system = system or os_name()
+    if system == "Darwin":
+        plist = launchd_plist_path()
+        if not plist.exists():
+            return "backend autostart: not installed"
+        disabled = launchd_disabled()
+        service_state = service_status_text().split(":", 1)[1].strip()
+        if disabled is True:
+            return f"backend autostart: disabled ({service_state})"
+        if disabled is False:
+            return f"backend autostart: enabled ({service_state})"
+        return f"backend autostart: unknown ({service_state})"
+    if system in {"Linux", "Windows"}:
+        return f"backend autostart: unsupported OS {system} (TODO)"
+    return f"backend autostart: unsupported OS {system}"
+
+
+def backend_autostart_cmd(action: str, system: str | None = None) -> list[str]:
+    system = system or os_name()
+    if system != "Darwin":
+        raise SystemExit(f"Backend autostart {action} is TODO on {system}; macOS is supported first.")
+    if not launchd_plist_path().exists():
+        raise SystemExit("Service is not installed. Run ./install.sh from the repo first.")
+    if action == "enable":
+        return ["launchctl", "enable", launchd_service_target()]
+    if action == "disable":
+        return ["launchctl", "disable", launchd_service_target()]
+    raise SystemExit(f"Unknown backend autostart action: {action}")
+
+
+def cmd_autostart(args: argparse.Namespace) -> int:
+    if args.autostart_target != "backend":
+        raise SystemExit(f"Unknown autostart target: {args.autostart_target}")
+    if args.autostart_action == "status":
+        print(backend_autostart_status_text())
+        return 0
+    cmd = backend_autostart_cmd(args.autostart_action)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.returncode == 0:
+        print(backend_autostart_status_text())
+    return int(result.returncode)
 
 
 def require_service_installed() -> None:
@@ -974,7 +1042,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{backup,start,stop,restart,status,logs,folders,computers,pull,list,doctor}",
+        metavar="{backup,start,stop,restart,status,logs,autostart,folders,computers,pull,list,doctor}",
     )
 
     init = sub.add_parser("init-config")
@@ -1009,6 +1077,13 @@ def parser() -> argparse.ArgumentParser:
 
     restart = sub.add_parser("restart")
     restart.set_defaults(func=cmd_restart)
+
+    autostart = sub.add_parser("autostart")
+    autostart_sub = autostart.add_subparsers(dest="autostart_target", required=True)
+    backend = autostart_sub.add_parser("backend")
+    backend_sub = backend.add_subparsers(dest="autostart_action", required=True)
+    for action in ("status", "enable", "disable"):
+        backend_sub.add_parser(action).set_defaults(func=cmd_autostart)
 
     pull = sub.add_parser("pull")
     pull.add_argument("source", help="Full rclone source path, e.g. dropbox:computer-backups/test/linux/test_sync/data")

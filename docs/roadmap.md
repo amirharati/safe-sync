@@ -56,7 +56,7 @@ Implement watcher-first backup triggering:
 Add install helpers:
 
 - Repo-level `./install.sh` command for service install and `safe-sync start` / `safe-sync stop` commands for daemon control.
-- Windows Task Scheduler later if needed.
+- Linux autostart controls and Windows Task Scheduler later if needed.
 
 The scheduler runs the watch daemon, not raw backup, after the watch daemon is reviewed.
 
@@ -85,7 +85,7 @@ Build a thin Tauri tray/menu app:
 - Menu actions for start daemon, stop daemon, backup now, open logs, refresh, and quit tray.
 - Keep sync logic in the existing CLI/daemon only.
 - Split autostart into backend daemon autostart and tray UI autostart.
-- Add backend autostart CLI commands before the tray depends on them.
+- Add backend autostart CLI commands before the tray depends on them. macOS is first; Linux/Windows remain backlog.
 
 Work through documented checkpoints in `docs/operations/tauri-tray-workflow.md`.
 

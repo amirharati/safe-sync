@@ -84,6 +84,16 @@ safe-sync logs
 
 Status includes separate service and sync health fields.
 
+Check backend daemon autostart on macOS:
+
+```bash
+safe-sync autostart backend status
+safe-sync autostart backend enable
+safe-sync autostart backend disable
+```
+
+Linux and Windows backend autostart controls are TODO.
+
 ## Current CLI Test Commands
 
 The local test config lives at:
