@@ -76,18 +76,23 @@ Write machine-readable status:
 
 Keep human logs in a stable path.
 
-## Phase 6: Minimal UI
+## Phase 6: Tray Status UI
 
-Optional thin tray/menu UI:
+Build a thin Tauri tray/menu app:
 
-- Read status JSON.
-- Show idle/syncing/error.
-- Buttons for sync now, open log, pause/resume.
-- No sync logic inside the UI.
+- Read `safe-sync status` or status JSON.
+- Show ok/syncing/stopped/stale/error.
+- Menu actions for start daemon, stop daemon, backup now, open logs, refresh, and quit tray.
+- Keep sync logic in the existing CLI/daemon only.
+- Split autostart into backend daemon autostart and tray UI autostart.
+- Add backend autostart CLI commands before the tray depends on them.
+
+Work through documented checkpoints in `docs/operations/tauri-tray-workflow.md`.
 
 ## Not Planned Initially
 
 - Custom sync engine.
+- Making the daemon depend on the tray UI.
 - Complex conflict browser.
 - Automatic multi-way live sync for all projects.
 - Editing rclone internals.

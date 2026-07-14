@@ -16,6 +16,7 @@ Success means:
 - Data, models, notebooks, configs, and real work are preserved.
 - Build artifacts and dependency/cache folders are ignored.
 - The user can understand what the tool does by reading small scripts and docs.
+- The user can see sync health from a small tray/menu bar UI without trusting a hidden black box.
 
 ## Non-Goals
 
@@ -24,6 +25,7 @@ Success means:
 - Build a large desktop product.
 - Guarantee live two-way sync across all machines.
 - Hide behavior behind a complicated tray app.
+- Make the backend daemon depend on the tray app being open.
 
 ## Personas
 
@@ -66,6 +68,18 @@ dropbox:computer-backups/shared
 ```
 
 This is for files that are explicitly meant to move between machines outside normal backups.
+
+
+### Tray Status
+
+Show Safe Sync health from the desktop tray/menu bar.
+
+Default behavior:
+
+- Reads existing backend status.
+- Shows whether the daemon is running, syncing, stopped, stale, or failing.
+- Offers explicit actions for start, stop, backup now, logs, and quit tray.
+- Keeps backend daemon autostart separate from tray UI autostart.
 
 ## Safety Principles
 

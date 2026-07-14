@@ -24,6 +24,7 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 - [Daemon Design](docs/operations/daemon-design.md)
 - [Test Plan](docs/operations/test-plan.md)
 - [Dogfood Report](docs/operations/dogfood-report.md)
+- [Tauri Tray Workflow](docs/operations/tauri-tray-workflow.md)
 - [Decisions](docs/decisions/0001-safe-sync-model.md)
 
 ## First Test Folder
@@ -44,6 +45,7 @@ bin/safe-sync                 Thin executable launcher only
 src/safe_sync/cli.py          CLI commands and rclone guardrails
 src/safe_sync/daemon.py       Polling watch daemon state and scan helpers
 src/safe_sync/path_filter.py  Watch-event ignore helper
+ui/                           Planned Tauri tray app workspace
 tests/                        Unit tests for daemon state behavior
 ```
 
