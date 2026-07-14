@@ -7,6 +7,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WindowEvent, Wry};
@@ -646,10 +647,7 @@ pub fn run() {
                     &quit,
                 ],
             )?;
-            let icon = app
-                .default_window_icon()
-                .cloned()
-                .expect("Safe Sync tray icon missing");
+            let icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
 
             refresh_menu_items(&status, &toggle, &backup, &logs);
             if let Ok(mut guard) = app.state::<AppState>().status_item.lock() {

@@ -9,6 +9,8 @@ The UI has two surfaces:
 
 The macOS tray surface is a borderless native window containing the Tauri WebView. AppKit positions it from the status item's native window coordinates, avoiding both the `NSPopover` arrow and Tauri's unreliable first-show positioning path.
 
+The tray uses `src-tauri/icons/tray-icon.png`, a tightly framed high-contrast version of the Safe Sync mark designed for macOS's 18-point menu-bar rendering. The normal application and installer icons remain separate.
+
 ## Install
 
 ```bash
