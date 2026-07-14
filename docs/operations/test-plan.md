@@ -5,17 +5,17 @@
 Use this local folder for initial testing:
 
 ```text
-~/test_sync
+~/safe-sync-test
 ```
 
-Do not use `~/projects` during early implementation.
+Do not use a broad or important work folder during early implementation.
 
 ## Test Remote
 
 Use a disposable remote path:
 
 ```text
-dropbox:computer-backups/test/macbook/test_sync
+dropbox:computer-backups/test/macbook/safe-sync-test
 ```
 
 Trash for this test should go under:
@@ -48,8 +48,8 @@ dist/bundle.js
 Dry run backup:
 
 ```bash
-rclone sync ~/test_sync dropbox:computer-backups/test/macbook/test_sync \
-  --filter-from ~/projects/safe-sync/config/filter.txt \
+rclone sync ~/safe-sync-test dropbox:computer-backups/test/macbook/safe-sync-test \
+  --filter-from /path/to/safe-sync/config/filter.txt \
   --backup-dir dropbox:computer-backups/.trash/test/macbook/DRY-RUN \
   --dry-run
 ```
@@ -58,7 +58,7 @@ Expected:
 
 - Includes `README.md`, `src/app.py`, `data/results.csv`, `models/model.pt`.
 - Excludes `node_modules/`, `.venv/`, and `dist/`.
-- Does not touch `~/projects`.
+- Does not touch broad or important work folders.
 
 Real test backup should only happen after dry-run output is reviewed.
 

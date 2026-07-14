@@ -44,8 +44,8 @@ Windows project -> dropbox:computer-backups/windowsbox/projects
 Cross-computer transfer is explicit:
 
 ```bash
-safe-sync pull linuxbox projects/my_exp ~/projects/from-linux/my_exp
-safe-sync push-shared ~/projects/report shared/report
+safe-sync pull linuxbox projects/my_exp `~/projects`/from-linux/my_exp
+safe-sync push-shared `~/projects`/report shared/report
 ```
 
 Automatic live two-way sync is reserved only for small folders that truly need it.

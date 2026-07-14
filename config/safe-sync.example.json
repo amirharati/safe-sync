@@ -7,11 +7,11 @@
     {
       "enabled": true,
       "filter_file": "~/.safe-sync/filter.txt",
-      "id": "test_sync",
-      "label": "Test Sync",
-      "local_path": "~/test_sync",
-      "remote_path": "macbook/test_sync",
-      "trash_path": ".trash/macbook/test_sync"
+      "id": "safe-sync-test",
+      "label": "Safe Sync Test",
+      "local_path": "~/safe-sync-test",
+      "remote_path": "macbook/safe-sync-test",
+      "trash_path": ".trash/macbook/safe-sync-test"
     },
     {
       "enabled": false,

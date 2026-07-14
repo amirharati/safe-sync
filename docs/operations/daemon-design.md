@@ -61,7 +61,7 @@ Manual backup should bypass watcher debounce, but it should still respect locks 
 Initial daemon testing should be against:
 
 ```text
-~/test_sync
+~/safe-sync-test
 ```
 
 The first daemon test should run in dry-run mode:
@@ -104,7 +104,7 @@ It installs the single `safe-sync` command, renders the macOS LaunchAgent defini
 The repo is the install unit:
 
 ```bash
-cd ~/projects/safe-sync
+cd /path/to/safe-sync
 ./install.sh
 ```
 

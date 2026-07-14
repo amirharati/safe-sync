@@ -6,7 +6,7 @@ A full end-to-end dogfood test was run from an isolated temporary local root.
 
 - Temp local root: `/tmp/safe-sync-dogfood.hwmqEw`
 - Temp config under that root; removed after the run.
-- Dropbox remote: `dropbox:computer-backups/test/codex-dogfood-hwmqEw/test_sync`
+- Dropbox remote: `dropbox:computer-backups/test/codex-dogfood-hwmqEw/safe-sync-test`
 - Dropbox trash path verified: `dropbox:computer-backups/.trash/test/codex-dogfood-hwmqEw/2026-07-13T00-26-48`
 - Real sync folders were not touched.
 

@@ -21,7 +21,7 @@ Each computer backs up each enabled local folder to that machine's owned remote 
 Example shape for Mac:
 
 ```text
-~/test_sync -> dropbox:computer-backups/test/<machine_id>/test_sync
+~/safe-sync-test -> dropbox:computer-backups/test/<machine_id>/safe-sync-test
 ```
 
 Under the hood Safe Sync uses `rclone sync` with `--backup-dir`, so local deletes can be reflected in that machine's backup, but the old remote file is moved to trash first.
@@ -31,7 +31,7 @@ Under the hood Safe Sync uses `rclone sync` with `--backup-dir`, so local delete
 Pull/copy from another machine backup is explicit. Use `safe-sync pull` with a full rclone source path.
 
 ```bash
-safe-sync pull dropbox:computer-backups/test/linuxbox/projects/my_exp ~/projects/from-linux/my_exp
+safe-sync pull dropbox:computer-backups/test/linuxbox/projects/my_exp `~/projects`/from-linux/my_exp
 ```
 
 This uses copy semantics and does not delete local files.
@@ -41,7 +41,7 @@ This uses copy semantics and does not delete local files.
 Trash preserves original relative paths:
 
 ```text
-dropbox:computer-backups/test/.trash/macbook/test_sync/2026-07-12T18-45-00/labs/mnist/data/train.csv
+dropbox:computer-backups/test/.trash/macbook/safe-sync-test/2026-07-12T18-45-00/labs/mnist/data/train.csv
 ```
 
 Restore target:

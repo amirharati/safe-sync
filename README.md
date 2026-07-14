@@ -32,10 +32,8 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 Initial development and testing uses:
 
 ```text
-~/test_sync
+~/safe-sync-test
 ```
-
-Do not point early tests at `~/projects`.
 
 
 ## Code Layout
@@ -60,7 +58,7 @@ Safe Sync is macOS-first right now. Linux and Windows service install are explic
 From a downloaded/cloned repo:
 
 ```bash
-cd ~/projects/safe-sync
+cd /path/to/safe-sync
 ./install.sh
 ```
 
@@ -149,7 +147,7 @@ safe-sync backup --dry-run
 Dry-run backup for one folder:
 
 ```bash
-safe-sync backup test_sync --dry-run
+safe-sync backup safe-sync-test --dry-run
 ```
 
 Run a real backup:
@@ -184,4 +182,4 @@ Linux and Windows service install/control remain TODO/backlog.
 
 ## Test Folder Reminder
 
-Initial development and manual testing should still use `~/test_sync` or another small explicit folder. Do not point Safe Sync at broad folders like `~` or `~/projects` until the folder-specific config is intentionally reviewed.
+Initial development and manual testing should still use `~/safe-sync-test` or another small explicit folder. Do not point Safe Sync at broad folders like `~`, a whole home directory, or an important work root until the folder-specific config is intentionally reviewed.
