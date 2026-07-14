@@ -8,11 +8,13 @@
   </head>
   <body>
     <main class="shell">
-      <section class="status-panel">
-        <p class="eyebrow">Tray status</p>
-        <div class="title-row">
-          <h1>Safe Sync</h1>
-          <span class="status-pill" data-status-state data-health="unknown">Checking</span>
+      <section class="status-panel" aria-live="polite">
+        <div class="status-header">
+          <span class="status-light" data-status-dot data-tone="unknown" aria-label="Checking"></span>
+          <div>
+            <p class="eyebrow">Safe Sync</p>
+            <h1 data-status-state data-health="unknown">Checking</h1>
+          </div>
         </div>
         <p class="reason" data-status-reason>Reading backend status</p>
         <dl>
@@ -34,9 +36,8 @@
           </div>
         </dl>
         <div class="actions" aria-label="Backend controls">
-          <button type="button" data-action="refresh">Refresh</button>
-          <button type="button" data-action="start">Start</button>
-          <button type="button" data-action="stop">Stop</button>
+          <button type="button" class="secondary" data-action="refresh">Refresh</button>
+          <button type="button" class="primary" data-action="toggle-backend" data-intent="start">Start Backend</button>
         </div>
       </section>
     </main>

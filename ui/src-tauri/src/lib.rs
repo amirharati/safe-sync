@@ -20,6 +20,7 @@ struct SafeSyncStatus {
 
 struct AppState {
     status_item: Mutex<Option<MenuItem<Wry>>>,
+    toggle_item: Mutex<Option<MenuItem<Wry>>>,
 }
 
 fn safe_sync_binary() -> String {
@@ -66,13 +67,29 @@ fn read_status() -> Result<SafeSyncStatus, String> {
     serde_json::from_str(&stdout).map_err(|err| format!("safe-sync status returned invalid JSON: {err}"))
 }
 
+fn sync_state(status: &SafeSyncStatus) -> Option<&str> {
+    status.sync_state.get("state").and_then(Value::as_str)
+}
+
+fn should_stop_backend(status: &SafeSyncStatus) -> bool {
+    status.service_state == "running"
+}
+
+fn toggle_label(status: &SafeSyncStatus) -> &'static str {
+    if should_stop_backend(status) {
+        "Stop Backend"
+    } else {
+        "Start Backend"
+    }
+}
+
 fn status_label(status: &SafeSyncStatus) -> String {
     if status.health == "error" {
         return "Safe Sync: Error".to_string();
     }
 
     match status.service_state.as_str() {
-        "running" => match status.sync_state.get("state").and_then(Value::as_str) {
+        "running" => match sync_state(status) {
             Some("syncing") => "Safe Sync: Syncing".to_string(),
             Some("backoff") => "Safe Sync: Backoff".to_string(),
             Some("cooldown") => "Safe Sync: Cooling down".to_string(),
@@ -110,10 +127,16 @@ fn refresh_tray_label(status_item: &MenuItem<Wry>) -> SafeSyncStatus {
     }
 }
 
-fn update_state_label(state: &State<AppState>, status: &SafeSyncStatus) {
+fn update_menu_state(state: &State<AppState>, status: &SafeSyncStatus) {
     if let Ok(guard) = state.status_item.lock() {
         if let Some(item) = guard.as_ref() {
             let _ = item.set_text(status_label(status));
+        }
+    }
+    if let Ok(guard) = state.toggle_item.lock() {
+        if let Some(item) = guard.as_ref() {
+            let _ = item.set_text(toggle_label(status));
+            let _ = item.set_enabled(status.service_state != "unknown");
         }
     }
 }
@@ -121,7 +144,7 @@ fn update_state_label(state: &State<AppState>, status: &SafeSyncStatus) {
 #[tauri::command]
 fn get_status(state: State<AppState>) -> SafeSyncStatus {
     let status = read_status().unwrap_or_else(error_status);
-    update_state_label(&state, &status);
+    update_menu_state(&state, &status);
     status
 }
 
@@ -131,7 +154,7 @@ fn control_backend(action: String, state: State<AppState>) -> Result<SafeSyncSta
         "start" | "stop" | "restart" => {
             run_safe_sync(&[action.as_str()])?;
             let status = read_status().unwrap_or_else(error_status);
-            update_state_label(&state, &status);
+            update_menu_state(&state, &status);
             Ok(status)
         }
         _ => Err(format!("unknown backend action: {action}")),
@@ -143,14 +166,14 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             status_item: Mutex::new(None),
+            toggle_item: Mutex::new(None),
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![get_status, control_backend])
         .setup(|app| {
             let status = MenuItem::with_id(app, "status", "Safe Sync: Checking", false, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Show Status Window", true, None::<&str>)?;
-            let start = MenuItem::with_id(app, "start", "Start Backend", true, None::<&str>)?;
-            let stop = MenuItem::with_id(app, "stop", "Stop Backend", true, None::<&str>)?;
+            let toggle = MenuItem::with_id(app, "backend-toggle", "Start Backend", true, None::<&str>)?;
             let refresh = MenuItem::with_id(app, "refresh", "Refresh Status", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Tray", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -162,8 +185,7 @@ pub fn run() {
                     &show,
                     &refresh,
                     &separator,
-                    &start,
-                    &stop,
+                    &toggle,
                     &separator,
                     &quit,
                 ],
@@ -173,11 +195,16 @@ pub fn run() {
                 .cloned()
                 .expect("Safe Sync tray icon missing");
 
-            refresh_tray_label(&status);
+            let initial_status = refresh_tray_label(&status);
+            let _ = toggle.set_text(toggle_label(&initial_status));
             if let Ok(mut guard) = app.state::<AppState>().status_item.lock() {
                 guard.replace(status.clone());
             }
+            if let Ok(mut guard) = app.state::<AppState>().toggle_item.lock() {
+                guard.replace(toggle.clone());
+            }
             let status_item = status.clone();
+            let toggle_item = toggle.clone();
 
             TrayIconBuilder::new()
                 .tooltip("Safe Sync")
@@ -192,19 +219,21 @@ pub fn run() {
                         }
                     }
                     "refresh" => {
-                        refresh_tray_label(&status_item);
+                        let status = refresh_tray_label(&status_item);
+                        let _ = toggle_item.set_text(toggle_label(&status));
                     }
-                    "start" => {
-                        if run_safe_sync(&["start"]).is_err() {
-                            let _ = status_item.set_text("Safe Sync: Start failed");
+                    "backend-toggle" => {
+                        let before = refresh_tray_label(&status_item);
+                        let action = if should_stop_backend(&before) { "stop" } else { "start" };
+                        if run_safe_sync(&[action]).is_err() {
+                            let _ = status_item.set_text(if action == "stop" {
+                                "Safe Sync: Stop failed"
+                            } else {
+                                "Safe Sync: Start failed"
+                            });
                         }
-                        refresh_tray_label(&status_item);
-                    }
-                    "stop" => {
-                        if run_safe_sync(&["stop"]).is_err() {
-                            let _ = status_item.set_text("Safe Sync: Stop failed");
-                        }
-                        refresh_tray_label(&status_item);
+                        let after = refresh_tray_label(&status_item);
+                        let _ = toggle_item.set_text(toggle_label(&after));
                     }
                     "quit" => {
                         app.exit(0);
