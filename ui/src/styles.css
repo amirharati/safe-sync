@@ -18,6 +18,28 @@ body {
   min-height: 100vh;
 }
 
+button {
+  border: 1px solid #c8d0d8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #15171a;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  min-height: 32px;
+  padding: 0 12px;
+}
+
+button:hover:not(:disabled) {
+  border-color: #8a97a6;
+  background: #f8fafc;
+}
+
+button:disabled {
+  color: #8a97a6;
+  cursor: wait;
+}
+
 .shell {
   min-height: 100vh;
   display: grid;
@@ -26,7 +48,7 @@ body {
 }
 
 .status-panel {
-  width: min(100%, 360px);
+  width: min(100%, 380px);
   border: 1px solid #d8dde3;
   border-radius: 8px;
   background: #ffffff;
@@ -41,10 +63,55 @@ body {
   text-transform: uppercase;
 }
 
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
 h1 {
-  margin: 0 0 18px;
+  margin: 0;
   font-size: 24px;
   font-weight: 650;
+}
+
+.status-pill {
+  border: 1px solid #d8dde3;
+  border-radius: 999px;
+  background: #f6f8fa;
+  color: #46515f;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 9px;
+  white-space: nowrap;
+}
+
+.status-pill[data-health="ok"] {
+  border-color: #b7dcc4;
+  background: #effaf3;
+  color: #176c35;
+}
+
+.status-pill[data-health="stopped"],
+.status-pill[data-health="stale"] {
+  border-color: #e8d39e;
+  background: #fff8e8;
+  color: #7a5600;
+}
+
+.status-pill[data-health="error"] {
+  border-color: #efb5b5;
+  background: #fff1f1;
+  color: #a12222;
+}
+
+.reason {
+  min-height: 20px;
+  margin: 0 0 16px;
+  color: #5f6b7a;
+  font-size: 13px;
 }
 
 dl {
@@ -67,10 +134,17 @@ dt {
 
 dd {
   margin: 0;
+  min-width: 0;
   text-align: right;
 }
 
-code {
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 0.92em;
+.path {
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
 }

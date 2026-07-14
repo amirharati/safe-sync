@@ -97,32 +97,35 @@ Review point: inspect the generated `ui/` structure together before wiring real 
 
 Goal: tray shows real Safe Sync health.
 
-Expected behavior:
+Current behavior:
 
-- Poll `safe-sync status` or read status JSON every few seconds.
-- Map status to simple UI states:
-  - ok
-  - syncing
-  - stopped
-  - stale
-  - error
-  - unknown
-- Menu shows last success/error and log path.
+- Rust/Tauri runs `safe-sync status` and parses the JSON response.
+- The tray label maps `service_state` plus `sync_state.state` to simple labels such as stopped, watching, syncing, backoff, cooldown, and error.
+- The status window can refresh the same status through a Tauri command.
+- The status window shows health reason, backend service state, sync state, daemon seen time, and log path.
 
-Review point: verify status mapping before adding controls.
+Review point: verify the labels feel clear before adding richer history or settings.
 
 ### Checkpoint 4: Tray Controls Backend
 
 Goal: tray menu controls the existing backend safely.
 
-Menu actions:
+Current behavior:
 
-- Start daemon -> `safe-sync start`
-- Stop daemon -> `safe-sync stop`
+- Start Backend -> `safe-sync start`
+- Stop Backend -> `safe-sync stop`
+- Refresh Status -> `safe-sync status`
+- Show Status Window -> opens the hidden diagnostics window
+- Quit Tray -> quits the tray app only
+
+The status window also exposes Start, Stop, and Refresh buttons through the same Tauri command bridge. These actions do not perform sync logic directly; they only call the existing CLI.
+
+Still pending for later checkpoints:
+
 - Backup now -> `safe-sync backup`
 - Open logs -> open current log path
-- Refresh -> re-read status
-- Quit -> quit tray only
+- Periodic refresh/polling while the tray is running
+- Tray icon state variants
 
 Review point: confirm no action deletes files or bypasses backend guardrails.
 
