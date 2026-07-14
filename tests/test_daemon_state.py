@@ -7,12 +7,11 @@ from safe_sync.cli import (
     normalized_config,
     registry_doc,
     registry_path,
-    backend_autostart_cmd,
-    backend_autostart_status_text,
     selected_folders,
     unsafe_local_path_reason,
 )
 from safe_sync.path_filter import should_ignore_watch_event
+from safe_sync.service import backend_autostart_cmd, backend_autostart_status_text
 
 
 def test_debounce_waits_for_quiet_window():
@@ -185,7 +184,7 @@ def test_backup_cmd_metadata_is_opt_in():
 
 
 def test_backend_autostart_status_mac_not_installed(monkeypatch, tmp_path):
-    monkeypatch.setattr("safe_sync.cli.launchd_plist_path", lambda: tmp_path / "missing.plist")
+    monkeypatch.setattr("safe_sync.service.launchd_plist_path", lambda: tmp_path / "missing.plist")
 
     assert backend_autostart_status_text("Darwin") == "backend autostart: not installed"
 
@@ -193,9 +192,9 @@ def test_backend_autostart_status_mac_not_installed(monkeypatch, tmp_path):
 def test_backend_autostart_status_mac_enabled(monkeypatch, tmp_path):
     plist = tmp_path / "com.safe-sync.daemon.plist"
     plist.write_text("plist")
-    monkeypatch.setattr("safe_sync.cli.launchd_plist_path", lambda: plist)
-    monkeypatch.setattr("safe_sync.cli.launchd_disabled", lambda: False)
-    monkeypatch.setattr("safe_sync.cli.service_status_text", lambda: "service: running")
+    monkeypatch.setattr("safe_sync.service.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("safe_sync.service.launchd_disabled", lambda: False)
+    monkeypatch.setattr("safe_sync.service.service_status_text", lambda: "service: running")
 
     assert backend_autostart_status_text("Darwin") == "backend autostart: enabled (running)"
 
@@ -203,9 +202,9 @@ def test_backend_autostart_status_mac_enabled(monkeypatch, tmp_path):
 def test_backend_autostart_status_mac_disabled(monkeypatch, tmp_path):
     plist = tmp_path / "com.safe-sync.daemon.plist"
     plist.write_text("plist")
-    monkeypatch.setattr("safe_sync.cli.launchd_plist_path", lambda: plist)
-    monkeypatch.setattr("safe_sync.cli.launchd_disabled", lambda: True)
-    monkeypatch.setattr("safe_sync.cli.service_status_text", lambda: "service: stopped")
+    monkeypatch.setattr("safe_sync.service.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("safe_sync.service.launchd_disabled", lambda: True)
+    monkeypatch.setattr("safe_sync.service.service_status_text", lambda: "service: stopped")
 
     assert backend_autostart_status_text("Darwin") == "backend autostart: disabled (stopped)"
 
@@ -213,8 +212,8 @@ def test_backend_autostart_status_mac_disabled(monkeypatch, tmp_path):
 def test_backend_autostart_mac_commands(monkeypatch, tmp_path):
     plist = tmp_path / "com.safe-sync.daemon.plist"
     plist.write_text("plist")
-    monkeypatch.setattr("safe_sync.cli.launchd_plist_path", lambda: plist)
-    monkeypatch.setattr("safe_sync.cli.launchd_service_target", lambda: "gui/501/com.safe-sync.daemon")
+    monkeypatch.setattr("safe_sync.service.launchd_plist_path", lambda: plist)
+    monkeypatch.setattr("safe_sync.service.launchd_service_target", lambda: "gui/501/com.safe-sync.daemon")
 
     assert backend_autostart_cmd("enable", "Darwin") == ["launchctl", "enable", "gui/501/com.safe-sync.daemon"]
     assert backend_autostart_cmd("disable", "Darwin") == ["launchctl", "disable", "gui/501/com.safe-sync.daemon"]
@@ -229,3 +228,13 @@ def test_backend_autostart_non_mac_is_todo():
     assert "TODO on Linux" in str(exc.value)
     assert "unsupported OS Linux" in backend_autostart_status_text("Linux")
     assert "unsupported OS Windows" in backend_autostart_status_text("Windows")
+
+
+def test_parser_accepts_autostart_backend_status():
+    from safe_sync.cli import cmd_autostart, parser
+
+    args = parser().parse_args(["autostart", "backend", "status"])
+
+    assert args.func is cmd_autostart
+    assert args.autostart_target == "backend"
+    assert args.autostart_action == "status"

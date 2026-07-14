@@ -56,7 +56,7 @@ Implement watcher-first backup triggering:
 Add install helpers:
 
 - Repo-level `./install.sh` command for service install and `safe-sync start` / `safe-sync stop` commands for daemon control.
-- Linux autostart controls and Windows Task Scheduler later if needed.
+- Linux service/autostart controls and Windows Task Scheduler later if needed.
 
 The scheduler runs the watch daemon, not raw backup, after the watch daemon is reviewed.
 

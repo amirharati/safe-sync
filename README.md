@@ -45,6 +45,7 @@ bin/safe-sync                 Thin executable launcher only
 src/safe_sync/cli.py          CLI commands and rclone guardrails
 src/safe_sync/daemon.py       Polling watch daemon state and scan helpers
 src/safe_sync/path_filter.py  Watch-event ignore helper
+src/safe_sync/service.py      macOS service install/control rendering
 ui/                           Planned Tauri tray app workspace
 tests/                        Unit tests for daemon state behavior
 ```
@@ -61,7 +62,9 @@ cd ~/projects/safe-sync
 ./install.sh
 ```
 
-That installs the single `safe-sync` command, creates or keeps `~/.safe-sync/config.json`, and installs the OS service definition. It does not start the daemon.
+That installs the single `safe-sync` command, creates or keeps `~/.safe-sync/config.json`, and installs the macOS LaunchAgent service definition. It does not start the daemon.
+
+Service templates are rendered from `src/safe_sync/service.py`; stale generated service files are not kept in the repo. Linux and Windows service install are TODO.
 
 Start the daemon:
 

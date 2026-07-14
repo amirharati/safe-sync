@@ -28,6 +28,8 @@ ui/src-tauri/tauri.conf.json     Tauri app config
 ui/src-tauri/src/                Rust commands/tray setup
 ```
 
+Service files are generated at install time from `src/safe_sync/service.py`. Do not keep generated launchd/systemd files in the repo.
+
 Keep generated build output out of git:
 
 ```text

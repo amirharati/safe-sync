@@ -33,8 +33,6 @@ build/
 out/
 *.egg-info/
 
-# Generated service files are installed by ./install.sh, not kept in repo
-install/
 
 # Local Codex metadata
 .codex/
