@@ -475,6 +475,7 @@ async fn backup_now(app: AppHandle<Wry>) -> Result<SafeSyncStatus, String> {
 }
 
 fn show_control_panel_window(app: &AppHandle<Wry>) {
+    hide_quick_panel(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
@@ -507,6 +508,13 @@ fn native_quick_window(app: &AppHandle<Wry>) -> Option<&NSWindow> {
 fn hide_quick_panel(app: &AppHandle<Wry>) {
     if let Some(window) = native_quick_window(app) {
         window.orderOut(None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_quick_panel(app: &AppHandle<Wry>) {
+    if let Some(window) = app.get_webview_window("quick") {
+        let _ = window.hide();
     }
 }
 
@@ -573,13 +581,7 @@ fn open_control_panel(app: AppHandle<Wry>) {
 
 #[tauri::command]
 fn close_quick_panel(app: AppHandle<Wry>) {
-    #[cfg(target_os = "macos")]
     hide_quick_panel(&app);
-
-    #[cfg(not(target_os = "macos"))]
-    if let Some(window) = app.get_webview_window("quick") {
-        let _ = window.hide();
-    }
 }
 
 #[tauri::command]

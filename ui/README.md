@@ -38,4 +38,5 @@ Expected current behavior:
 - Left-click opens or closes the native macOS status panel.
 - Right-click shows the native command menu.
 - The panel can refresh status, start or stop the backend, run a backup, open logs, and open the control panel.
+- Opening the control panel dismisses the quick panel; opening logs keeps it open while the log viewer comes to the front.
 - Closing the control panel hides it without quitting the tray app or backend daemon.
