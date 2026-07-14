@@ -183,6 +183,17 @@ def test_backup_cmd_metadata_is_opt_in():
     assert "--metadata" in backup_cmd({**base, "preserve_metadata": True}, dry_run=True)
 
 
+def test_rclone_bin_uses_common_homebrew_fallback(monkeypatch):
+    from pathlib import Path
+
+    from safe_sync.cli import rclone_bin
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/rclone")
+
+    assert rclone_bin({}) == "/opt/homebrew/bin/rclone"
+
+
 def test_backend_autostart_status_mac_not_installed(monkeypatch, tmp_path):
     monkeypatch.setattr("safe_sync.service.launchd_plist_path", lambda: tmp_path / "missing.plist")
 

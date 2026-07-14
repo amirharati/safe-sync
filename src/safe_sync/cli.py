@@ -84,8 +84,11 @@ def log_path(config: dict[str, Any]) -> Path:
 
 def append_log(config: dict[str, Any], line: str) -> None:
     path = log_path(config)
-    with path.open("a") as fh:
-        fh.write(line)
+    try:
+        with path.open("a") as fh:
+            fh.write(line)
+    except OSError as exc:
+        print(f"warning: could not write log {path}: {exc}", file=sys.stderr)
 
 
 def recent_log_text(config: dict[str, Any], max_chars: int = 12000) -> str:

@@ -34,6 +34,42 @@ install_command() {
   printf '%s\n' "$TARGET"
 }
 
+
+find_rclone() {
+  if command -v rclone >/dev/null 2>&1; then
+    command -v rclone
+  elif [ -x /opt/homebrew/bin/rclone ]; then
+    printf '%s\n' /opt/homebrew/bin/rclone
+  elif [ -x /usr/local/bin/rclone ]; then
+    printf '%s\n' /usr/local/bin/rclone
+  else
+    return 1
+  fi
+}
+
+configure_rclone() {
+  if RCLONE=$(find_rclone); then
+    /usr/bin/python3 - "$CONFIG" "$RCLONE" <<'PYCONFIG'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+rclone = sys.argv[2]
+config = json.loads(path.read_text())
+if config.get("rclone_bin") != rclone:
+    config["rclone_bin"] = rclone
+    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+PYCONFIG
+    echo "rclone: $RCLONE"
+  else
+    echo "Error: rclone not found." >&2
+    echo "Install it with: brew install rclone" >&2
+    echo "Then run ./install.sh again." >&2
+    exit 1
+  fi
+}
+
 install_service_files() {
   PROGRAM="$1"
   TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/safe-sync-install.XXXXXX")
@@ -125,6 +161,7 @@ if [ ! -f "$CONFIG" ]; then
   "$SOURCE" init-config
 fi
 
+configure_rclone
 TARGET=$(install_command)
 install_service_files "$TARGET"
 
