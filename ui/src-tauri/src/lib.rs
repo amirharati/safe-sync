@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -20,11 +21,84 @@ struct SafeSyncStatus {
     log: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct SafeSyncConfigView {
+    config_path: String,
+    machine_id: Option<String>,
+    machine_label: Option<String>,
+    remote_base: Option<String>,
+    poll_interval_seconds: u64,
+    debounce_seconds: u64,
+    min_interval_seconds: u64,
+    fallback_interval_seconds: u64,
+    rate_limit_backoff_seconds: u64,
+    folders: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SafeSyncSettingsUpdate {
+    poll_interval_seconds: u64,
+    debounce_seconds: u64,
+    min_interval_seconds: u64,
+    fallback_interval_seconds: u64,
+    rate_limit_backoff_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddFolderRequest {
+    id: String,
+    local_path: String,
+    label: Option<String>,
+    remote_path: Option<String>,
+    trash_path: Option<String>,
+    disabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CommandResult {
+    ok: bool,
+    output: String,
+}
+
 struct AppState {
     status_item: Mutex<Option<MenuItem<Wry>>>,
     toggle_item: Mutex<Option<MenuItem<Wry>>>,
     backup_item: Mutex<Option<MenuItem<Wry>>>,
     logs_item: Mutex<Option<MenuItem<Wry>>>,
+}
+
+
+fn config_path() -> PathBuf {
+    if let Ok(path) = env::var("SAFE_SYNC_CONFIG") {
+        if !path.trim().is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".safe-sync/config.json")
+}
+
+fn read_config_json() -> Result<Value, String> {
+    let path = config_path();
+    let text = fs::read_to_string(&path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str(&text).map_err(|err| format!("failed to parse {}: {err}", path.display()))
+}
+
+fn write_config_json(config: &Value) -> Result<(), String> {
+    let path = config_path();
+    let text = serde_json::to_string_pretty(config).map_err(|err| format!("failed to format config JSON: {err}"))?;
+    fs::write(&path, format!("{text}\n")).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn value_u64(config: &Value, key: &str, fallback: u64) -> u64 {
+    config.get(key).and_then(Value::as_u64).unwrap_or(fallback)
+}
+
+fn bounded_seconds(name: &str, value: u64, min: u64, max: u64) -> Result<u64, String> {
+    if value < min || value > max {
+        Err(format!("{name} must be between {min} and {max} seconds"))
+    } else {
+        Ok(value)
+    }
 }
 
 fn safe_sync_binary() -> String {
@@ -202,6 +276,112 @@ fn open_path(path: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_config() -> Result<SafeSyncConfigView, String> {
+    let config = read_config_json()?;
+    let folders = config
+        .get("folders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(SafeSyncConfigView {
+        config_path: config_path().to_string_lossy().into_owned(),
+        machine_id: config.get("machine_id").and_then(Value::as_str).map(str::to_string),
+        machine_label: config.get("machine_label").and_then(Value::as_str).map(str::to_string),
+        remote_base: config.get("remote_base").and_then(Value::as_str).map(str::to_string),
+        poll_interval_seconds: value_u64(&config, "poll_interval_seconds", 5),
+        debounce_seconds: value_u64(&config, "debounce_seconds", 20),
+        min_interval_seconds: value_u64(&config, "min_interval_seconds", 120),
+        fallback_interval_seconds: value_u64(&config, "fallback_interval_seconds", 1800),
+        rate_limit_backoff_seconds: value_u64(&config, "rate_limit_backoff_seconds", 300),
+        folders,
+    })
+}
+
+#[tauri::command]
+fn save_settings(update: SafeSyncSettingsUpdate) -> Result<SafeSyncConfigView, String> {
+    let mut config = read_config_json()?;
+    let obj = config.as_object_mut().ok_or_else(|| "config root must be a JSON object".to_string())?;
+    obj.insert(
+        "poll_interval_seconds".to_string(),
+        Value::from(bounded_seconds("poll interval", update.poll_interval_seconds, 1, 3600)?),
+    );
+    obj.insert(
+        "debounce_seconds".to_string(),
+        Value::from(bounded_seconds("debounce", update.debounce_seconds, 1, 3600)?),
+    );
+    obj.insert(
+        "min_interval_seconds".to_string(),
+        Value::from(bounded_seconds("minimum interval", update.min_interval_seconds, 0, 86400)?),
+    );
+    obj.insert(
+        "fallback_interval_seconds".to_string(),
+        Value::from(bounded_seconds("fallback interval", update.fallback_interval_seconds, 60, 86400)?),
+    );
+    obj.insert(
+        "rate_limit_backoff_seconds".to_string(),
+        Value::from(bounded_seconds("rate limit backoff", update.rate_limit_backoff_seconds, 60, 86400)?),
+    );
+    write_config_json(&config)?;
+    get_config()
+}
+
+#[tauri::command]
+fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, String> {
+    if request.id.trim().is_empty() || request.local_path.trim().is_empty() {
+        return Err("folder id and local path are required".to_string());
+    }
+    let mut args = vec!["folders".to_string(), "add".to_string(), request.id, request.local_path];
+    if let Some(label) = request.label.filter(|value| !value.trim().is_empty()) {
+        args.push("--label".to_string());
+        args.push(label);
+    }
+    if let Some(remote_path) = request.remote_path.filter(|value| !value.trim().is_empty()) {
+        args.push("--remote-path".to_string());
+        args.push(remote_path);
+    }
+    if let Some(trash_path) = request.trash_path.filter(|value| !value.trim().is_empty()) {
+        args.push("--trash-path".to_string());
+        args.push(trash_path);
+    }
+    if request.disabled {
+        args.push("--disabled".to_string());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_safe_sync(&refs)?;
+    get_config()
+}
+
+#[tauri::command]
+fn get_computers() -> Result<Value, String> {
+    let stdout = run_safe_sync(&["computers"])?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync computers returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+fn list_remote(target: String, depth: u64) -> Result<CommandResult, String> {
+    if target.trim().is_empty() {
+        return Err("remote target is required".to_string());
+    }
+    let depth = depth.clamp(1, 5).to_string();
+    let output = run_safe_sync(&["list", target.as_str(), "--depth", depth.as_str()])?;
+    Ok(CommandResult { ok: true, output })
+}
+
+#[tauri::command]
+fn pull_remote(source: String, destination: String, dry_run: bool) -> Result<CommandResult, String> {
+    if source.trim().is_empty() || destination.trim().is_empty() {
+        return Err("source and destination are required".to_string());
+    }
+    let args = if dry_run {
+        vec!["pull", source.as_str(), destination.as_str(), "--dry-run"]
+    } else {
+        vec!["pull", source.as_str(), destination.as_str()]
+    };
+    let output = run_safe_sync(&args)?;
+    Ok(CommandResult { ok: true, output })
+}
+
+#[tauri::command]
 fn get_status(state: State<AppState>) -> SafeSyncStatus {
     let status = read_status().unwrap_or_else(error_status);
     update_menu_state(&state, &status);
@@ -257,7 +437,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs])
+        .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs, get_config, save_settings, add_folder, get_computers, list_remote, pull_remote])
         .setup(|app| {
             let status = MenuItem::with_id(app, "status", "Safe Sync: Checking", false, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Show Status Window", true, None::<&str>)?;

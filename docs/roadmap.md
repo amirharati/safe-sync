@@ -89,6 +89,18 @@ Build a thin Tauri tray/menu app:
 
 Work through documented checkpoints in `docs/operations/tauri-tray-workflow.md`.
 
+## Phase 7: Control Panel UI
+
+Add a second-level Tauri window for day-to-day configuration and selective transfer:
+
+- View and update safe numeric settings.
+- View configured local folders and add another folder.
+- View known computers from the remote registry.
+- Build a selective pull form using `safe-sync list` and `safe-sync pull`.
+- Support local simulation with alternate remote paths/profiles for testing, without running multiple daemon watchers.
+
+Backlog guardrail before broad automation: add a daemon process lock so there is exactly one daemon watcher process, in addition to the existing one-backup-at-a-time lock.
+
 ## Not Planned Initially
 
 - Custom sync engine.

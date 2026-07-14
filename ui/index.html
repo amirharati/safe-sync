@@ -8,40 +8,118 @@
   </head>
   <body>
     <main class="shell">
-      <section class="status-panel" aria-live="polite">
-        <div class="status-header">
+      <section class="panel" aria-live="polite">
+        <header class="status-header">
           <span class="status-light" data-status-dot data-tone="unknown" aria-label="Checking"></span>
           <div>
             <p class="eyebrow">Safe Sync</p>
             <h1 data-status-state data-health="unknown">Checking</h1>
+            <p class="reason" data-status-reason>Reading backend status</p>
           </div>
-        </div>
-        <p class="reason" data-status-reason>Reading backend status</p>
-        <dl>
-          <div>
-            <dt>Backend</dt>
-            <dd data-service-state>-</dd>
+        </header>
+
+        <nav class="tabs" aria-label="Safe Sync views">
+          <button type="button" class="tab is-active" data-tab="status">Status</button>
+          <button type="button" class="tab" data-tab="settings">Settings</button>
+          <button type="button" class="tab" data-tab="computers">Computers</button>
+          <button type="button" class="tab" data-tab="transfer">Transfer</button>
+        </nav>
+
+        <section class="view is-active" data-view="status">
+          <dl class="facts">
+            <div>
+              <dt>Backend</dt>
+              <dd data-service-state>-</dd>
+            </div>
+            <div>
+              <dt>Sync</dt>
+              <dd data-sync-state>-</dd>
+            </div>
+            <div>
+              <dt>Seen</dt>
+              <dd data-daemon-seen>-</dd>
+            </div>
+            <div>
+              <dt>Log</dt>
+              <dd class="path" data-log-path>-</dd>
+            </div>
+          </dl>
+          <div class="actions" aria-label="Backend controls">
+            <button type="button" class="secondary" data-action="refresh">Refresh</button>
+            <button type="button" class="secondary" data-action="open-logs">Open Logs</button>
+            <button type="button" class="primary" data-action="toggle-backend" data-intent="start">Start Backend</button>
+            <button type="button" class="primary" data-action="backup-now">Backup Now</button>
           </div>
-          <div>
-            <dt>Sync</dt>
-            <dd data-sync-state>-</dd>
+          <p class="refresh-note" data-refresh-note>Auto refresh every 10s</p>
+        </section>
+
+        <section class="view" data-view="settings">
+          <div class="section-title">
+            <h2>Local Settings</h2>
+            <button type="button" class="secondary" data-action="reload-config">Reload</button>
           </div>
-          <div>
-            <dt>Seen</dt>
-            <dd data-daemon-seen>-</dd>
+          <dl class="facts compact">
+            <div>
+              <dt>Config</dt>
+              <dd class="path" data-config-path>-</dd>
+            </div>
+            <div>
+              <dt>Machine</dt>
+              <dd data-machine-id>-</dd>
+            </div>
+            <div>
+              <dt>Remote Base</dt>
+              <dd class="path" data-remote-base>-</dd>
+            </div>
+          </dl>
+          <form class="settings-grid" data-settings-form>
+            <label>Poll interval <input name="poll_interval_seconds" type="number" min="1" max="3600" /></label>
+            <label>Debounce <input name="debounce_seconds" type="number" min="1" max="3600" /></label>
+            <label>Minimum interval <input name="min_interval_seconds" type="number" min="0" max="86400" /></label>
+            <label>Fallback interval <input name="fallback_interval_seconds" type="number" min="60" max="86400" /></label>
+            <label>Rate-limit backoff <input name="rate_limit_backoff_seconds" type="number" min="60" max="86400" /></label>
+            <button type="submit" class="primary">Save Settings</button>
+          </form>
+          <div class="section-title lower">
+            <h2>Folders</h2>
           </div>
-          <div>
-            <dt>Log</dt>
-            <dd class="path" data-log-path>-</dd>
+          <div class="list" data-folder-list></div>
+          <form class="add-folder" data-add-folder-form>
+            <input name="id" placeholder="folder id" />
+            <input name="local_path" placeholder="~/path/to/folder" />
+            <input name="label" placeholder="label" />
+            <button type="submit" class="secondary">Add Folder</button>
+          </form>
+        </section>
+
+        <section class="view" data-view="computers">
+          <div class="section-title">
+            <h2>Known Computers</h2>
+            <button type="button" class="secondary" data-action="load-computers">Refresh</button>
           </div>
-        </dl>
-        <div class="actions" aria-label="Backend controls">
-          <button type="button" class="secondary" data-action="refresh">Refresh</button>
-          <button type="button" class="secondary" data-action="open-logs">Open Logs</button>
-          <button type="button" class="primary" data-action="toggle-backend" data-intent="start">Start Backend</button>
-          <button type="button" class="primary" data-action="backup-now">Backup Now</button>
-        </div>
-        <p class="refresh-note" data-refresh-note>Auto refresh every 10s</p>
+          <div class="list" data-computer-list></div>
+        </section>
+
+        <section class="view" data-view="transfer">
+          <div class="section-title">
+            <h2>Selective Pull</h2>
+          </div>
+          <form class="transfer-form" data-transfer-form>
+            <label>Remote source <input name="source" placeholder="dropbox:computer-backups/..." /></label>
+            <label>Local destination <input name="destination" placeholder="~/Downloads/safe-sync-restore" /></label>
+            <label>List depth <input name="depth" type="number" min="1" max="5" value="2" /></label>
+            <div class="check-row">
+              <label><input name="dry_run" type="checkbox" checked /> Dry run</label>
+            </div>
+            <div class="actions left">
+              <button type="button" class="secondary" data-action="list-remote">List Source</button>
+              <button type="submit" class="primary">Pull</button>
+            </div>
+          </form>
+          <pre class="output" data-transfer-output></pre>
+        </section>
+
+        <p class="message" data-message></p>
       </section>
     </main>
   </body>
