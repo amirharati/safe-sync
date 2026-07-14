@@ -122,9 +122,6 @@ The status window also exposes Start, Stop, and Refresh buttons through the same
 
 Still pending for later checkpoints:
 
-- Backup now -> `safe-sync backup`
-- Open logs -> open current log path
-- Periodic refresh/polling while the tray is running
 - Tray icon state variants
 
 Review point: confirm no action deletes files or bypasses backend guardrails.
@@ -133,15 +130,16 @@ Review point: confirm no action deletes files or bypasses backend guardrails.
 
 Goal: expose login behavior clearly.
 
-Two separate settings:
-
-- Start Safe Sync daemon at login.
-- Start tray app at login.
-
-Implementation split:
+Current behavior:
 
 - Backend daemon autostart uses `safe-sync autostart backend ...`.
-- Tray autostart uses Tauri's autostart plugin.
+- Tray app autostart is installed by `./install.sh` as `~/Library/LaunchAgents/com.safe-sync.tray.plist`.
+- The tray app can be quit without stopping the backend daemon.
+
+Still pending for later UI:
+
+- In-app toggles for backend-at-login and tray-at-login.
+- Linux and Windows autostart implementations.
 
 Review point: make sure disabling the tray does not disable backend sync unless explicitly requested.
 
@@ -149,13 +147,15 @@ Review point: make sure disabling the tray does not disable backend sync unless 
 
 Goal: make install understandable.
 
-Install should explain:
+Current behavior:
 
 - `./install.sh` installs the backend command/service definition.
-- Tauri build installs the tray app.
+- `./install.sh` runs `npm ci` and `npm run tauri build` for the tray app unless `SAFE_SYNC_INSTALL_UI=0` is set.
+- The built macOS app is copied to `~/Applications/Safe Sync.app` by default.
+- The tray LaunchAgent is installed at `~/Library/LaunchAgents/com.safe-sync.tray.plist`.
 - Starting/stopping the daemon remains available through `safe-sync` even without the UI.
 
-Review point: decide whether repo `install.sh` should eventually call the UI installer or keep UI packaging separate.
+Review point: test login/startup behavior after a normal install.
 
 ## Tray Menu Draft
 
@@ -197,7 +197,5 @@ Quit Tray
 
 ## Open Questions
 
-- Should `Backup Now` run all enabled folders or prompt/select later? Default should be all enabled folders for phase 1.
-- Should opening logs use the OS opener directly from Tauri, or should `safe-sync logs` remain the first phase behavior?
 - Should the tray icon use color, badge text, or monochrome variants for macOS menu bar style?
 - How should Windows service/autostart be implemented later?

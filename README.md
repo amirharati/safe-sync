@@ -44,7 +44,7 @@ src/safe_sync/cli.py          CLI commands and rclone guardrails
 src/safe_sync/daemon.py       Polling watch daemon state and scan helpers
 src/safe_sync/path_filter.py  Watch-event ignore helper
 src/safe_sync/service.py      macOS service install/control rendering
-ui/                           Planned Tauri tray app workspace
+ui/                           Tauri tray app workspace
 tests/                        Unit tests for daemon state behavior
 ```
 
@@ -62,14 +62,18 @@ cd /path/to/safe-sync
 ./install.sh
 ```
 
-This does four things:
+This does six things:
 
 1. Creates `~/.safe-sync/config.json` if it does not exist.
 2. Installs the single `safe-sync` command into `/usr/local/bin` when writable, otherwise `~/.local/bin`.
-3. Renders the macOS LaunchAgent from `src/safe_sync/service.py`.
-4. Installs the LaunchAgent at `~/Library/LaunchAgents/com.safe-sync.daemon.plist`.
+3. Renders the macOS backend LaunchAgent from `src/safe_sync/service.py`.
+4. Installs the backend LaunchAgent at `~/Library/LaunchAgents/com.safe-sync.daemon.plist`.
+5. Builds the production Tauri tray app from `ui/` and installs it to `~/Applications/Safe Sync.app` by default.
+6. Installs and starts the tray LaunchAgent at `~/Library/LaunchAgents/com.safe-sync.tray.plist`.
 
-It does not start the daemon. Start it explicitly:
+Set `SAFE_SYNC_INSTALL_UI=0 ./install.sh` for a backend-only install. Set `SAFE_SYNC_APP_DIR=/Applications ./install.sh` to install the tray app somewhere else.
+
+The installer starts the tray app. It does not start the backend daemon. Start the daemon explicitly:
 
 ```bash
 safe-sync start
@@ -170,7 +174,7 @@ safe-sync migrate-config
 
 ## Tray UI Development
 
-The tray UI lives under `ui/` and is a Tauri v2 app. It is currently a placeholder tray/menu skeleton; real Safe Sync status wiring is the next checkpoint.
+The tray UI lives under `ui/` and is a Tauri v2 app. The production installer builds and installs the app; development mode is only for local iteration.
 
 Install UI dependencies once:
 
@@ -199,19 +203,21 @@ cd /path/to/safe-sync/ui
 npm run tauri dev
 ```
 
-The UI dependency lockfiles are committed. Generated folders such as `ui/node_modules/`, `ui/dist/`, and `ui/src-tauri/target/` are ignored.
+The UI dependency lockfiles are committed. Generated folders such as `ui/node_modules/`, `ui/dist/`, and `ui/src-tauri/target/` are ignored. Production install uses `npm ci` and `npm run tauri build`.
 
 ## Install Internals
 
 Service templates are rendered from `src/safe_sync/service.py`; generated launchd/systemd files are not kept in the repo.
 
-The current macOS installer writes only:
+The macOS installer writes:
 
 ```text
 ~/Library/LaunchAgents/com.safe-sync.daemon.plist
+~/Library/LaunchAgents/com.safe-sync.tray.plist
+~/Applications/Safe Sync.app
 ```
 
-Linux and Windows service install/control remain TODO/backlog.
+Linux and Windows service/UI install/control remain TODO/backlog.
 
 ## Test Folder Reminder
 

@@ -10,17 +10,23 @@ type SafeSyncStatus = {
   log: string | null;
 };
 
+const AUTO_REFRESH_MS = 10_000;
+
 const stateLabel = document.querySelector<HTMLElement>("[data-status-state]");
 const reasonLabel = document.querySelector<HTMLElement>("[data-status-reason]");
 const serviceLabel = document.querySelector<HTMLElement>("[data-service-state]");
 const syncLabel = document.querySelector<HTMLElement>("[data-sync-state]");
 const seenLabel = document.querySelector<HTMLElement>("[data-daemon-seen]");
 const logLabel = document.querySelector<HTMLElement>("[data-log-path]");
+const refreshLabel = document.querySelector<HTMLElement>("[data-refresh-note]");
 const statusDot = document.querySelector<HTMLElement>("[data-status-dot]");
 const refreshButton = document.querySelector<HTMLButtonElement>("[data-action='refresh']");
 const toggleButton = document.querySelector<HTMLButtonElement>("[data-action='toggle-backend']");
+const backupButton = document.querySelector<HTMLButtonElement>("[data-action='backup-now']");
+const logsButton = document.querySelector<HTMLButtonElement>("[data-action='open-logs']");
 
 let latestStatus: SafeSyncStatus | null = null;
+let busyAction: string | null = null;
 
 function text(value: unknown, fallback = "-"): string {
   if (typeof value === "string" && value.length > 0) {
@@ -82,12 +88,25 @@ function desiredAction(status: SafeSyncStatus): "start" | "stop" {
   return status.service_state === "running" ? "stop" : "start";
 }
 
-function setBusy(isBusy: boolean): void {
+function hasLog(status: SafeSyncStatus | null): boolean {
+  return Boolean(status?.log && status.log.length > 0);
+}
+
+function setBusy(action: string | null): void {
+  busyAction = action;
+  const isBusy = action !== null;
   if (refreshButton) {
     refreshButton.disabled = isBusy;
   }
   if (toggleButton) {
     toggleButton.disabled = isBusy || latestStatus?.service_state === "unknown";
+  }
+  if (backupButton) {
+    backupButton.disabled = isBusy || latestStatus?.service_state === "unknown";
+    backupButton.textContent = action === "backup" ? "Backing Up" : "Backup Now";
+  }
+  if (logsButton) {
+    logsButton.disabled = isBusy || !hasLog(latestStatus);
   }
 }
 
@@ -123,11 +142,14 @@ function renderStatus(status: SafeSyncStatus): void {
   if (logLabel) {
     logLabel.textContent = text(status.log);
   }
+  if (refreshLabel) {
+    refreshLabel.textContent = `Auto refresh every ${AUTO_REFRESH_MS / 1000}s`;
+  }
   if (toggleButton) {
     toggleButton.textContent = action === "stop" ? "Stop Backend" : "Start Backend";
     toggleButton.dataset.intent = action;
-    toggleButton.disabled = status.service_state === "unknown";
   }
+  setBusy(busyAction);
 }
 
 function renderError(error: unknown): void {
@@ -142,13 +164,24 @@ function renderError(error: unknown): void {
 }
 
 async function refreshStatus(): Promise<void> {
-  setBusy(true);
+  setBusy("refresh");
   try {
     renderStatus(await invoke<SafeSyncStatus>("get_status"));
   } catch (error) {
     renderError(error);
   } finally {
-    setBusy(false);
+    setBusy(null);
+  }
+}
+
+async function refreshStatusQuietly(): Promise<void> {
+  if (busyAction) {
+    return;
+  }
+  try {
+    renderStatus(await invoke<SafeSyncStatus>("get_status"));
+  } catch (error) {
+    renderError(error);
   }
 }
 
@@ -158,13 +191,35 @@ async function toggleBackend(): Promise<void> {
   }
   const action = latestStatus ? desiredAction(latestStatus) : "start";
 
-  setBusy(true);
+  setBusy(action);
   try {
     renderStatus(await invoke<SafeSyncStatus>("control_backend", { action }));
   } catch (error) {
     renderError(error);
   } finally {
-    setBusy(false);
+    setBusy(null);
+  }
+}
+
+async function backupNow(): Promise<void> {
+  setBusy("backup");
+  try {
+    renderStatus(await invoke<SafeSyncStatus>("backup_now"));
+  } catch (error) {
+    renderError(error);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function openLogs(): Promise<void> {
+  setBusy("logs");
+  try {
+    await invoke("open_logs");
+  } catch (error) {
+    renderError(error);
+  } finally {
+    setBusy(null);
   }
 }
 
@@ -172,5 +227,8 @@ window.addEventListener("DOMContentLoaded", () => {
   document.documentElement.dataset.ready = "true";
   refreshButton?.addEventListener("click", () => void refreshStatus());
   toggleButton?.addEventListener("click", () => void toggleBackend());
+  backupButton?.addEventListener("click", () => void backupNow());
+  logsButton?.addEventListener("click", () => void openLogs());
   void refreshStatus();
+  window.setInterval(() => void refreshStatusQuietly(), AUTO_REFRESH_MS);
 });

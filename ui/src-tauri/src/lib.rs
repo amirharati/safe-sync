@@ -4,6 +4,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, State, Wry};
@@ -21,6 +23,8 @@ struct SafeSyncStatus {
 struct AppState {
     status_item: Mutex<Option<MenuItem<Wry>>>,
     toggle_item: Mutex<Option<MenuItem<Wry>>>,
+    backup_item: Mutex<Option<MenuItem<Wry>>>,
+    logs_item: Mutex<Option<MenuItem<Wry>>>,
 }
 
 fn safe_sync_binary() -> String {
@@ -30,14 +34,29 @@ fn safe_sync_binary() -> String {
         }
     }
 
-    let repo_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|ui_dir| ui_dir.parent())
-        .map(|repo_root| repo_root.join("bin/safe-sync"));
+    if cfg!(debug_assertions) {
+        let repo_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|ui_dir| ui_dir.parent())
+            .map(|repo_root| repo_root.join("bin/safe-sync"));
 
-    if let Some(path) = repo_bin {
-        if path.exists() {
-            return path.to_string_lossy().into_owned();
+        if let Some(path) = repo_bin {
+            if path.exists() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        let home_bin = PathBuf::from(home).join(".local/bin/safe-sync");
+        if home_bin.exists() {
+            return home_bin.to_string_lossy().into_owned();
+        }
+    }
+
+    for path in ["/usr/local/bin/safe-sync", "/opt/homebrew/bin/safe-sync"] {
+        if PathBuf::from(path).exists() {
+            return path.to_string();
         }
     }
 
@@ -114,31 +133,72 @@ fn error_status(message: String) -> SafeSyncStatus {
     }
 }
 
-fn refresh_tray_label(status_item: &MenuItem<Wry>) -> SafeSyncStatus {
+fn update_items(
+    status_item: &MenuItem<Wry>,
+    toggle_item: &MenuItem<Wry>,
+    backup_item: &MenuItem<Wry>,
+    logs_item: &MenuItem<Wry>,
+    status: &SafeSyncStatus,
+) {
+    let _ = status_item.set_text(status_label(status));
+    let _ = toggle_item.set_text(toggle_label(status));
+    let known = status.service_state != "unknown";
+    let _ = toggle_item.set_enabled(known);
+    let _ = backup_item.set_enabled(known);
+    let _ = logs_item.set_enabled(status.log.as_ref().is_some_and(|path| !path.is_empty()));
+}
+
+fn refresh_menu_items(
+    status_item: &MenuItem<Wry>,
+    toggle_item: &MenuItem<Wry>,
+    backup_item: &MenuItem<Wry>,
+    logs_item: &MenuItem<Wry>,
+) -> SafeSyncStatus {
     match read_status() {
         Ok(status) => {
-            let _ = status_item.set_text(status_label(&status));
+            update_items(status_item, toggle_item, backup_item, logs_item, &status);
             status
         }
         Err(err) => {
-            let _ = status_item.set_text("Safe Sync: Error");
-            error_status(err)
+            let status = error_status(err);
+            update_items(status_item, toggle_item, backup_item, logs_item, &status);
+            status
         }
     }
 }
 
 fn update_menu_state(state: &State<AppState>, status: &SafeSyncStatus) {
-    if let Ok(guard) = state.status_item.lock() {
-        if let Some(item) = guard.as_ref() {
-            let _ = item.set_text(status_label(status));
-        }
+    let Ok(status_guard) = state.status_item.lock() else { return };
+    let Ok(toggle_guard) = state.toggle_item.lock() else { return };
+    let Ok(backup_guard) = state.backup_item.lock() else { return };
+    let Ok(logs_guard) = state.logs_item.lock() else { return };
+
+    if let (Some(status_item), Some(toggle_item), Some(backup_item), Some(logs_item)) = (
+        status_guard.as_ref(),
+        toggle_guard.as_ref(),
+        backup_guard.as_ref(),
+        logs_guard.as_ref(),
+    ) {
+        update_items(status_item, toggle_item, backup_item, logs_item, status);
     }
-    if let Ok(guard) = state.toggle_item.lock() {
-        if let Some(item) = guard.as_ref() {
-            let _ = item.set_text(toggle_label(status));
-            let _ = item.set_enabled(status.service_state != "unknown");
-        }
-    }
+}
+
+fn open_path(path: &str) -> Result<(), String> {
+    let command = if cfg!(target_os = "macos") {
+        ("open", vec![path])
+    } else if cfg!(target_os = "linux") {
+        ("xdg-open", vec![path])
+    } else if cfg!(target_os = "windows") {
+        ("cmd", vec!["/C", "start", "", path])
+    } else {
+        return Err("opening files is unsupported on this OS".to_string());
+    };
+
+    Command::new(command.0)
+        .args(command.1)
+        .spawn()
+        .map_err(|err| format!("failed to open {path}: {err}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -161,19 +221,38 @@ fn control_backend(action: String, state: State<AppState>) -> Result<SafeSyncSta
     }
 }
 
+#[tauri::command]
+fn backup_now(state: State<AppState>) -> Result<SafeSyncStatus, String> {
+    run_safe_sync(&["backup"])?;
+    let status = read_status().unwrap_or_else(error_status);
+    update_menu_state(&state, &status);
+    Ok(status)
+}
+
+#[tauri::command]
+fn open_logs() -> Result<(), String> {
+    let status = read_status()?;
+    let log = status.log.ok_or_else(|| "safe-sync status did not include a log path".to_string())?;
+    open_path(&log)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             status_item: Mutex::new(None),
             toggle_item: Mutex::new(None),
+            backup_item: Mutex::new(None),
+            logs_item: Mutex::new(None),
         })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_status, control_backend])
+        .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs])
         .setup(|app| {
             let status = MenuItem::with_id(app, "status", "Safe Sync: Checking", false, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Show Status Window", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "backend-toggle", "Start Backend", true, None::<&str>)?;
+            let backup = MenuItem::with_id(app, "backup-now", "Backup Now", true, None::<&str>)?;
+            let logs = MenuItem::with_id(app, "open-logs", "Open Logs", true, None::<&str>)?;
             let refresh = MenuItem::with_id(app, "refresh", "Refresh Status", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Tray", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
@@ -184,8 +263,10 @@ pub fn run() {
                     &separator,
                     &show,
                     &refresh,
+                    &logs,
                     &separator,
                     &toggle,
+                    &backup,
                     &separator,
                     &quit,
                 ],
@@ -195,16 +276,34 @@ pub fn run() {
                 .cloned()
                 .expect("Safe Sync tray icon missing");
 
-            let initial_status = refresh_tray_label(&status);
-            let _ = toggle.set_text(toggle_label(&initial_status));
+            refresh_menu_items(&status, &toggle, &backup, &logs);
             if let Ok(mut guard) = app.state::<AppState>().status_item.lock() {
                 guard.replace(status.clone());
             }
             if let Ok(mut guard) = app.state::<AppState>().toggle_item.lock() {
                 guard.replace(toggle.clone());
             }
+            if let Ok(mut guard) = app.state::<AppState>().backup_item.lock() {
+                guard.replace(backup.clone());
+            }
+            if let Ok(mut guard) = app.state::<AppState>().logs_item.lock() {
+                guard.replace(logs.clone());
+            }
             let status_item = status.clone();
             let toggle_item = toggle.clone();
+            let backup_item = backup.clone();
+            let logs_item = logs.clone();
+
+            thread::spawn({
+                let status_item = status.clone();
+                let toggle_item = toggle.clone();
+                let backup_item = backup.clone();
+                let logs_item = logs.clone();
+                move || loop {
+                    thread::sleep(Duration::from_secs(10));
+                    refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                }
+            });
 
             TrayIconBuilder::new()
                 .tooltip("Safe Sync")
@@ -219,11 +318,18 @@ pub fn run() {
                         }
                     }
                     "refresh" => {
-                        let status = refresh_tray_label(&status_item);
-                        let _ = toggle_item.set_text(toggle_label(&status));
+                        refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                    }
+                    "open-logs" => {
+                        if let Ok(status) = read_status() {
+                            if let Some(log) = status.log {
+                                let _ = open_path(&log);
+                            }
+                        }
+                        refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
                     }
                     "backend-toggle" => {
-                        let before = refresh_tray_label(&status_item);
+                        let before = refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
                         let action = if should_stop_backend(&before) { "stop" } else { "start" };
                         if run_safe_sync(&[action]).is_err() {
                             let _ = status_item.set_text(if action == "stop" {
@@ -232,8 +338,18 @@ pub fn run() {
                                 "Safe Sync: Start failed"
                             });
                         }
-                        let after = refresh_tray_label(&status_item);
-                        let _ = toggle_item.set_text(toggle_label(&after));
+                        refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                    }
+                    "backup-now" => {
+                        let _ = status_item.set_text("Safe Sync: Backup running");
+                        let status_item = status_item.clone();
+                        let toggle_item = toggle_item.clone();
+                        let backup_item = backup_item.clone();
+                        let logs_item = logs_item.clone();
+                        thread::spawn(move || {
+                            let _ = run_safe_sync(&["backup"]);
+                            refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                        });
                     }
                     "quit" => {
                         app.exit(0);
