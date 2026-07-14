@@ -222,11 +222,16 @@ fn control_backend(action: String, state: State<AppState>) -> Result<SafeSyncSta
 }
 
 #[tauri::command]
-fn backup_now(state: State<AppState>) -> Result<SafeSyncStatus, String> {
-    run_safe_sync(&["backup"])?;
-    let status = read_status().unwrap_or_else(error_status);
+fn backup_now(state: State<AppState>) -> SafeSyncStatus {
+    let result = run_safe_sync(&["backup"]);
+    let status = read_status().unwrap_or_else(|status_err| {
+        error_status(match result {
+            Ok(_) => status_err,
+            Err(command_err) => format!("{command_err}; additionally failed to refresh status: {status_err}"),
+        })
+    });
     update_menu_state(&state, &status);
-    Ok(status)
+    status
 }
 
 #[tauri::command]
@@ -245,6 +250,12 @@ pub fn run() {
             backup_item: Mutex::new(None),
             logs_item: Mutex::new(None),
         })
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs])
         .setup(|app| {

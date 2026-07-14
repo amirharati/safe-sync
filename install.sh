@@ -77,7 +77,6 @@ install_tray_launch_agent() {
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/open</string>
-    <string>-n</string>
     <string>$APP_TARGET</string>
   </array>
   <key>RunAtLoad</key>
@@ -118,7 +117,7 @@ install_tray_app() {
   rm -rf "$APP_TARGET"
   cp -R "$APP_SOURCE" "$APP_TARGET"
   install_tray_launch_agent
-  /usr/bin/open -n "$APP_TARGET" 2>/dev/null || true
+  /usr/bin/open "$APP_TARGET" 2>/dev/null || true
 }
 
 mkdir -p "$CONFIG_DIR"
