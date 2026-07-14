@@ -133,9 +133,12 @@ def rclone_bin(config: dict[str, Any]) -> str:
     if configured:
         return str(Path(configured).expanduser())
     found = shutil.which("rclone")
-    if not found:
-        raise SystemExit("rclone not found in PATH")
-    return found
+    if found:
+        return found
+    for candidate in (Path("/opt/homebrew/bin/rclone"), Path("/usr/local/bin/rclone")):
+        if candidate.exists():
+            return str(candidate)
+    raise SystemExit("rclone not found in PATH")
 
 
 def filter_file(config: dict[str, Any]) -> Path:

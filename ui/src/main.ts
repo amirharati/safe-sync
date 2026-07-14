@@ -25,6 +25,8 @@ type SafeSyncConfig = {
 
 type CommandResult = { ok: boolean; output: string };
 
+type FolderView = Record<string, unknown> & { id?: string; label?: string; local_path?: string; enabled?: boolean };
+
 const AUTO_REFRESH_MS = 10_000;
 
 const stateLabel = document.querySelector<HTMLElement>("[data-status-state]");
@@ -160,6 +162,13 @@ function inputValue(form: HTMLFormElement, name: string): string {
   return field?.value.trim() ?? "";
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    const map: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+    return map[char];
+  });
+}
+
 function numberValue(form: HTMLFormElement, name: string): number {
   return Number(inputValue(form, name));
 }
@@ -177,10 +186,20 @@ function renderConfig(config: SafeSyncConfig): void {
   }
   if (folderList) {
     folderList.innerHTML = "";
-    for (const folder of config.folders) {
+    for (const rawFolder of config.folders) {
+      const folder = rawFolder as FolderView;
       const item = document.createElement("article");
-      item.className = "item";
-      item.innerHTML = `<strong>${text(folder.label, text(folder.id))}</strong><span>${text(folder.local_path)}</span><span>${text(folder.remote_root)}</span>`;
+      item.className = "item folder-editor";
+      item.dataset.folderId = text(folder.id);
+      item.innerHTML = `
+        <div class="item-heading">
+          <strong>${text(folder.id)}</strong>
+          <label class="inline-check"><input type="checkbox" data-folder-field="enabled" ${folder.enabled === false ? "" : "checked"} /> Enabled</label>
+        </div>
+        <label>Label <input data-folder-field="label" value="${escapeHtml(text(folder.label, text(folder.id)))}" /></label>
+        <label>Local path <input data-folder-field="local_path" value="${escapeHtml(text(folder.local_path))}" /></label>
+        <span>${escapeHtml(text(folder.remote_root))}</span>
+        <div class="actions left"><button type="button" class="secondary" data-action="save-folder">Save Folder</button></div>`;
       folderList.append(item);
     }
     if (config.folders.length === 0) folderList.textContent = "No folders configured";
@@ -238,6 +257,29 @@ async function addFolder(event: SubmitEvent): Promise<void> {
     }));
     addFolderForm.reset();
     setMessage("Folder added", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function saveFolder(button: HTMLElement): Promise<void> {
+  const item = button.closest<HTMLElement>("[data-folder-id]");
+  if (!item) return;
+  const field = (name: string) => item.querySelector<HTMLInputElement>(`[data-folder-field='${name}']`);
+  const id = item.dataset.folderId ?? "";
+  setBusy("folder");
+  try {
+    renderConfig(await invoke<SafeSyncConfig>("update_folder", {
+      request: {
+        id,
+        label: field("label")?.value.trim() ?? id,
+        local_path: field("local_path")?.value.trim() ?? "",
+        enabled: field("enabled")?.checked ?? true,
+      },
+    }));
+    setMessage("Folder saved", "ok");
   } catch (error) {
     setMessage(String(error), "error");
   } finally {
@@ -382,6 +424,10 @@ window.addEventListener("DOMContentLoaded", () => {
   logsButton?.addEventListener("click", () => void openLogs());
   settingsForm?.addEventListener("submit", (event) => void saveSettings(event));
   addFolderForm?.addEventListener("submit", (event) => void addFolder(event));
+  folderList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "save-folder") void saveFolder(target);
+  });
   transferForm?.addEventListener("submit", (event) => void pullRemote(event));
   document.querySelector("[data-action='reload-config']")?.addEventListener("click", () => void loadConfig());
   document.querySelector("[data-action='load-computers']")?.addEventListener("click", () => void loadComputers());

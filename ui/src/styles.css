@@ -319,6 +319,33 @@ dd[data-value="stopped"] { color: #9a6400; }
   font-size: 13px;
 }
 
+.item-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.folder-editor label:not(.inline-check) {
+  display: grid;
+  gap: 5px;
+  color: #5f6b7a;
+  font-size: 12px;
+}
+
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #5f6b7a;
+  font-size: 12px;
+}
+
+.inline-check input {
+  width: auto;
+  min-height: 0;
+}
+
 .item span {
   color: #5f6b7a;
   font-size: 12px;

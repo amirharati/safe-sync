@@ -54,6 +54,14 @@ struct AddFolderRequest {
     disabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateFolderRequest {
+    id: String,
+    local_path: String,
+    label: Option<String>,
+    enabled: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct CommandResult {
     ok: bool,
@@ -352,6 +360,30 @@ fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, String> {
 }
 
 #[tauri::command]
+fn update_folder(request: UpdateFolderRequest) -> Result<SafeSyncConfigView, String> {
+    if request.id.trim().is_empty() || request.local_path.trim().is_empty() {
+        return Err("folder id and local path are required".to_string());
+    }
+    let mut config = read_config_json()?;
+    let folders = config
+        .get_mut("folders")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "config folders must be a JSON array".to_string())?;
+    let folder = folders
+        .iter_mut()
+        .find(|folder| folder.get("id").and_then(Value::as_str) == Some(request.id.as_str()))
+        .ok_or_else(|| format!("folder not found: {}", request.id))?;
+    let obj = folder.as_object_mut().ok_or_else(|| "folder entry must be a JSON object".to_string())?;
+    obj.insert("local_path".to_string(), Value::from(request.local_path));
+    obj.insert("enabled".to_string(), Value::from(request.enabled));
+    if let Some(label) = request.label.filter(|value| !value.trim().is_empty()) {
+        obj.insert("label".to_string(), Value::from(label));
+    }
+    write_config_json(&config)?;
+    get_config()
+}
+
+#[tauri::command]
 fn get_computers() -> Result<Value, String> {
     let stdout = run_safe_sync(&["computers"])?;
     serde_json::from_str(&stdout).map_err(|err| format!("safe-sync computers returned invalid JSON: {err}"))
@@ -437,7 +469,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs, get_config, save_settings, add_folder, get_computers, list_remote, pull_remote])
+        .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs, get_config, save_settings, add_folder, update_folder, get_computers, list_remote, pull_remote])
         .setup(|app| {
             let status = MenuItem::with_id(app, "status", "Safe Sync: Checking", false, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Show Status Window", true, None::<&str>)?;
