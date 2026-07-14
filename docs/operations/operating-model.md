@@ -4,50 +4,44 @@
 
 ```text
 dropbox:computer-backups/
-  macbook/
-    projects/
-  linuxbox/
-    projects/
-  windowsbox/
-    projects/
-  shared/
+  <machine_id>/
+    <folder_id>/
+  .registry/
+    computers/
+      <machine_id>.json
   .trash/
-    macbook/
-    linuxbox/
-    windowsbox/
+    <machine_id>/
+      <folder_id>/
 ```
 
 ## Backup
 
-Each computer backs up its local project folder to its own remote folder.
+Each computer backs up each enabled local folder to that machine's owned remote folder. Use `safe-sync backup`; do not call raw `rclone sync` for normal operation.
 
-Example for Mac:
+Example shape for Mac:
 
-```bash
-rclone sync ~/projects dropbox:computer-backups/macbook/projects \
-  --filter-from ~/.safe-sync/filter.txt \
-  --backup-dir dropbox:computer-backups/.trash/macbook/$(date +%Y-%m-%dT%H-%M-%S)
+```text
+~/test_sync -> dropbox:computer-backups/test/<machine_id>/test_sync
 ```
 
-This means local deletes can be reflected in that machine's backup, but the old remote file is moved to trash first.
+Under the hood Safe Sync uses `rclone sync` with `--backup-dir`, so local deletes can be reflected in that machine's backup, but the old remote file is moved to trash first.
 
 ## Pull
 
-Pull a folder from Linux backup to Mac:
+Pull/copy from another machine backup is explicit. Use `safe-sync pull` with a full rclone source path.
 
 ```bash
-rclone copy dropbox:computer-backups/linuxbox/projects/my_exp ~/projects/from-linux/my_exp \
-  --filter-from ~/.safe-sync/filter.txt
+safe-sync pull dropbox:computer-backups/test/linuxbox/projects/my_exp ~/projects/from-linux/my_exp
 ```
 
-This does not delete local files.
+This uses copy semantics and does not delete local files.
 
 ## Trash Path
 
 Trash preserves original relative paths:
 
 ```text
-dropbox:computer-backups/.trash/macbook/2026-07-12T18-45-00/labs/mnist/data/train.csv
+dropbox:computer-backups/test/.trash/macbook/test_sync/2026-07-12T18-45-00/labs/mnist/data/train.csv
 ```
 
 Restore target:

@@ -53,7 +53,9 @@ tests/                        Unit tests for daemon state behavior
 Run the CLI through `bin/safe-sync`; edit implementation code under `src/safe_sync/`.
 
 
-## Install
+## macOS Quickstart
+
+Safe Sync is macOS-first right now. Linux and Windows service install are explicit TODOs.
 
 From a downloaded/cloned repo:
 
@@ -62,32 +64,39 @@ cd ~/projects/safe-sync
 ./install.sh
 ```
 
-That installs the single `safe-sync` command, creates or keeps `~/.safe-sync/config.json`, and installs the macOS LaunchAgent service definition. It does not start the daemon.
+This does four things:
 
-Service templates are rendered from `src/safe_sync/service.py`; stale generated service files are not kept in the repo. Linux and Windows service install are TODO.
+1. Creates `~/.safe-sync/config.json` if it does not exist.
+2. Installs the single `safe-sync` command into `/usr/local/bin` when writable, otherwise `~/.local/bin`.
+3. Renders the macOS LaunchAgent from `src/safe_sync/service.py`.
+4. Installs the LaunchAgent at `~/Library/LaunchAgents/com.safe-sync.daemon.plist`.
 
-Start the daemon:
+It does not start the daemon. Start it explicitly:
 
 ```bash
 safe-sync start
 ```
 
-Stop the daemon:
-
-```bash
-safe-sync stop
-```
-
-Show daemon state and recent sync state:
+Check health:
 
 ```bash
 safe-sync status
 safe-sync logs
 ```
 
-Status includes separate service and sync health fields.
+Stop it:
 
-Check backend daemon autostart on macOS:
+```bash
+safe-sync stop
+```
+
+Restart it after config changes:
+
+```bash
+safe-sync restart
+```
+
+Control backend login autostart:
 
 ```bash
 safe-sync autostart backend status
@@ -95,20 +104,22 @@ safe-sync autostart backend enable
 safe-sync autostart backend disable
 ```
 
-Linux and Windows backend autostart controls are TODO.
+Typical healthy macOS states look like:
 
-## Current CLI Test Commands
+```text
+backend autostart: enabled (running)
+backend autostart: enabled (stopped)
+backend autostart: disabled (stopped)
+```
 
-The local test config lives at:
+`enabled` means launchd is allowed to start Safe Sync at login. `running` or `stopped` is the current daemon process state.
+
+## Configuration
+
+The local config lives at:
 
 ```text
 ~/.safe-sync/config.json
-```
-
-Run health check:
-
-```bash
-safe-sync doctor
 ```
 
 List configured folders:
@@ -123,6 +134,12 @@ Add another local folder to this machine's backup set:
 safe-sync folders add data ~/data_to_backup --label Data
 ```
 
+Run health check:
+
+```bash
+safe-sync doctor
+```
+
 Dry-run backup for all enabled folders:
 
 ```bash
@@ -135,10 +152,10 @@ Dry-run backup for one folder:
 safe-sync backup test_sync --dry-run
 ```
 
-Check status:
+Run a real backup:
 
 ```bash
-safe-sync status
+safe-sync backup
 ```
 
 List known computers from the remote registry:
@@ -147,21 +164,24 @@ List known computers from the remote registry:
 safe-sync computers
 ```
 
-Real backup to the disposable Dropbox test path:
-
-```bash
-safe-sync backup
-```
-
-Note: the first real backup attempt hit Dropbox `too_many_requests`, so wait before retrying real writes.
-
-
-Config migration:
+Migrate an older config, if needed:
 
 ```bash
 safe-sync migrate-config
 ```
 
+## Install Internals
 
+Service templates are rendered from `src/safe_sync/service.py`; generated launchd/systemd files are not kept in the repo.
 
-Windows service install is TODO. Current installer targets macOS and Linux.
+The current macOS installer writes only:
+
+```text
+~/Library/LaunchAgents/com.safe-sync.daemon.plist
+```
+
+Linux and Windows service install/control remain TODO/backlog.
+
+## Test Folder Reminder
+
+Initial development and manual testing should still use `~/test_sync` or another small explicit folder. Do not point Safe Sync at broad folders like `~` or `~/projects` until the folder-specific config is intentionally reviewed.

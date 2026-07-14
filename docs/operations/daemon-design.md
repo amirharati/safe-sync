@@ -96,7 +96,7 @@ Service install is handled by the repo installer:
 ./install.sh
 ```
 
-It installs the single `safe-sync` command, renders OS service definitions in a temporary directory, installs them, then removes the temporary files. It does not start the daemon. Runtime config stays in `~/.safe-sync`.
+It installs the single `safe-sync` command, renders the macOS LaunchAgent definition in a temporary directory, installs it, then removes the temporary files. It does not start the daemon. Runtime config stays in `~/.safe-sync`. Linux and Windows service install are TODO.
 
 
 ## Install workflow
@@ -108,4 +108,4 @@ cd ~/projects/safe-sync
 ./install.sh
 ```
 
-Use `safe-sync start` to start the installed OS service and `safe-sync stop` to stop it.
+Use `safe-sync start` to start the installed macOS LaunchAgent and `safe-sync stop` to stop it. Use `safe-sync autostart backend status` to inspect login autostart state.
