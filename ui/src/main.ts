@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
 
 type SafeSyncStatus = {
@@ -28,6 +29,8 @@ type CommandResult = { ok: boolean; output: string };
 type FolderView = Record<string, unknown> & { id?: string; label?: string; local_path?: string; enabled?: boolean };
 
 const AUTO_REFRESH_MS = 10_000;
+const ACTION_FEEDBACK_MS = 1800;
+const IS_QUICK_PANEL = getCurrentWindow().label === "quick";
 
 const stateLabel = document.querySelector<HTMLElement>("[data-status-state]");
 const reasonLabel = document.querySelector<HTMLElement>("[data-status-reason]");
@@ -54,6 +57,8 @@ const transferOutput = document.querySelector<HTMLElement>("[data-transfer-outpu
 
 let latestStatus: SafeSyncStatus | null = null;
 let busyAction: string | null = null;
+let feedbackAction: string | null = null;
+let feedbackTimer: number | null = null;
 let configLoaded = false;
 let computersLoaded = false;
 
@@ -74,6 +79,7 @@ function syncState(status: SafeSyncStatus): string {
 
 function tone(status: SafeSyncStatus): string {
   if (status.health === "error") return "error";
+  if (status.health === "warning") return "warning";
   if (status.service_state === "stopped") return "stopped";
   if (status.health === "stale") return "stale";
   if (["syncing", "dirty", "cooldown", "backoff"].includes(syncState(status))) return "active";
@@ -83,6 +89,7 @@ function tone(status: SafeSyncStatus): string {
 
 function headline(status: SafeSyncStatus): string {
   if (status.health === "error") return "Needs attention";
+  if (status.health === "warning") return syncState(status) === "backoff" ? "Waiting" : "Warning";
   if (status.service_state === "stopped") return "Stopped";
   const currentSyncState = syncState(status);
   if (currentSyncState === "syncing") return "Syncing";
@@ -101,19 +108,51 @@ function hasLog(status: SafeSyncStatus | null): boolean {
   return Boolean(status?.log && status.log.length > 0);
 }
 
+function actionNameForButton(button: HTMLButtonElement): string | null {
+  const action = button.dataset.action;
+  if (action === "backup-now") return "backup";
+  if (action === "toggle-backend") return "backend";
+  if (action === "open-logs") return "logs";
+  if (action === "open-control-panel") return "panel";
+  if (action === "close-quick") return "close";
+  if (action === "quit-tray") return "quit";
+  if (action === "reload-config") return "config";
+  if (action === "load-computers") return "computers";
+  if (action === "list-remote") return "transfer";
+  return action ?? null;
+}
+
+function holdAction(action: string): void {
+  if (feedbackTimer !== null) window.clearTimeout(feedbackTimer);
+  feedbackAction = action;
+  setBusy(null);
+  feedbackTimer = window.setTimeout(() => {
+    feedbackAction = null;
+    feedbackTimer = null;
+    setBusy(null);
+  }, ACTION_FEEDBACK_MS);
+}
+
+function isHeld(action: string): boolean {
+  return feedbackAction === action;
+}
+
 function setBusy(action: string | null): void {
   busyAction = action;
-  const isBusy = action !== null;
   for (const button of document.querySelectorAll<HTMLButtonElement>("button")) {
-    button.disabled = isBusy && button.dataset.action !== "refresh";
+    const isFeedback = feedbackAction !== null && actionNameForButton(button) === feedbackAction;
+    const isCurrentAction = action !== null && actionNameForButton(button) === action;
+    button.disabled = isCurrentAction || isFeedback;
+    button.dataset.feedback = isFeedback ? "true" : "false";
   }
-  if (refreshButton) refreshButton.disabled = isBusy;
-  if (toggleButton) toggleButton.disabled = isBusy || latestStatus?.service_state === "unknown";
+  if (refreshButton) refreshButton.disabled = action === "refresh" || isHeld("refresh");
+  if (toggleButton) toggleButton.disabled = action === "backend" || isHeld("backend") || latestStatus?.service_state === "unknown";
   if (backupButton) {
-    backupButton.disabled = isBusy || latestStatus?.service_state === "unknown";
+    backupButton.disabled = action === "backup" || isHeld("backup") || latestStatus?.service_state !== "running";
     backupButton.textContent = action === "backup" ? "Backing Up" : "Backup Now";
+    backupButton.title = latestStatus?.service_state === "running" ? "" : "Start the backend before running Backup Now";
   }
-  if (logsButton) logsButton.disabled = isBusy || !hasLog(latestStatus);
+  if (logsButton) logsButton.disabled = action === "logs" || isHeld("logs") || !hasLog(latestStatus);
 }
 
 function renderStatus(status: SafeSyncStatus): void {
@@ -211,6 +250,7 @@ async function loadConfig(): Promise<void> {
   try {
     renderConfig(await invoke<SafeSyncConfig>("get_config"));
     setMessage("Settings loaded", "ok");
+    holdAction("config");
   } catch (error) {
     setMessage(String(error), "error");
   } finally {
@@ -304,6 +344,7 @@ async function loadComputers(): Promise<void> {
       if (computers.length === 0) computerList.textContent = "No computers found";
     }
     setMessage("Computers loaded", "ok");
+    holdAction("computers");
   } catch (error) {
     setMessage(String(error), "error");
   } finally {
@@ -321,6 +362,7 @@ async function listRemote(): Promise<void> {
     });
     transferOutput.textContent = result.output || "No output";
     setMessage("Remote listed", "ok");
+    holdAction("transfer");
   } catch (error) {
     transferOutput.textContent = String(error);
     setMessage(String(error), "error");
@@ -342,6 +384,7 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
     });
     transferOutput.textContent = result.output || "Done";
     setMessage(dryRun ? "Dry run complete" : "Pull complete", "ok");
+    holdAction("transfer");
   } catch (error) {
     transferOutput.textContent = String(error);
     setMessage(String(error), "error");
@@ -354,6 +397,7 @@ async function refreshStatus(): Promise<void> {
   setBusy("refresh");
   try {
     renderStatus(await invoke<SafeSyncStatus>("get_status"));
+    holdAction("refresh");
   } catch (error) {
     renderError(error);
   } finally {
@@ -373,9 +417,10 @@ async function refreshStatusQuietly(): Promise<void> {
 async function toggleBackend(): Promise<void> {
   if (!latestStatus) await refreshStatus();
   const action = latestStatus ? desiredAction(latestStatus) : "start";
-  setBusy(action);
+  setBusy("backend");
   try {
     renderStatus(await invoke<SafeSyncStatus>("control_backend", { action }));
+    holdAction("backend");
   } catch (error) {
     renderError(error);
   } finally {
@@ -387,6 +432,7 @@ async function backupNow(): Promise<void> {
   setBusy("backup");
   try {
     renderStatus(await invoke<SafeSyncStatus>("backup_now"));
+    holdAction("backup");
   } catch (error) {
     renderError(error);
   } finally {
@@ -398,11 +444,31 @@ async function openLogs(): Promise<void> {
   setBusy("logs");
   try {
     await invoke("open_logs");
+    holdAction("logs");
   } catch (error) {
     renderError(error);
   } finally {
     setBusy(null);
   }
+}
+
+async function openControlPanel(): Promise<void> {
+  setBusy("panel");
+  try {
+    await invoke("open_control_panel");
+  } catch (error) {
+    renderError(error);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function closeQuickPanel(): Promise<void> {
+  await invoke("close_quick_panel");
+}
+
+async function quitTray(): Promise<void> {
+  await invoke("quit_tray");
 }
 
 function activateTab(tab: string): void {
@@ -418,10 +484,14 @@ function activateTab(tab: string): void {
 
 window.addEventListener("DOMContentLoaded", () => {
   document.documentElement.dataset.ready = "true";
+  document.documentElement.dataset.panel = IS_QUICK_PANEL ? "quick" : "main";
   refreshButton?.addEventListener("click", () => void refreshStatus());
   toggleButton?.addEventListener("click", () => void toggleBackend());
   backupButton?.addEventListener("click", () => void backupNow());
   logsButton?.addEventListener("click", () => void openLogs());
+  document.querySelector("[data-action='open-control-panel']")?.addEventListener("click", () => void openControlPanel());
+  document.querySelector("[data-action='close-quick']")?.addEventListener("click", () => void closeQuickPanel());
+  document.querySelector("[data-action='quit-tray']")?.addEventListener("click", () => void quitTray());
   settingsForm?.addEventListener("submit", (event) => void saveSettings(event));
   addFolderForm?.addEventListener("submit", (event) => void addFolder(event));
   folderList?.addEventListener("click", (event) => {

@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Safe Sync</title>
+    <script>
+      try {
+        document.documentElement.dataset.panel =
+          window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "quick" ? "quick" : "main";
+      } catch {
+        document.documentElement.dataset.panel = "main";
+      }
+    </script>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
@@ -45,10 +53,13 @@
             </div>
           </dl>
           <div class="actions" aria-label="Backend controls">
-            <button type="button" class="secondary" data-action="refresh">Refresh</button>
-            <button type="button" class="secondary" data-action="open-logs">Open Logs</button>
             <button type="button" class="primary" data-action="toggle-backend" data-intent="start">Start Backend</button>
             <button type="button" class="primary" data-action="backup-now">Backup Now</button>
+            <button type="button" class="secondary" data-action="refresh">Refresh</button>
+            <button type="button" class="secondary" data-action="open-logs">Open Logs</button>
+            <button type="button" class="secondary quick-only" data-action="open-control-panel">Open Control Panel</button>
+            <button type="button" class="secondary quick-only" data-action="close-quick">Close</button>
+            <button type="button" class="secondary quick-only" data-action="quit-tray">Quit Tray</button>
           </div>
           <p class="refresh-note" data-refresh-note>Auto refresh every 10s</p>
         </section>

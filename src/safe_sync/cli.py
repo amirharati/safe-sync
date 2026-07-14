@@ -37,7 +37,15 @@ DEFAULT_LOG_DIR = Path.home() / ".local" / "log" / "safe-sync"
 DEFAULT_FILTER = CONFIG_HOME / "filter.txt"
 TEMPLATE_FILTER = PROJECT_ROOT / "config" / "filter.txt"
 
-RATE_LIMIT_PATTERNS = ("too_many_requests", "rate limit", "rate_limit", "retry-after")
+RATE_LIMIT_PATTERNS = ("too_many_requests", "too many requests", "rate limit", "rate_limit", "retry-after")
+RATE_LIMIT_EXIT = 75
+LAST_COMMAND_OUTPUT = ""
+
+
+class RateLimitedError(RuntimeError):
+    def __init__(self, message: str, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 def now_iso() -> str:
@@ -99,12 +107,36 @@ def recent_log_text(config: dict[str, Any], max_chars: int = 12000) -> str:
     return text[-max_chars:]
 
 
+def text_looks_rate_limited(text: str) -> bool:
+    lower = text.lower()
+    return any(pattern in lower for pattern in RATE_LIMIT_PATTERNS)
+
+
+def rate_limit_retry_after_seconds(text: str, default: int = 300) -> int:
+    patterns = (
+        r"retry-after[:= ]+(\d+)",
+        r"trying again in (\d+) seconds",
+        r"try again in (\d+) seconds",
+    )
+    lower = text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, lower)
+        if match:
+            return max(1, int(match.group(1)))
+    return default
+
+
+def future_iso(seconds: int) -> str:
+    return (dt.datetime.now(dt.timezone.utc).astimezone() + dt.timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+
 def looks_rate_limited(config: dict[str, Any]) -> bool:
-    text = recent_log_text(config).lower()
-    return any(pattern in text for pattern in RATE_LIMIT_PATTERNS)
+    return text_looks_rate_limited(recent_log_text(config))
 
 
 def run_command(config: dict[str, Any], cmd: list[str], dry_run: bool = False) -> int:
+    global LAST_COMMAND_OUTPUT
+    LAST_COMMAND_OUTPUT = ""
     log = log_path(config)
     log.parent.mkdir(parents=True, exist_ok=True)
     header = f"\n[{now_iso()}] $ {' '.join(cmd)}\n"
@@ -115,6 +147,7 @@ def run_command(config: dict[str, Any], cmd: list[str], dry_run: bool = False) -
         try:
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
             output = result.stdout or ""
+            LAST_COMMAND_OUTPUT = output
             print(output, end="")
             fh.write(output)
             fh.write(f"[{now_iso()}] exit={result.returncode} dry_run={dry_run}\n")
@@ -123,6 +156,7 @@ def run_command(config: dict[str, Any], cmd: list[str], dry_run: bool = False) -
             output = exc.stdout or ""
             if isinstance(output, bytes):
                 output = output.decode(errors="replace")
+            LAST_COMMAND_OUTPUT = output
             print(output, end="")
             fh.write(output)
             message = f"[{now_iso()}] timeout after {timeout}s; treating run as failed\n"
@@ -321,7 +355,11 @@ def preflight(config: dict[str, Any]) -> None:
     cmd = [rclone_bin(config), "about", remote, "--timeout", "20s", "--contimeout", "10s", "--retries", "1", "--low-level-retries", "1"]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45)
     if result.returncode != 0:
-        append_log(config, f"[{now_iso()}] preflight failed:\n{result.stdout}\n")
+        output = result.stdout or ""
+        append_log(config, f"[{now_iso()}] preflight failed:\n{output}\n")
+        if text_looks_rate_limited(output):
+            retry_after = rate_limit_retry_after_seconds(output, int(config.get("rate_limit_backoff_seconds", 300)))
+            raise RateLimitedError(f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s", retry_after)
         raise SystemExit("Remote preflight failed; see log")
 
 
@@ -437,8 +475,65 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def current_status(config: dict[str, Any]) -> dict[str, Any]:
+    status_path = Path(config.get("status_path", DEFAULT_STATUS)).expanduser()
+    if not status_path.exists():
+        return {}
+    try:
+        return json.loads(status_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+
+def active_backoff_remaining_seconds(config: dict[str, Any]) -> tuple[str, float] | None:
+    status = current_status(config)
+    if status.get("state") != "backoff":
+        return None
+    until = parse_status_time(status.get("backoff_until"))
+    if until is None:
+        return None
+    remaining = (until - dt.datetime.now(dt.timezone.utc).astimezone()).total_seconds()
+    if remaining > 0:
+        return until.isoformat(timespec="seconds"), remaining
+    return None
+
+
+def active_backoff_until(config: dict[str, Any]) -> str | None:
+    active = active_backoff_remaining_seconds(config)
+    return active[0] if active else None
+
+
+def save_rate_limit_status(config: dict[str, Any], message: str, retry_after_seconds: int, *, queued: bool) -> None:
+    save_status(
+        config,
+        state="backoff",
+        folder_id=config.get("folder_id"),
+        last_warning=message,
+        last_error=None,
+        backoff_seconds=retry_after_seconds,
+        backoff_until=future_iso(retry_after_seconds),
+        queued_backup=queued,
+        last_finish=now_iso(),
+    )
+
+
 def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
     with Lock(lock_file(config)):
+        existing_backoff_until = active_backoff_until(config)
+        if existing_backoff_until:
+            save_status(
+                config,
+                state="backoff",
+                folder_id=config.get("folder_id"),
+                last_warning=f"Backup queued; Dropbox cooldown is active until {existing_backoff_until}",
+                last_error=None,
+                backoff_until=existing_backoff_until,
+                queued_backup=True,
+                last_command="backup",
+                last_finish=now_iso(),
+            )
+            print(f"Dropbox cooldown active until {existing_backoff_until}; backup queued")
+            return RATE_LIMIT_EXIT
         save_status(
             config,
             state="syncing",
@@ -446,17 +541,36 @@ def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
             last_start=now_iso(),
             last_command="backup",
             last_error=None,
+            last_warning=None,
         )
         try:
             preflight(config)
             code = run_command(config, backup_cmd(config, dry_run), dry_run=dry_run)
+        except RateLimitedError as exc:
+            save_rate_limit_status(config, str(exc), exc.retry_after_seconds, queued=True)
+            print(str(exc))
+            return RATE_LIMIT_EXIT
         except BaseException as exc:
             save_status(config, state="error", folder_id=config.get("folder_id"), last_error=str(exc), last_finish=now_iso())
             raise
         if code == 0:
-            save_status(config, state="idle", folder_id=config.get("folder_id"), last_success=now_iso(), last_finish=now_iso(), last_error=None)
+            if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
+                retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+                save_rate_limit_status(
+                    config,
+                    f"Dropbox reported throttling; cooling down for {retry_after}s",
+                    retry_after,
+                    queued=False,
+                )
+                return RATE_LIMIT_EXIT
+            else:
+                save_status(config, state="idle", folder_id=config.get("folder_id"), last_success=now_iso(), last_finish=now_iso(), last_error=None, last_warning=None)
         else:
-            save_status(config, state="error", folder_id=config.get("folder_id"), last_error=f"rclone exit {code}", last_finish=now_iso())
+            if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
+                retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+                save_rate_limit_status(config, f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s", retry_after, queued=True)
+            else:
+                save_status(config, state="error", folder_id=config.get("folder_id"), last_error=f"rclone exit {code}", last_finish=now_iso())
         return code
 
 
@@ -510,9 +624,20 @@ def parse_status_time(value: Any) -> dt.datetime | None:
 def status_health(config: dict[str, Any], service_state: str, sync_state: dict[str, Any]) -> dict[str, Any]:
     daemon_seen_at = sync_state.get("updated_at")
     last_error = sync_state.get("last_error")
-    if last_error:
+    last_warning = sync_state.get("last_warning")
+    sync_status = sync_state.get("state")
+    if sync_status in {"backoff", "cooldown"} and (last_warning or sync_state.get("backoff_until")):
+        health = "warning"
+        reason = str(last_warning or "Dropbox cooldown is active")
+    elif last_error and text_looks_rate_limited(str(last_error)):
+        health = "warning"
+        reason = str(last_error)
+    elif last_error:
         health = "error"
         reason = str(last_error)
+    elif last_warning:
+        health = "warning"
+        reason = str(last_warning)
     elif service_state == "stopped":
         health = "stopped"
         reason = "daemon service is stopped"
@@ -706,6 +831,18 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     while True:
         loops += 1
         now = time.monotonic()
+        status_snapshot = current_status(config)
+        if status_snapshot.get("state") == "backoff" and status_snapshot.get("queued_backup"):
+            external_backoff = active_backoff_remaining_seconds(config)
+            if external_backoff:
+                _until, remaining = external_backoff
+                if daemon.state.state != DaemonState.BACKOFF:
+                    daemon.state.state = DaemonState.BACKOFF
+                    daemon.state.dirty = True
+                    daemon.state.backoff_until_monotonic = now + remaining
+            else:
+                daemon.mark_dirty(now)
+                save_status(config, state="dirty", last_error=None, last_warning=None, note="queued backup cooldown expired")
         current_snapshots = folder_snapshots(config)
         changed = [folder_id for folder_id, snapshot in current_snapshots.items() if snapshot != previous_snapshots.get(folder_id)]
         if changed:
@@ -748,8 +885,10 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 previous_snapshots = folder_snapshots(config)
                 save_status(config, state="watching", last_success=now_iso(), last_error=None)
             else:
-                reason = "rate limited" if rate_limited else "remote/preflight failed"
-                save_status(config, state="backoff", failed_folder=failed_folder, last_error=f"{error_text}; {reason}")
+                if rate_limited:
+                    save_status(config, state="backoff", failed_folder=failed_folder, last_warning=f"{error_text}; rate limited", last_error=None, queued_backup=True)
+                else:
+                    save_status(config, state="backoff", failed_folder=failed_folder, last_error=f"{error_text}; remote/preflight failed")
             if args.once:
                 return code
 

@@ -6,10 +6,15 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, State, Wry};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, WindowEvent, Wry};
+
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSWindow;
+#[cfg(target_os = "macos")]
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SafeSyncStatus {
@@ -73,6 +78,7 @@ struct AppState {
     toggle_item: Mutex<Option<MenuItem<Wry>>>,
     backup_item: Mutex<Option<MenuItem<Wry>>>,
     logs_item: Mutex<Option<MenuItem<Wry>>>,
+    last_tray_click: Mutex<Option<Instant>>,
 }
 
 
@@ -168,6 +174,21 @@ fn read_status() -> Result<SafeSyncStatus, String> {
     serde_json::from_str(&stdout).map_err(|err| format!("safe-sync status returned invalid JSON: {err}"))
 }
 
+async fn run_safe_sync_blocking(args: Vec<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_safe_sync(&refs)
+    })
+    .await
+    .unwrap_or_else(|err| Err(format!("safe-sync task failed: {err}")))
+}
+
+async fn read_status_blocking() -> Result<SafeSyncStatus, String> {
+    tauri::async_runtime::spawn_blocking(read_status)
+        .await
+        .unwrap_or_else(|err| Err(format!("status task failed: {err}")))
+}
+
 fn sync_state(status: &SafeSyncStatus) -> Option<&str> {
     status.sync_state.get("state").and_then(Value::as_str)
 }
@@ -226,7 +247,7 @@ fn update_items(
     let _ = toggle_item.set_text(toggle_label(status));
     let known = status.service_state != "unknown";
     let _ = toggle_item.set_enabled(known);
-    let _ = backup_item.set_enabled(known);
+    let _ = backup_item.set_enabled(status.service_state == "running");
     let _ = logs_item.set_enabled(status.log.as_ref().is_some_and(|path| !path.is_empty()));
 }
 
@@ -249,12 +270,12 @@ fn refresh_menu_items(
     }
 }
 
-fn update_menu_state(state: &State<AppState>, status: &SafeSyncStatus) {
+fn update_menu_state_from_app(app: &AppHandle<Wry>, status: &SafeSyncStatus) {
+    let state = app.state::<AppState>();
     let Ok(status_guard) = state.status_item.lock() else { return };
     let Ok(toggle_guard) = state.toggle_item.lock() else { return };
     let Ok(backup_guard) = state.backup_item.lock() else { return };
     let Ok(logs_guard) = state.logs_item.lock() else { return };
-
     if let (Some(status_item), Some(toggle_item), Some(backup_item), Some(logs_item)) = (
         status_guard.as_ref(),
         toggle_guard.as_ref(),
@@ -334,7 +355,7 @@ fn save_settings(update: SafeSyncSettingsUpdate) -> Result<SafeSyncConfigView, S
 }
 
 #[tauri::command]
-fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, String> {
+async fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, String> {
     if request.id.trim().is_empty() || request.local_path.trim().is_empty() {
         return Err("folder id and local path are required".to_string());
     }
@@ -354,8 +375,7 @@ fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, String> {
     if request.disabled {
         args.push("--disabled".to_string());
     }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_safe_sync(&refs)?;
+    run_safe_sync_blocking(args).await?;
     get_config()
 }
 
@@ -384,49 +404,49 @@ fn update_folder(request: UpdateFolderRequest) -> Result<SafeSyncConfigView, Str
 }
 
 #[tauri::command]
-fn get_computers() -> Result<Value, String> {
-    let stdout = run_safe_sync(&["computers"])?;
+async fn get_computers() -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["computers".to_string()]).await?;
     serde_json::from_str(&stdout).map_err(|err| format!("safe-sync computers returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
-fn list_remote(target: String, depth: u64) -> Result<CommandResult, String> {
+async fn list_remote(target: String, depth: u64) -> Result<CommandResult, String> {
     if target.trim().is_empty() {
         return Err("remote target is required".to_string());
     }
     let depth = depth.clamp(1, 5).to_string();
-    let output = run_safe_sync(&["list", target.as_str(), "--depth", depth.as_str()])?;
+    let output = run_safe_sync_blocking(vec!["list".to_string(), target, "--depth".to_string(), depth]).await?;
     Ok(CommandResult { ok: true, output })
 }
 
 #[tauri::command]
-fn pull_remote(source: String, destination: String, dry_run: bool) -> Result<CommandResult, String> {
+async fn pull_remote(source: String, destination: String, dry_run: bool) -> Result<CommandResult, String> {
     if source.trim().is_empty() || destination.trim().is_empty() {
         return Err("source and destination are required".to_string());
     }
     let args = if dry_run {
-        vec!["pull", source.as_str(), destination.as_str(), "--dry-run"]
+        vec!["pull".to_string(), source, destination, "--dry-run".to_string()]
     } else {
-        vec!["pull", source.as_str(), destination.as_str()]
+        vec!["pull".to_string(), source, destination]
     };
-    let output = run_safe_sync(&args)?;
+    let output = run_safe_sync_blocking(args).await?;
     Ok(CommandResult { ok: true, output })
 }
 
 #[tauri::command]
-fn get_status(state: State<AppState>) -> SafeSyncStatus {
-    let status = read_status().unwrap_or_else(error_status);
-    update_menu_state(&state, &status);
-    status
+async fn get_status(app: AppHandle<Wry>) -> Result<SafeSyncStatus, String> {
+    let status = read_status_blocking().await.unwrap_or_else(error_status);
+    update_menu_state_from_app(&app, &status);
+    Ok(status)
 }
 
 #[tauri::command]
-fn control_backend(action: String, state: State<AppState>) -> Result<SafeSyncStatus, String> {
+async fn control_backend(action: String, app: AppHandle<Wry>) -> Result<SafeSyncStatus, String> {
     match action.as_str() {
         "start" | "stop" | "restart" => {
-            run_safe_sync(&[action.as_str()])?;
-            let status = read_status().unwrap_or_else(error_status);
-            update_menu_state(&state, &status);
+            run_safe_sync_blocking(vec![action]).await?;
+            let status = read_status_blocking().await.unwrap_or_else(error_status);
+            update_menu_state_from_app(&app, &status);
             Ok(status)
         }
         _ => Err(format!("unknown backend action: {action}")),
@@ -434,33 +454,149 @@ fn control_backend(action: String, state: State<AppState>) -> Result<SafeSyncSta
 }
 
 #[tauri::command]
-fn backup_now(state: State<AppState>) -> SafeSyncStatus {
-    let result = run_safe_sync(&["backup"]);
-    let status = read_status().unwrap_or_else(|status_err| {
+async fn backup_now(app: AppHandle<Wry>) -> Result<SafeSyncStatus, String> {
+    if let Ok(status) = read_status_blocking().await {
+        if status.service_state != "running" {
+            update_menu_state_from_app(&app, &status);
+            return Err("Backend daemon is stopped; start it before running Backup Now".to_string());
+        }
+    }
+
+    let result = run_safe_sync_blocking(vec!["backup".to_string()]).await;
+    let status = read_status_blocking().await.unwrap_or_else(|status_err| {
         error_status(match result {
             Ok(_) => status_err,
             Err(command_err) => format!("{command_err}; additionally failed to refresh status: {status_err}"),
         })
     });
-    update_menu_state(&state, &status);
-    status
+    update_menu_state_from_app(&app, &status);
+    Ok(status)
+}
+
+fn show_control_panel_window(app: &AppHandle<Wry>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tray_anchor(app: &AppHandle<Wry>) -> Option<(NSRect, NSRect)> {
+    let tray = app.tray_by_id("main")?;
+    tray.with_inner_tray_icon(|inner| {
+        let mtm = MainThreadMarker::new()?;
+        let status_item = inner.ns_status_item()?;
+        let button = status_item.button(mtm)?;
+        let status_window = button.window()?;
+        let screen = status_window.screen()?;
+        Some((status_window.frame(), screen.visibleFrame()))
+    })
+    .ok()
+    .flatten()
+}
+
+#[cfg(target_os = "macos")]
+fn native_quick_window(app: &AppHandle<Wry>) -> Option<&NSWindow> {
+    let window = app.get_webview_window("quick")?;
+    let pointer = window.ns_window().ok()?;
+    unsafe { pointer.cast::<NSWindow>().as_ref() }
+}
+
+#[cfg(target_os = "macos")]
+fn hide_quick_panel(app: &AppHandle<Wry>) {
+    if let Some(window) = native_quick_window(app) {
+        window.orderOut(None);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn toggle_quick_panel(app: &AppHandle<Wry>) {
+    let Some(window) = native_quick_window(app) else {
+        return;
+    };
+    if window.isVisible() {
+        window.orderOut(None);
+        return;
+    }
+
+    let Some((anchor, screen)) = tray_anchor(app) else {
+        return;
+    };
+    let panel = window.frame();
+    let centered_x = anchor.origin.x + (anchor.size.width - panel.size.width) / 2.0;
+    let x = centered_x.clamp(screen.origin.x, screen.origin.x + screen.size.width - panel.size.width);
+    let y = (anchor.origin.y - panel.size.height - 6.0)
+        .clamp(screen.origin.y, screen.origin.y + screen.size.height - panel.size.height);
+
+    window.setFrameOrigin(NSPoint::new(x, y));
+    window.makeKeyAndOrderFront(None);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn toggle_quick_panel(app: &AppHandle<Wry>) {
+    let Some(window) = app.get_webview_window("quick") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    } else {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn accept_tray_click(app: &AppHandle<Wry>) -> bool {
+    let state = app.state::<AppState>();
+    let Ok(mut last_click) = state.last_tray_click.lock() else {
+        return true;
+    };
+    let now = Instant::now();
+    if last_click.is_some_and(|previous| now.duration_since(previous) < Duration::from_millis(300)) {
+        return false;
+    }
+    last_click.replace(now);
+    true
 }
 
 #[tauri::command]
-fn open_logs() -> Result<(), String> {
+fn open_logs(_app: AppHandle<Wry>) -> Result<(), String> {
     let status = read_status()?;
     let log = status.log.ok_or_else(|| "safe-sync status did not include a log path".to_string())?;
     open_path(&log)
 }
 
+#[tauri::command]
+fn open_control_panel(app: AppHandle<Wry>) {
+    show_control_panel_window(&app);
+}
+
+#[tauri::command]
+fn close_quick_panel(app: AppHandle<Wry>) {
+    #[cfg(target_os = "macos")]
+    hide_quick_panel(&app);
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(window) = app.get_webview_window("quick") {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
+fn quit_tray(app: AppHandle<Wry>) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    builder
         .manage(AppState {
             status_item: Mutex::new(None),
             toggle_item: Mutex::new(None),
             backup_item: Mutex::new(None),
             logs_item: Mutex::new(None),
+            last_tray_click: Mutex::new(None),
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -469,14 +605,34 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_status, control_backend, backup_now, open_logs, get_config, save_settings, add_folder, update_folder, get_computers, list_remote, pull_remote])
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            control_backend,
+            backup_now,
+            open_logs,
+            open_control_panel,
+            close_quick_panel,
+            quit_tray,
+            get_config,
+            save_settings,
+            add_folder,
+            update_folder,
+            get_computers,
+            list_remote,
+            pull_remote
+        ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let status = MenuItem::with_id(app, "status", "Safe Sync: Checking", false, None::<&str>)?;
-            let show = MenuItem::with_id(app, "show", "Show Status Window", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "show", "Open Control Panel", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "backend-toggle", "Start Backend", true, None::<&str>)?;
             let backup = MenuItem::with_id(app, "backup-now", "Backup Now", true, None::<&str>)?;
             let logs = MenuItem::with_id(app, "open-logs", "Open Logs", true, None::<&str>)?;
-            let refresh = MenuItem::with_id(app, "refresh", "Refresh Status", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Tray", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
@@ -485,11 +641,7 @@ pub fn run() {
                     &status,
                     &separator,
                     &show,
-                    &refresh,
                     &logs,
-                    &separator,
-                    &toggle,
-                    &backup,
                     &separator,
                     &quit,
                 ],
@@ -528,49 +680,38 @@ pub fn run() {
                 }
             });
 
-            TrayIconBuilder::new()
+            TrayIconBuilder::with_id("main")
                 .tooltip("Safe Sync")
                 .icon(icon)
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if accept_tray_click(tray.app_handle()) {
+                            toggle_quick_panel(tray.app_handle());
+                        }
+                    }
+                })
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "refresh" => {
-                        refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                        show_control_panel_window(app);
                     }
                     "open-logs" => {
-                        if let Ok(status) = read_status() {
-                            if let Some(log) = status.log {
-                                let _ = open_path(&log);
-                            }
-                        }
-                        refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
-                    }
-                    "backend-toggle" => {
-                        let before = refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
-                        let action = if should_stop_backend(&before) { "stop" } else { "start" };
-                        if run_safe_sync(&[action]).is_err() {
-                            let _ = status_item.set_text(if action == "stop" {
-                                "Safe Sync: Stop failed"
-                            } else {
-                                "Safe Sync: Start failed"
-                            });
-                        }
-                        refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
-                    }
-                    "backup-now" => {
-                        let _ = status_item.set_text("Safe Sync: Backup running");
                         let status_item = status_item.clone();
                         let toggle_item = toggle_item.clone();
                         let backup_item = backup_item.clone();
                         let logs_item = logs_item.clone();
                         thread::spawn(move || {
-                            let _ = run_safe_sync(&["backup"]);
+                            if let Ok(status) = read_status() {
+                                if let Some(log) = status.log {
+                                    let _ = open_path(&log);
+                                }
+                            }
                             refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
                         });
                     }

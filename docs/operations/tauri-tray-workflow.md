@@ -13,6 +13,10 @@ Tauri tray app         shows status and calls safe-sync commands
 
 The tray app is not a daemon replacement. It should be safe to quit the tray while the backend daemon keeps running.
 
+On macOS, the small tray surface is a borderless native `NSWindow` containing the existing Tauri WebView. It is positioned from the status item's native AppKit window coordinates, avoiding the unreliable first-show behavior of Tauri's cross-platform `set_position` path. The larger control panel remains a normal Tauri window.
+
+The small AppKit bridge lives directly in `ui/src-tauri/src/lib.rs`; there is no separate popover plugin. Linux and Windows keep a basic hidden-window fallback until their tray behavior is implemented and tested on those platforms.
+
 ## Expected Repo Layout
 
 After scaffolding, the repo should look roughly like this:
@@ -79,7 +83,7 @@ Expected behavior:
 - Rust/Tauri checks with `cd ui/src-tauri && cargo check`.
 - No real sync actions yet.
 - A placeholder tray menu appears when run with `npm run tauri dev`.
-- A small status window can open from the tray for diagnostics.
+- A control panel window can open from the tray for diagnostics and settings.
 
 Current files to review:
 
@@ -87,9 +91,9 @@ Current files to review:
 - `ui/package-lock.json` for reproducible npm installs.
 - `ui/src-tauri/Cargo.toml` for Rust/Tauri dependencies.
 - `ui/src-tauri/Cargo.lock` for reproducible Rust dependency resolution.
-- `ui/src-tauri/tauri.conf.json` for app identity and hidden status window config.
+- `ui/src-tauri/tauri.conf.json` for app identity and hidden control panel window config.
 - `ui/src-tauri/src/lib.rs` for tray menu setup.
-- `ui/src/main.ts`, `ui/index.html`, and `ui/src/styles.css` for the placeholder status window.
+- `ui/src/main.ts`, `ui/index.html`, and `ui/src/styles.css` for the control panel window.
 
 Review point: inspect the generated `ui/` structure together before wiring real Safe Sync commands.
 
@@ -100,9 +104,11 @@ Goal: tray shows real Safe Sync health.
 Current behavior:
 
 - Rust/Tauri runs `safe-sync status` and parses the JSON response.
+- The macOS tray click opens a persistent borderless panel with status and controls.
+- AppKit supplies the status-item anchor and screen bounds before the panel is shown.
 - The tray label maps `service_state` plus `sync_state.state` to simple labels such as stopped, watching, syncing, backoff, cooldown, and error.
-- The status window can refresh the same status through a Tauri command.
-- The status window shows health reason, backend service state, sync state, daemon seen time, and log path.
+- The control panel can refresh the same status through a Tauri command.
+- The control panel shows health reason, backend service state, sync state, daemon seen time, and log path.
 
 Review point: verify the labels feel clear before adding richer history or settings.
 
@@ -115,10 +121,10 @@ Current behavior:
 - Start Backend -> `safe-sync start`
 - Stop Backend -> `safe-sync stop`
 - Refresh Status -> `safe-sync status`
-- Show Status Window -> opens the hidden diagnostics window
+- Open Control Panel -> opens the hidden control panel window
 - Quit Tray -> quits the tray app only
 
-The status window also exposes Start, Stop, and Refresh buttons through the same Tauri command bridge. These actions do not perform sync logic directly; they only call the existing CLI.
+The control panel also exposes Start, Stop, and Refresh buttons through the same Tauri command bridge. These actions do not perform sync logic directly; they only call the existing CLI.
 
 Still pending for later checkpoints:
 
@@ -193,6 +199,7 @@ Quit Tray
 - Every sync action goes through the existing CLI.
 - Avoid background writes from the UI except explicit start/stop/autostart actions.
 - Prefer small, inspectable commands over hidden behavior.
+- Do not position the macOS quick tray surface with Tauri's `set_position`; use the native status-item and `NSWindow` frames in the same AppKit coordinate system.
 - Keep Linux behavior conservative: right-click menu is the reliable baseline.
 
 ## Open Questions

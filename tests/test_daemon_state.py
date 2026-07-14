@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
@@ -7,7 +9,10 @@ from safe_sync.cli import (
     normalized_config,
     registry_doc,
     registry_path,
+    RATE_LIMIT_EXIT,
+    run_backup_with_config,
     selected_folders,
+    status_health,
     unsafe_local_path_reason,
 )
 from safe_sync.path_filter import should_ignore_watch_event
@@ -44,6 +49,110 @@ def test_rate_limit_enters_backoff():
 
     assert daemon.state.state == DaemonState.BACKOFF
     assert daemon.state.backoff_until_monotonic == 420.0
+
+
+def test_status_health_reports_rate_limit_as_warning():
+    health = status_health(
+        {"poll_interval_seconds": 5},
+        "running",
+        {
+            "state": "backoff",
+            "last_warning": "Dropbox rate limited Safe Sync; cooling down for 300s",
+            "backoff_until": "2099-01-01T00:00:00+00:00",
+        },
+    )
+
+    assert health["health"] == "warning"
+    assert "rate limited" in health["reason"]
+
+
+def test_backup_preflight_rate_limit_sets_backoff_warning(monkeypatch, tmp_path):
+    local = tmp_path / "local"
+    local.mkdir()
+    (tmp_path / "filter.txt").write_text("")
+    config = {
+        "rclone_bin": "rclone",
+        "local_path": str(local),
+        "remote_root": "dropbox:computer-backups/test/mac/test_sync",
+        "trash_root": "dropbox:computer-backups/test/.trash/mac/test_sync",
+        "filter_file": str(tmp_path / "filter.txt"),
+        "status_path": str(tmp_path / "status.json"),
+        "log_dir": str(tmp_path),
+        "lock_file": str(tmp_path / "safe-sync.lock"),
+        "rate_limit_backoff_seconds": 120,
+    }
+
+    def fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(_args[0], 1, "Too many requests or write operations. Trying again in 300 seconds.")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert run_backup_with_config(config, dry_run=False) == RATE_LIMIT_EXIT
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["state"] == "backoff"
+    assert status["last_error"] is None
+    assert "rate limited" in status["last_warning"]
+    assert status["backoff_seconds"] == 300
+    assert status["queued_backup"] is True
+
+
+def test_backup_success_with_rate_limit_notice_still_cools_down(monkeypatch, tmp_path):
+    local = tmp_path / "local"
+    local.mkdir()
+    (tmp_path / "filter.txt").write_text("")
+    config = {
+        "rclone_bin": "rclone",
+        "local_path": str(local),
+        "remote_root": "dropbox:computer-backups/test/mac/test_sync",
+        "trash_root": "dropbox:computer-backups/test/.trash/mac/test_sync",
+        "filter_file": str(tmp_path / "filter.txt"),
+        "status_path": str(tmp_path / "status.json"),
+        "log_dir": str(tmp_path),
+        "lock_file": str(tmp_path / "safe-sync.lock"),
+        "rate_limit_backoff_seconds": 120,
+    }
+    calls = iter([
+        subprocess.CompletedProcess(["rclone", "about"], 0, "ok"),
+        subprocess.CompletedProcess(["rclone", "sync"], 0, "Too many requests or write operations. Trying again in 300 seconds."),
+    ])
+
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: next(calls))
+
+    assert run_backup_with_config(config, dry_run=False) == RATE_LIMIT_EXIT
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["state"] == "backoff"
+    assert status["last_error"] is None
+    assert status["queued_backup"] is False
+    assert status["backoff_seconds"] == 300
+
+
+def test_backup_during_active_backoff_queues_without_rclone(monkeypatch, tmp_path):
+    local = tmp_path / "local"
+    local.mkdir()
+    (tmp_path / "filter.txt").write_text("")
+    status_path = tmp_path / "status.json"
+    status_path.write_text('{"state":"backoff","backoff_until":"2099-01-01T00:00:00+00:00"}')
+    config = {
+        "rclone_bin": "rclone",
+        "local_path": str(local),
+        "remote_root": "dropbox:computer-backups/test/mac/test_sync",
+        "trash_root": "dropbox:computer-backups/test/.trash/mac/test_sync",
+        "filter_file": str(tmp_path / "filter.txt"),
+        "status_path": str(status_path),
+        "log_dir": str(tmp_path),
+        "lock_file": str(tmp_path / "safe-sync.lock"),
+    }
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("rclone should not be called during active backoff")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    assert run_backup_with_config(config, dry_run=False) == RATE_LIMIT_EXIT
+    status = json.loads(status_path.read_text())
+    assert status["state"] == "backoff"
+    assert status["queued_backup"] is True
+    assert "queued" in status["last_warning"]
 
 
 def test_watch_filter_ignores_generated_paths():
@@ -184,8 +293,6 @@ def test_backup_cmd_metadata_is_opt_in():
 
 
 def test_rclone_bin_uses_common_homebrew_fallback(monkeypatch):
-    from pathlib import Path
-
     from safe_sync.cli import rclone_bin
 
     monkeypatch.setattr("shutil.which", lambda _name: None)
