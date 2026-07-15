@@ -5,11 +5,14 @@ from pathlib import Path
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
     enabled_folders,
+    ensure_local_profiles_registered,
     folder_snapshots,
     normalized_config,
+    config_view,
     registry_doc,
     registry_path,
     RATE_LIMIT_EXIT,
+    restore_last_sync_finish,
     run_backup_with_config,
     selected_folders,
     status_health,
@@ -176,7 +179,50 @@ def test_scan_tree_detects_useful_changes(tmp_path):
     snapshot = scan_tree(Path(tmp_path))
 
     assert "data/results.csv" in snapshot
+    assert "data/" in snapshot
     assert "node_modules/pkg/index.js" not in snapshot
+
+
+def test_scan_tree_detects_empty_directory_changes(tmp_path):
+    snapshot_before = scan_tree(Path(tmp_path))
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    snapshot_after_create = scan_tree(Path(tmp_path))
+    assert "empty/" in snapshot_after_create
+    assert snapshot_before != snapshot_after_create
+
+    empty_dir.rmdir()
+    snapshot_after_remove = scan_tree(Path(tmp_path))
+    assert "empty/" not in snapshot_after_remove
+    assert snapshot_after_remove == snapshot_before
+
+
+def test_scan_tree_does_not_ignore_root_named_like_build_artifact(tmp_path):
+    watched_root = tmp_path / "dist"
+    watched_root.mkdir()
+    new_dir = watched_root / "nested"
+    new_dir.mkdir()
+    (new_dir / "hello.txt").write_text("hi")
+
+    snapshot = scan_tree(watched_root)
+
+    assert "nested/" in snapshot
+    assert "nested/hello.txt" in snapshot
+
+
+def test_scan_tree_detects_file_modifications_and_deletions(tmp_path):
+    file_path = tmp_path / "data.txt"
+    file_path.write_text("v1")
+    snapshot_before = scan_tree(Path(tmp_path))
+
+    file_path.write_text("v2 changed")
+    snapshot_after_modify = scan_tree(Path(tmp_path))
+    assert snapshot_after_modify["data.txt"] != snapshot_before["data.txt"]
+
+    file_path.unlink()
+    snapshot_after_delete = scan_tree(Path(tmp_path))
+    assert "data.txt" not in snapshot_after_delete
 
 
 def test_unsafe_local_path_guard_blocks_broad_paths():
@@ -253,6 +299,129 @@ def test_registry_doc_lists_machine_owned_folders():
     assert doc["folders"][1]["enabled"] is False
 
 
+def test_normalized_config_flattens_active_profile():
+    config = normalized_config({
+        "active_profile_id": "linux-box",
+        "profiles": [
+            {
+                "id": "macbook",
+                "machine_id": "macbook",
+                "machine_label": "MacBook",
+                "remote_base": "dropbox:computer-backups/test",
+                "folders": [{"id": "projects", "local_path": "~/mac-projects"}],
+            },
+            {
+                "id": "linux-box",
+                "machine_id": "linux-box",
+                "machine_label": "Linux Box",
+                "remote_base": "dropbox:computer-backups/test",
+                "folders": [{"id": "results", "local_path": "~/linux-results"}],
+            },
+        ],
+    })
+
+    assert config["profile_id"] == "linux-box"
+    assert config["machine_id"] == "linux-box"
+    assert config["machine_label"] == "Linux Box"
+    assert [folder["id"] for folder in config["folders"]] == ["results"]
+    assert config["folders"][0]["remote_root"] == "dropbox:computer-backups/test/linux-box/results"
+
+
+def test_config_view_reports_profiles_and_active_profile():
+    view = config_view(normalized_config({
+        "active_profile_id": "macbook",
+        "profiles": [
+            {
+                "id": "macbook",
+                "label": "Personal Mac",
+                "machine_id": "macbook",
+                "machine_label": "MacBook",
+                "remote_base": "dropbox:computer-backups/test",
+                "folders": [{"id": "projects", "local_path": "~/projects"}],
+            },
+            {
+                "id": "linux-box",
+                "label": "Linux Runner",
+                "machine_id": "linux-box",
+                "machine_label": "Linux Box",
+                "remote_base": "dropbox:computer-backups/test",
+                "folders": [],
+            },
+        ],
+    }))
+
+    assert view["active_profile_id"] == "macbook"
+    assert view["profile_label"] == "Personal Mac"
+    assert len(view["profiles"]) == 2
+    assert view["profiles"][0]["active"] is True
+    assert view["profiles"][1]["active"] is False
+
+
+def test_ensure_local_profiles_registered_creates_missing_entries(monkeypatch):
+    config = normalized_config({
+        "active_profile_id": "macbook2",
+        "remote_base": "dropbox:computer-backups/test",
+        "profiles": [
+            {
+                "id": "macbook",
+                "machine_id": "macbook",
+                "machine_label": "macbook",
+                "remote_base": "dropbox:computer-backups/test",
+                "folders": [],
+            },
+            {
+                "id": "macbook2",
+                "machine_id": "macbook2",
+                "machine_label": "macbook2",
+                "remote_base": "dropbox:computer-backups/test",
+                "folders": [],
+            },
+        ],
+    })
+
+    calls: list[list[str]] = []
+
+    def fake_rclone_capture(_config, cmd, input_text=None):
+        calls.append(cmd)
+        if cmd[:2] == ["lsf", "dropbox:computer-backups/test/.registry/computers"]:
+            return subprocess.CompletedProcess(cmd, 0, "macbook.json\n")
+        if cmd[:2] == ["rcat", "dropbox:computer-backups/test/.registry/computers/macbook2.json"]:
+            return subprocess.CompletedProcess(cmd, 0, input_text or "")
+        raise AssertionError(f"unexpected rclone call: {cmd}")
+
+    monkeypatch.setattr("safe_sync.cli.rclone_capture", fake_rclone_capture)
+
+    created = ensure_local_profiles_registered(config)
+
+    assert created == ["macbook2"]
+    assert ["lsf", "dropbox:computer-backups/test/.registry/computers", "--files-only"] in calls
+    assert ["rcat", "dropbox:computer-backups/test/.registry/computers/macbook2.json"] in calls
+
+
+def test_restore_last_sync_finish_rehydrates_fallback_clock(tmp_path):
+    status_path = tmp_path / "status.json"
+    status_path.write_text(json.dumps({"last_finish": "2026-07-14T10:00:00-04:00"}))
+    daemon = WatchDaemon(WatchSettings(fallback_interval_seconds=1800))
+    config = {"status_path": str(status_path)}
+
+    from safe_sync import cli as cli_module
+
+    class FakeDateTime(cli_module.dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromisoformat("2026-07-14T11:00:00-04:00")
+
+    original_datetime = cli_module.dt.datetime
+    cli_module.dt.datetime = FakeDateTime
+    try:
+        restore_last_sync_finish(daemon, config, 1000.0)
+    finally:
+        cli_module.dt.datetime = original_datetime
+
+    assert daemon.state.last_sync_finish_monotonic == 1000.0 - 3600.0
+    assert daemon.should_run_fallback(1000.0)
+
+
 def test_folder_snapshots_tracks_multiple_roots(tmp_path):
     one = tmp_path / "one"
     two = tmp_path / "two"
@@ -289,6 +458,7 @@ def test_backup_cmd_metadata_is_opt_in():
     }
 
     assert "--metadata" not in backup_cmd(base, dry_run=True)
+    assert "--create-empty-src-dirs" in backup_cmd(base, dry_run=True)
     assert "--metadata" in backup_cmd({**base, "preserve_metadata": True}, dry_run=True)
 
 

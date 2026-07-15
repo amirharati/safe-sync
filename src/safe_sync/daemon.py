@@ -39,23 +39,35 @@ class WatchState:
     backoff_until_monotonic: float | None = None
 
 
-def scan_tree(root: Path) -> dict[str, tuple[int, int]]:
-    """Return a lightweight file snapshot for polling-based change detection."""
+def scan_tree(root: Path) -> dict[str, tuple[str, int, int]]:
+    """Return a lightweight tree snapshot for polling-based change detection."""
     root = root.expanduser().resolve()
-    snapshot: dict[str, tuple[int, int]] = {}
+    snapshot: dict[str, tuple[str, int, int]] = {}
     for current_root, dirnames, filenames in os.walk(root):
         current = Path(current_root)
-        dirnames[:] = [name for name in dirnames if not should_ignore_watch_event(str(current / name))]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not should_ignore_watch_event((current / name).relative_to(root))
+        ]
+        for dirname in dirnames:
+            path = current / dirname
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            relative = path.relative_to(root).as_posix().rstrip("/") + "/"
+            snapshot[relative] = ("dir", 0, stat.st_mtime_ns)
         for filename in filenames:
             path = current / filename
-            if should_ignore_watch_event(str(path)):
+            if should_ignore_watch_event(path.relative_to(root)):
                 continue
             try:
                 stat = path.stat()
             except FileNotFoundError:
                 continue
             relative = path.relative_to(root).as_posix()
-            snapshot[relative] = (stat.st_size, stat.st_mtime_ns)
+            snapshot[relative] = ("file", stat.st_size, stat.st_mtime_ns)
     return snapshot
 
 

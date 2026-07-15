@@ -24,8 +24,8 @@
       {
         "label": "quick",
         "title": "Safe Sync",
-        "width": 360,
-        "height": 410,
+        "width": 440,
+        "height": 620,
         "resizable": false,
         "decorations": false,
         "transparent": true,

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -30,6 +29,9 @@ struct SafeSyncStatus {
 #[derive(Debug, Deserialize, Serialize)]
 struct SafeSyncConfigView {
     config_path: String,
+    profile_id: Option<String>,
+    profile_label: Option<String>,
+    active_profile_id: Option<String>,
     machine_id: Option<String>,
     machine_label: Option<String>,
     remote_base: Option<String>,
@@ -39,10 +41,14 @@ struct SafeSyncConfigView {
     fallback_interval_seconds: u64,
     rate_limit_backoff_seconds: u64,
     folders: Vec<Value>,
+    profiles: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SafeSyncSettingsUpdate {
+    machine_label: Option<String>,
+    profile_label: Option<String>,
+    remote_base: Option<String>,
     poll_interval_seconds: u64,
     debounce_seconds: u64,
     min_interval_seconds: u64,
@@ -52,7 +58,6 @@ struct SafeSyncSettingsUpdate {
 
 #[derive(Debug, Deserialize)]
 struct AddFolderRequest {
-    id: String,
     local_path: String,
     label: Option<String>,
     remote_path: Option<String>,
@@ -68,10 +73,100 @@ struct UpdateFolderRequest {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoveFolderRequest {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddProfileRequest {
+    name: String,
+    remote_base: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivateProfileRequest {
+    id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CommandResult {
     ok: bool,
     output: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenDropboxRequest {
+    #[serde(alias = "remoteRoot")]
+    remote_root: String,
+}
+
+fn safe_id(value: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut previous_dash = false;
+    for ch in value.trim().chars() {
+        let normalized = if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if normalized == '-' {
+            if !previous_dash && !cleaned.is_empty() {
+                cleaned.push('-');
+            }
+            previous_dash = true;
+        } else {
+            cleaned.push(normalized);
+            previous_dash = false;
+        }
+    }
+    while cleaned.ends_with('-') {
+        cleaned.pop();
+    }
+    if cleaned.is_empty() {
+        "default".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn path_leaf(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches(['/', '\\']);
+    let leaf = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    leaf.to_string()
+}
+
+fn dropbox_home_url(remote_root: &str) -> Result<String, String> {
+    let trimmed = remote_root.trim();
+    let Some(path) = trimmed.strip_prefix("dropbox:") else {
+        return Err("Open in Dropbox is only available for Dropbox remotes".to_string());
+    };
+    let clean = path.trim_start_matches('/');
+    if clean.is_empty() {
+        return Err("Dropbox path is empty".to_string());
+    }
+    let encoded = clean
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut out = String::new();
+            for byte in segment.as_bytes() {
+                let ch = *byte as char;
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+                    out.push(ch);
+                } else {
+                    out.push_str(&format!("%{:02X}", byte));
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(format!("https://www.dropbox.com/home/{encoded}"))
 }
 
 struct AppState {
@@ -80,33 +175,9 @@ struct AppState {
     backup_item: Mutex<Option<MenuItem<Wry>>>,
     logs_item: Mutex<Option<MenuItem<Wry>>>,
     last_tray_click: Mutex<Option<Instant>>,
+    last_stale_heal_attempt: Mutex<Option<Instant>>,
 }
 
-
-fn config_path() -> PathBuf {
-    if let Ok(path) = env::var("SAFE_SYNC_CONFIG") {
-        if !path.trim().is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".safe-sync/config.json")
-}
-
-fn read_config_json() -> Result<Value, String> {
-    let path = config_path();
-    let text = fs::read_to_string(&path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    serde_json::from_str(&text).map_err(|err| format!("failed to parse {}: {err}", path.display()))
-}
-
-fn write_config_json(config: &Value) -> Result<(), String> {
-    let path = config_path();
-    let text = serde_json::to_string_pretty(config).map_err(|err| format!("failed to format config JSON: {err}"))?;
-    fs::write(&path, format!("{text}\n")).map_err(|err| format!("failed to write {}: {err}", path.display()))
-}
-
-fn value_u64(config: &Value, key: &str, fallback: u64) -> u64 {
-    config.get(key).and_then(Value::as_u64).unwrap_or(fallback)
-}
 
 fn bounded_seconds(name: &str, value: u64, min: u64, max: u64) -> Result<u64, String> {
     if value < min || value > max {
@@ -188,6 +259,44 @@ async fn read_status_blocking() -> Result<SafeSyncStatus, String> {
     tauri::async_runtime::spawn_blocking(read_status)
         .await
         .unwrap_or_else(|err| Err(format!("status task failed: {err}")))
+}
+
+fn should_attempt_stale_heal(app: &AppHandle<Wry>, status: &SafeSyncStatus) -> bool {
+    if status.health != "stale" || status.service_state != "running" {
+        return false;
+    }
+    let state = app.state::<AppState>();
+    let Ok(mut last_attempt) = state.last_stale_heal_attempt.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    if last_attempt.is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(60)) {
+        return false;
+    }
+    last_attempt.replace(now);
+    true
+}
+
+async fn read_status_with_self_heal(app: &AppHandle<Wry>) -> SafeSyncStatus {
+    let status = read_status_blocking().await.unwrap_or_else(error_status);
+    if !should_attempt_stale_heal(app, &status) {
+        return status;
+    }
+
+    let restart_result = run_safe_sync_blocking(vec!["restart".to_string()]).await;
+    thread::sleep(Duration::from_millis(600));
+    match read_status_blocking().await {
+        Ok(recovered) => recovered,
+        Err(read_err) => {
+            let mut fallback = status;
+            if let Err(restart_err) = restart_result {
+                fallback.health_reason = format!("{}; auto-restart failed: {}", fallback.health_reason, restart_err);
+            } else {
+                fallback.health_reason = format!("{}; auto-restart attempted but refresh failed: {}", fallback.health_reason, read_err);
+            }
+            fallback
+        }
+    }
 }
 
 fn sync_state(status: &SafeSyncStatus) -> Option<&str> {
@@ -306,61 +415,57 @@ fn open_path(path: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_config() -> Result<SafeSyncConfigView, String> {
-    let config = read_config_json()?;
-    let folders = config
-        .get("folders")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    Ok(SafeSyncConfigView {
-        config_path: config_path().to_string_lossy().into_owned(),
-        machine_id: config.get("machine_id").and_then(Value::as_str).map(str::to_string),
-        machine_label: config.get("machine_label").and_then(Value::as_str).map(str::to_string),
-        remote_base: config.get("remote_base").and_then(Value::as_str).map(str::to_string),
-        poll_interval_seconds: value_u64(&config, "poll_interval_seconds", 5),
-        debounce_seconds: value_u64(&config, "debounce_seconds", 20),
-        min_interval_seconds: value_u64(&config, "min_interval_seconds", 120),
-        fallback_interval_seconds: value_u64(&config, "fallback_interval_seconds", 1800),
-        rate_limit_backoff_seconds: value_u64(&config, "rate_limit_backoff_seconds", 300),
-        folders,
-    })
+async fn get_config() -> Result<SafeSyncConfigView, String> {
+    let stdout = run_safe_sync_blocking(vec!["config".to_string(), "show".to_string()]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync config show returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
-fn save_settings(update: SafeSyncSettingsUpdate) -> Result<SafeSyncConfigView, String> {
-    let mut config = read_config_json()?;
-    let obj = config.as_object_mut().ok_or_else(|| "config root must be a JSON object".to_string())?;
-    obj.insert(
-        "poll_interval_seconds".to_string(),
-        Value::from(bounded_seconds("poll interval", update.poll_interval_seconds, 1, 3600)?),
-    );
-    obj.insert(
-        "debounce_seconds".to_string(),
-        Value::from(bounded_seconds("debounce", update.debounce_seconds, 1, 3600)?),
-    );
-    obj.insert(
-        "min_interval_seconds".to_string(),
-        Value::from(bounded_seconds("minimum interval", update.min_interval_seconds, 0, 86400)?),
-    );
-    obj.insert(
-        "fallback_interval_seconds".to_string(),
-        Value::from(bounded_seconds("fallback interval", update.fallback_interval_seconds, 60, 86400)?),
-    );
-    obj.insert(
-        "rate_limit_backoff_seconds".to_string(),
-        Value::from(bounded_seconds("rate limit backoff", update.rate_limit_backoff_seconds, 60, 86400)?),
-    );
-    write_config_json(&config)?;
-    get_config()
+async fn save_settings(update: SafeSyncSettingsUpdate) -> Result<SafeSyncConfigView, String> {
+    let mut args = vec![
+        "config".to_string(),
+        "update".to_string(),
+        "--poll-interval-seconds".to_string(),
+        bounded_seconds("poll interval", update.poll_interval_seconds, 1, 3600)?.to_string(),
+        "--debounce-seconds".to_string(),
+        bounded_seconds("debounce", update.debounce_seconds, 1, 3600)?.to_string(),
+        "--min-interval-seconds".to_string(),
+        bounded_seconds("minimum interval", update.min_interval_seconds, 0, 86400)?.to_string(),
+        "--fallback-interval-seconds".to_string(),
+        bounded_seconds("fallback interval", update.fallback_interval_seconds, 60, 86400)?.to_string(),
+        "--rate-limit-backoff-seconds".to_string(),
+        bounded_seconds("rate limit backoff", update.rate_limit_backoff_seconds, 60, 86400)?.to_string(),
+    ];
+    if let Some(machine_label) = update.machine_label.filter(|value| !value.trim().is_empty()) {
+        args.push("--machine-label".to_string());
+        args.push(machine_label);
+    }
+    if let Some(profile_label) = update.profile_label.filter(|value| !value.trim().is_empty()) {
+        args.push("--profile-label".to_string());
+        args.push(profile_label);
+    }
+    if let Some(remote_base) = update.remote_base.filter(|value| !value.trim().is_empty()) {
+        args.push("--remote-base".to_string());
+        args.push(remote_base);
+    }
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync config update returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
 async fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, String> {
-    if request.id.trim().is_empty() || request.local_path.trim().is_empty() {
-        return Err("folder id and local path are required".to_string());
+    let local_path = request.local_path.trim();
+    if local_path.is_empty() {
+        return Err("folder path is required".to_string());
     }
-    let mut args = vec!["folders".to_string(), "add".to_string(), request.id, request.local_path];
+    let folder_name = path_leaf(local_path);
+    let folder_id = safe_id(&folder_name);
+    let mut args = vec![
+        "folders".to_string(),
+        "add".to_string(),
+        folder_id,
+        local_path.to_string(),
+    ];
     if let Some(label) = request.label.filter(|value| !value.trim().is_empty()) {
         args.push("--label".to_string());
         args.push(label);
@@ -377,31 +482,69 @@ async fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, Str
         args.push("--disabled".to_string());
     }
     run_safe_sync_blocking(args).await?;
-    get_config()
+    get_config().await
 }
 
 #[tauri::command]
-fn update_folder(request: UpdateFolderRequest) -> Result<SafeSyncConfigView, String> {
+async fn update_folder(request: UpdateFolderRequest) -> Result<SafeSyncConfigView, String> {
     if request.id.trim().is_empty() || request.local_path.trim().is_empty() {
         return Err("folder id and local path are required".to_string());
     }
-    let mut config = read_config_json()?;
-    let folders = config
-        .get_mut("folders")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| "config folders must be a JSON array".to_string())?;
-    let folder = folders
-        .iter_mut()
-        .find(|folder| folder.get("id").and_then(Value::as_str) == Some(request.id.as_str()))
-        .ok_or_else(|| format!("folder not found: {}", request.id))?;
-    let obj = folder.as_object_mut().ok_or_else(|| "folder entry must be a JSON object".to_string())?;
-    obj.insert("local_path".to_string(), Value::from(request.local_path));
-    obj.insert("enabled".to_string(), Value::from(request.enabled));
+    let mut args = vec![
+        "folders".to_string(),
+        "update".to_string(),
+        request.id,
+        request.local_path,
+    ];
     if let Some(label) = request.label.filter(|value| !value.trim().is_empty()) {
-        obj.insert("label".to_string(), Value::from(label));
+        args.push("--label".to_string());
+        args.push(label);
     }
-    write_config_json(&config)?;
-    get_config()
+    args.push(if request.enabled { "--enabled" } else { "--disabled" }.to_string());
+    run_safe_sync_blocking(args).await?;
+    get_config().await
+}
+
+#[tauri::command]
+async fn remove_folder(request: RemoveFolderRequest) -> Result<SafeSyncConfigView, String> {
+    if request.id.trim().is_empty() {
+        return Err("folder id is required".to_string());
+    }
+    run_safe_sync_blocking(vec!["folders".to_string(), "remove".to_string(), request.id]).await?;
+    get_config().await
+}
+
+#[tauri::command]
+async fn add_profile(request: AddProfileRequest) -> Result<SafeSyncConfigView, String> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err("profile name is required".to_string());
+    }
+    let profile_id = safe_id(name);
+    let mut args = vec!["profiles".to_string(), "add".to_string(), profile_id.clone()];
+    args.push("--label".to_string());
+    args.push(name.to_string());
+    args.push("--machine-id".to_string());
+    args.push(profile_id);
+    args.push("--machine-label".to_string());
+    args.push(name.to_string());
+    if let Some(remote_base) = request.remote_base.filter(|value| !value.trim().is_empty()) {
+        args.push("--remote-base".to_string());
+        args.push(remote_base);
+    }
+    run_safe_sync_blocking(args).await?;
+    get_config().await
+}
+
+#[tauri::command]
+async fn activate_profile(request: ActivateProfileRequest, app: AppHandle<Wry>) -> Result<SafeSyncConfigView, String> {
+    if request.id.trim().is_empty() {
+        return Err("profile id is required".to_string());
+    }
+    run_safe_sync_blocking(vec!["profiles".to_string(), "activate".to_string(), request.id]).await?;
+    let status = read_status_with_self_heal(&app).await;
+    update_menu_state_from_app(&app, &status);
+    get_config().await
 }
 
 #[tauri::command]
@@ -436,7 +579,7 @@ async fn pull_remote(source: String, destination: String, dry_run: bool) -> Resu
 
 #[tauri::command]
 async fn get_status(app: AppHandle<Wry>) -> Result<SafeSyncStatus, String> {
-    let status = read_status_blocking().await.unwrap_or_else(error_status);
+    let status = read_status_with_self_heal(&app).await;
     update_menu_state_from_app(&app, &status);
     Ok(status)
 }
@@ -446,7 +589,7 @@ async fn control_backend(action: String, app: AppHandle<Wry>) -> Result<SafeSync
     match action.as_str() {
         "start" | "stop" | "restart" => {
             run_safe_sync_blocking(vec![action]).await?;
-            let status = read_status_blocking().await.unwrap_or_else(error_status);
+            let status = read_status_with_self_heal(&app).await;
             update_menu_state_from_app(&app, &status);
             Ok(status)
         }
@@ -464,12 +607,15 @@ async fn backup_now(app: AppHandle<Wry>) -> Result<SafeSyncStatus, String> {
     }
 
     let result = run_safe_sync_blocking(vec!["backup".to_string()]).await;
-    let status = read_status_blocking().await.unwrap_or_else(|status_err| {
+    let status = read_status_with_self_heal(&app).await;
+    let status = if status.health == "error" && status.health_reason.starts_with("status task failed:") {
         error_status(match result {
-            Ok(_) => status_err,
-            Err(command_err) => format!("{command_err}; additionally failed to refresh status: {status_err}"),
+            Ok(_) => status.health_reason,
+            Err(command_err) => format!("{command_err}; additionally failed to refresh status: {}", status.health_reason),
         })
-    });
+    } else {
+        status
+    };
     update_menu_state_from_app(&app, &status);
     Ok(status)
 }
@@ -519,8 +665,17 @@ fn hide_quick_panel(app: &AppHandle<Wry>) {
 }
 
 #[cfg(target_os = "macos")]
+fn show_quick_panel_fallback(app: &AppHandle<Wry>) {
+    if let Some(window) = app.get_webview_window("quick") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn toggle_quick_panel(app: &AppHandle<Wry>) {
     let Some(window) = native_quick_window(app) else {
+        show_quick_panel_fallback(app);
         return;
     };
     if window.isVisible() {
@@ -529,6 +684,7 @@ fn toggle_quick_panel(app: &AppHandle<Wry>) {
     }
 
     let Some((anchor, screen)) = tray_anchor(app) else {
+        show_quick_panel_fallback(app);
         return;
     };
     let panel = window.frame();
@@ -539,6 +695,7 @@ fn toggle_quick_panel(app: &AppHandle<Wry>) {
 
     window.setFrameOrigin(NSPoint::new(x, y));
     window.makeKeyAndOrderFront(None);
+    show_quick_panel_fallback(app);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -560,7 +717,7 @@ fn accept_tray_click(app: &AppHandle<Wry>) -> bool {
         return true;
     };
     let now = Instant::now();
-    if last_click.is_some_and(|previous| now.duration_since(previous) < Duration::from_millis(300)) {
+    if last_click.is_some_and(|previous| now.duration_since(previous) < Duration::from_millis(40)) {
         return false;
     }
     last_click.replace(now);
@@ -577,6 +734,12 @@ fn open_logs(_app: AppHandle<Wry>) -> Result<(), String> {
 #[tauri::command]
 fn open_control_panel(app: AppHandle<Wry>) {
     show_control_panel_window(&app);
+}
+
+#[tauri::command]
+fn open_dropbox_location(request: OpenDropboxRequest) -> Result<(), String> {
+    let url = dropbox_home_url(&request.remote_root)?;
+    open_path(&url)
 }
 
 #[tauri::command]
@@ -600,6 +763,7 @@ pub fn run() {
             backup_item: Mutex::new(None),
             logs_item: Mutex::new(None),
             last_tray_click: Mutex::new(None),
+            last_stale_heal_attempt: Mutex::new(None),
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -607,6 +771,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -614,12 +779,16 @@ pub fn run() {
             backup_now,
             open_logs,
             open_control_panel,
+            open_dropbox_location,
             close_quick_panel,
             quit_tray,
             get_config,
             save_settings,
             add_folder,
             update_folder,
+            remove_folder,
+            add_profile,
+            activate_profile,
             get_computers,
             list_remote,
             pull_remote
@@ -688,7 +857,7 @@ pub fn run() {
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
+                        button_state: MouseButtonState::Down,
                         ..
                     } = event
                     {

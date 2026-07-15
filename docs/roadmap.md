@@ -101,6 +101,11 @@ Add a second-level Tauri window for day-to-day configuration and selective trans
 
 Backlog guardrail before broad automation: add a daemon process lock so there is exactly one daemon watcher process, in addition to the existing one-backup-at-a-time lock.
 
+Late packaging/polish backlog:
+
+- Package the Python backend as a real app-owned executable so macOS permission prompts show `Safe Sync` instead of `Python`.
+- Keep this as an end-of-project packaging step, after the core daemon/UI workflow is stable.
+
 ## Not Planned Initially
 
 - Custom sync engine.

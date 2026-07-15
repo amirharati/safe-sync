@@ -44,6 +44,18 @@
               <dd data-sync-state>-</dd>
             </div>
             <div>
+              <dt>Folder</dt>
+              <dd data-current-folder>-</dd>
+            </div>
+            <div>
+              <dt>Progress</dt>
+              <dd data-current-progress>-</dd>
+            </div>
+            <div>
+              <dt>Now</dt>
+              <dd data-current-file>-</dd>
+            </div>
+            <div>
               <dt>Seen</dt>
               <dd data-daemon-seen>-</dd>
             </div>
@@ -61,6 +73,12 @@
             <button type="button" class="secondary quick-only" data-action="close-quick">Close</button>
             <button type="button" class="secondary quick-only" data-action="quit-tray">Quit Tray</button>
           </div>
+          <section class="activity-panel">
+            <div class="section-title activity-head">
+              <h2>Recent Activity</h2>
+            </div>
+            <ul class="activity-list" data-activity-list></ul>
+          </section>
           <p class="refresh-note" data-refresh-note>Auto refresh every 10s</p>
         </section>
 
@@ -70,6 +88,10 @@
             <button type="button" class="secondary" data-action="reload-config">Reload</button>
           </div>
           <dl class="facts compact">
+            <div>
+              <dt>Profile</dt>
+              <dd data-profile-id>-</dd>
+            </div>
             <div>
               <dt>Config</dt>
               <dd class="path" data-config-path>-</dd>
@@ -84,29 +106,50 @@
             </div>
           </dl>
           <form class="settings-grid" data-settings-form>
+            <label>Profile label <input name="profile_label" type="text" /></label>
+            <label>Machine label <input name="machine_label" type="text" /></label>
+            <label>Remote base <input name="remote_base" type="text" /></label>
             <label>Poll interval <input name="poll_interval_seconds" type="number" min="1" max="3600" /></label>
             <label>Debounce <input name="debounce_seconds" type="number" min="1" max="3600" /></label>
             <label>Minimum interval <input name="min_interval_seconds" type="number" min="0" max="86400" /></label>
             <label>Fallback interval <input name="fallback_interval_seconds" type="number" min="60" max="86400" /></label>
             <label>Rate-limit backoff <input name="rate_limit_backoff_seconds" type="number" min="60" max="86400" /></label>
-            <button type="submit" class="primary">Save Settings</button>
+            <button type="submit" class="primary" data-action="settings">Save Settings</button>
+          </form>
+          <div class="section-title lower">
+            <h2>Local Computers</h2>
+          </div>
+          <div class="list" data-profile-list></div>
+          <form class="add-profile" data-add-profile-form>
+            <input name="name" placeholder="profile name" />
+            <button type="submit" class="secondary" data-action="profile">Add Profile</button>
           </form>
           <div class="section-title lower">
             <h2>Folders</h2>
           </div>
           <div class="list" data-folder-list></div>
           <form class="add-folder" data-add-folder-form>
-            <input name="id" placeholder="folder id" />
-            <input name="local_path" placeholder="~/path/to/folder" />
+            <div class="path-picker">
+              <input name="local_path" placeholder="~/path/to/folder" />
+              <button type="button" class="secondary" data-action="pick-folder">Browse…</button>
+            </div>
             <input name="label" placeholder="label" />
-            <button type="submit" class="secondary">Add Folder</button>
+            <button type="submit" class="secondary" data-action="folder">Add Folder</button>
           </form>
         </section>
 
         <section class="view" data-view="computers">
           <div class="section-title">
-            <h2>Known Computers</h2>
+            <h2>Computers</h2>
             <button type="button" class="secondary" data-action="load-computers">Refresh</button>
+          </div>
+          <p class="reason section-copy">Local computers are the profiles this machine can act as. Remote computers are the ones published to Dropbox.</p>
+          <div class="section-title lower">
+            <h2>Local Computers</h2>
+          </div>
+          <div class="list" data-local-computer-list></div>
+          <div class="section-title lower">
+            <h2>Remote Computers</h2>
           </div>
           <div class="list" data-computer-list></div>
         </section>
