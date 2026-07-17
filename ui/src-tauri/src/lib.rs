@@ -414,6 +414,26 @@ fn open_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn expand_home_path(path: &str) -> PathBuf {
+    let path = path.trim();
+    let Some(home) = env::var_os("HOME") else {
+        return PathBuf::from(path);
+    };
+
+    if path == "~" {
+        return PathBuf::from(home);
+    }
+
+    if let Some(relative) = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\"))
+    {
+        return PathBuf::from(home).join(relative);
+    }
+
+    PathBuf::from(path)
+}
+
 #[tauri::command]
 async fn get_config() -> Result<SafeSyncConfigView, String> {
     let stdout = run_safe_sync_blocking(vec!["config".to_string(), "show".to_string()]).await?;
@@ -744,9 +764,9 @@ fn open_dropbox_location(request: OpenDropboxRequest) -> Result<(), String> {
 
 #[tauri::command]
 fn open_local_folder(path: String) -> Result<(), String> {
-    let target = PathBuf::from(path.trim());
+    let target = expand_home_path(&path);
     if !target.is_dir() {
-        return Err("local folder does not exist".to_string());
+        return Err(format!("local folder does not exist: {}", target.display()));
     }
     open_path(&target.to_string_lossy())
 }
