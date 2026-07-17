@@ -16,6 +16,7 @@ class DaemonApiState:
         self._lock = threading.Lock()
         self._status: dict[str, Any] = {"state": "starting"}
         self._backup_requested = False
+        self._pull_request: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -36,6 +37,30 @@ class DaemonApiState:
             self._backup_requested = False
             return requested
 
+    def request_pull(self, source: str, destination: str, dry_run: bool) -> bool:
+        """Queue one explicit remote-to-local transfer for the daemon."""
+        with self._lock:
+            if self._pull_request is not None:
+                return False
+            self._pull_request = {
+                "source": source,
+                "destination": destination,
+                "dry_run": dry_run,
+            }
+            self._status["queued_transfer"] = True
+            return True
+
+    def consume_pull_request(self) -> dict[str, Any] | None:
+        with self._lock:
+            request = self._pull_request
+            self._pull_request = None
+            self._status["queued_transfer"] = False
+            return request
+
+    def has_pull_request(self) -> bool:
+        with self._lock:
+            return self._pull_request is not None
+
 
 class _DaemonApiHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
@@ -50,6 +75,15 @@ class _DaemonApiHandler(socketserver.StreamRequestHandler):
             elif command == "backup":
                 self.server.api_state.request_backup()
                 response = {"ok": True, "queued": True}
+            elif command == "pull":
+                source = str(request.get("source") or "")
+                destination = str(request.get("destination") or "")
+                if not source or not destination:
+                    response = {"ok": False, "error": "source and destination are required"}
+                elif self.server.api_state.request_pull(source, destination, bool(request.get("dry_run"))):
+                    response = {"ok": True, "queued": True}
+                else:
+                    response = {"ok": False, "error": "another transfer is already queued"}
             elif command == "ping":
                 response = {"ok": True, "pong": True}
             else:

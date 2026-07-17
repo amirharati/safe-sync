@@ -33,6 +33,14 @@
           <button type="button" class="tab" data-tab="transfer">Transfer</button>
         </nav>
 
+        <section class="command-preview last-command-panel">
+          <div class="section-title">
+            <h2>Last UI Command</h2>
+            <button type="button" class="secondary" data-action="copy-last-command">Copy Command</button>
+          </div>
+          <code class="path" data-last-command>No UI command run yet.</code>
+        </section>
+
         <section class="view is-active" data-view="status">
           <dl class="facts">
             <div>
@@ -156,20 +164,55 @@
 
         <section class="view" data-view="transfer">
           <div class="section-title">
-            <h2>Selective Pull</h2>
+            <h2>Transfer From Another Computer</h2>
+            <button type="button" class="secondary" data-action="refresh-transfer">Refresh</button>
           </div>
+          <p class="reason section-copy">Copies a chosen remote file or folder to any local destination. The source is never changed.</p>
           <form class="transfer-form" data-transfer-form>
-            <label>Remote source <input name="source" placeholder="dropbox:computer-backups/..." /></label>
-            <label>Local destination <input name="destination" placeholder="~/Downloads/safe-sync-restore" /></label>
-            <label>List depth <input name="depth" type="number" min="1" max="5" value="2" /></label>
+            <label>Source computer <select name="source_computer"></select></label>
+            <label>Source folder <select name="source_folder"></select></label>
+            <label>Use watched folder <select name="destination_folder"></select></label>
+            <label class="transfer-destination">Destination path
+              <span class="path-picker"><input name="destination_path" placeholder="Choose any local folder" /><button type="button" class="secondary" data-action="pick-transfer-destination">Choose…</button></span>
+            </label>
+            <label>Destination subfolder <input name="destination_subfolder" placeholder="received-from-laptop" /></label>
             <div class="check-row">
-              <label><input name="dry_run" type="checkbox" checked /> Dry run</label>
+              <label><input name="dry_run" type="checkbox" checked /> Review with dry run first</label>
             </div>
             <div class="actions left">
-              <button type="button" class="secondary" data-action="list-remote">List Source</button>
-              <button type="submit" class="primary">Pull</button>
+              <button type="button" class="secondary" data-action="list-remote">Browse Source</button>
+              <button type="submit" class="primary" data-action="run-transfer">Run Dry Run</button>
             </div>
           </form>
+          <div class="actions left transfer-locations">
+            <button type="button" class="secondary" data-action="open-source-local">Open Source Locally</button>
+            <button type="button" class="secondary" data-action="open-source-dropbox">Open Source in Dropbox</button>
+            <button type="button" class="secondary" data-action="open-destination-local">Open Destination Locally</button>
+            <button type="button" class="secondary" data-action="open-destination-dropbox">Open Destination in Dropbox</button>
+          </div>
+          <section class="transfer-activity" aria-live="polite">
+            <div class="section-title activity-head">
+              <h2>Transfer Activity</h2>
+              <span class="pill" data-transfer-live-state>Waiting</span>
+            </div>
+            <p class="path transfer-live-summary" data-transfer-live-summary>Choose a source and destination, then queue a transfer.</p>
+            <ul class="activity-list" data-transfer-activity-list></ul>
+          </section>
+          <section class="transfer-browser" data-transfer-browser hidden>
+            <div class="section-title">
+              <h2>Remote Contents</h2>
+              <button type="button" class="secondary" data-action="reset-transfer-source">Use Folder Root</button>
+            </div>
+            <p class="path transfer-selected" data-transfer-selected-source></p>
+            <div class="list transfer-entry-list" data-transfer-entry-list></div>
+          </section>
+          <section class="command-preview">
+            <div class="section-title">
+              <h2>Command Preview</h2>
+              <button type="button" class="secondary" data-action="copy-transfer-command">Copy Command</button>
+            </div>
+            <code class="path" data-transfer-command>Choose a source and destination folder.</code>
+          </section>
           <pre class="output" data-transfer-output></pre>
         </section>
 

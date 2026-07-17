@@ -31,7 +31,7 @@ type SafeSyncConfig = {
 
 type CommandResult = { ok: boolean; output: string };
 
-type FolderView = Record<string, unknown> & { id?: string; label?: string; local_path?: string; enabled?: boolean };
+type FolderView = Record<string, unknown> & { id?: string; label?: string; local_path?: string; remote_root?: string; enabled?: boolean };
 type ProfileView = Record<string, unknown> & {
   id?: string;
   label?: string;
@@ -85,6 +85,14 @@ const localComputerList = document.querySelector<HTMLElement>("[data-local-compu
 const computerList = document.querySelector<HTMLElement>("[data-computer-list]");
 const transferForm = document.querySelector<HTMLFormElement>("[data-transfer-form]");
 const transferOutput = document.querySelector<HTMLElement>("[data-transfer-output]");
+const transferBrowser = document.querySelector<HTMLElement>("[data-transfer-browser]");
+const transferEntryList = document.querySelector<HTMLElement>("[data-transfer-entry-list]");
+const transferSelectedSource = document.querySelector<HTMLElement>("[data-transfer-selected-source]");
+const transferCommand = document.querySelector<HTMLElement>("[data-transfer-command]");
+const transferLiveState = document.querySelector<HTMLElement>("[data-transfer-live-state]");
+const transferLiveSummary = document.querySelector<HTMLElement>("[data-transfer-live-summary]");
+const transferActivityList = document.querySelector<HTMLElement>("[data-transfer-activity-list]");
+const lastCommand = document.querySelector<HTMLElement>("[data-last-command]");
 
 let latestStatus: SafeSyncStatus | null = null;
 let busyAction: string | null = null;
@@ -96,6 +104,9 @@ let configLoaded = false;
 let computersLoaded = false;
 let latestConfig: SafeSyncConfig | null = null;
 let latestComputers: Array<Record<string, unknown>> = [];
+let transferSourceRoot = "";
+let transferSource = "";
+let lastUiCommand = "";
 
 function text(value: unknown, fallback = "-"): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
@@ -117,7 +128,7 @@ function tone(status: SafeSyncStatus): string {
   if (status.health === "warning") return "warning";
   if (status.service_state === "stopped") return "stopped";
   if (status.health === "stale") return "stale";
-  if (["syncing", "dirty", "cooldown", "backoff"].includes(syncState(status))) return "active";
+  if (["syncing", "transferring", "dirty", "cooldown", "backoff"].includes(syncState(status))) return "active";
   if (status.health === "ok") return "ok";
   return "unknown";
 }
@@ -128,6 +139,7 @@ function headline(status: SafeSyncStatus): string {
   if (status.service_state === "stopped") return "Stopped";
   const currentSyncState = syncState(status);
   if (currentSyncState === "syncing") return "Syncing";
+  if (currentSyncState === "transferring") return "Transferring";
   if (currentSyncState === "dirty") return "Changes queued";
   if (currentSyncState === "cooldown") return "Cooling down";
   if (currentSyncState === "backoff") return "Waiting";
@@ -149,7 +161,7 @@ function currentFolderSummary(status: SafeSyncStatus): string {
   if (index > 0 && total > 0) {
     return `${folderLabel} (${index}/${total})`;
   }
-  if (syncStateValue === "syncing" || syncStateValue === "backoff" || syncStateValue === "cooldown") {
+  if (syncStateValue === "syncing" || syncStateValue === "transferring" || syncStateValue === "backoff" || syncStateValue === "cooldown") {
     return folderLabel;
   }
   return folderLabel;
@@ -171,7 +183,7 @@ function progressSummary(status: SafeSyncStatus): string {
 function currentFileSummary(status: SafeSyncStatus): string {
   const currentFile = text(status.sync_state?.current_file, "");
   if (currentFile) return currentFile;
-  if (syncState(status) === "syncing") return "Waiting for file detail";
+  if (["syncing", "transferring"].includes(syncState(status))) return "Waiting for file detail";
   return "-";
 }
 
@@ -196,11 +208,16 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (action === "settings") return "settings";
   if (action === "reload-config") return "config";
   if (action === "pick-folder") return "folder-picker";
+  if (action === "pick-transfer-destination") return "transfer-picker";
+  if (action === "open-source-local" || action === "open-destination-local") return "open-local";
+  if (action === "open-source-dropbox" || action === "open-destination-dropbox") return "open-dropbox";
   if (action === "open-dropbox") return "dropbox";
   if (action === "activate-profile") return "profile";
   if (action === "remove-folder") return "folder";
   if (action === "load-computers") return "computers";
   if (action === "list-remote") return "transfer";
+  if (action === "run-transfer") return "transfer";
+  if (action === "refresh-transfer") return "transfer";
   return action ?? null;
 }
 
@@ -279,7 +296,8 @@ function renderStatus(status: SafeSyncStatus): void {
       }
     }
   }
-  const refreshMs = ["syncing", "dirty", "cooldown", "backoff"].includes(syncState(status))
+  renderTransferActivity(status);
+  const refreshMs = ["syncing", "transferring", "dirty", "cooldown", "backoff"].includes(syncState(status))
     ? ACTIVE_REFRESH_MS
     : IDLE_REFRESH_MS;
   if (refreshLabel) refreshLabel.textContent = `Auto refresh every ${refreshMs / 1000}s`;
@@ -289,6 +307,47 @@ function renderStatus(status: SafeSyncStatus): void {
   }
   setBusy(busyAction);
   scheduleStatusRefresh();
+}
+
+function renderTransferActivity(status: SafeSyncStatus): void {
+  const state = syncState(status);
+  const progress = progressSummary(status);
+  const command = text(status.sync_state?.last_command, "");
+  const queued = status.sync_state?.queued_transfer === true;
+  if (transferLiveState) {
+    transferLiveState.textContent = state === "transferring" ? "Transferring" : queued ? "Queued" : state === "syncing" ? "Backup running" : state === "watching" ? "Waiting" : state;
+    transferLiveState.classList.toggle("is-active", state === "transferring");
+  }
+  if (transferLiveSummary) {
+    if (state === "transferring") {
+      transferLiveSummary.textContent = `${text(status.sync_state?.source, "Remote source")} -> ${text(status.sync_state?.destination, "Local destination")}\n${progress}`;
+    } else if (queued) {
+      transferLiveSummary.textContent = state === "backoff"
+        ? "Queued until the Dropbox cooldown ends."
+        : "Queued behind the current backup. It will begin automatically.";
+    } else if (command === "pull") {
+      transferLiveSummary.textContent = progress;
+    } else {
+      transferLiveSummary.textContent = "Transfers are queued behind any active backup and run one at a time.";
+    }
+  }
+  if (transferActivityList) {
+    transferActivityList.innerHTML = "";
+    const items = activityItems(status);
+    if (items.length === 0) {
+      const item = document.createElement("li");
+      item.className = "activity-empty";
+      item.textContent = "No transfer activity yet.";
+      transferActivityList.append(item);
+    } else {
+      for (const entry of items) {
+        const item = document.createElement("li");
+        item.className = "activity-item";
+        item.textContent = entry;
+        transferActivityList.append(item);
+      }
+    }
+  }
 }
 
 function renderError(error: unknown): void {
@@ -330,6 +389,218 @@ function dropboxUrl(remoteRoot: string): string | null {
   return `https://www.dropbox.com/home/${encoded}`;
 }
 
+function formField(form: HTMLFormElement, name: string): HTMLInputElement | HTMLSelectElement | null {
+  return form.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement | null;
+}
+
+function selectedValue(form: HTMLFormElement, name: string): string {
+  return formField(form, name)?.value.trim() ?? "";
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\\"'\\\"'")}'`;
+}
+
+function showUiCommand(args: string[]): void {
+  lastUiCommand = `safe-sync ${args.map(shellQuote).join(" ")}`;
+  if (lastCommand) lastCommand.textContent = lastUiCommand;
+}
+
+function remoteRoot(remoteBase: string, remotePath: string): string {
+  if (remotePath.startsWith("dropbox:")) return remotePath;
+  const base = remoteBase.replace(/\/+$/, "");
+  const bareBase = base.replace(/^[^:]+:/, "").replace(/^\/+/, "");
+  const barePath = remotePath.replace(/^\/+/, "");
+  if (barePath === bareBase || barePath.startsWith(`${bareBase}/`)) return `dropbox:${barePath}`;
+  return `${base}/${barePath}`;
+}
+
+function cleanSubfolder(value: string): string | null {
+  const cleaned = value.trim().replace(/^[/\\]+|[/\\]+$/g, "");
+  if (!cleaned) return "";
+  if (cleaned.split(/[\\/]+/).some((part) => part === "..")) return null;
+  return cleaned;
+}
+
+function joinLocalPath(base: string, subfolder: string): string {
+  return subfolder ? `${base.replace(/[\\/]$/, "")}/${subfolder}` : base;
+}
+
+function transferDestination(): string | null {
+  if (!transferForm) return null;
+  const base = selectedValue(transferForm, "destination_path");
+  if (!base) return null;
+  const subfolder = cleanSubfolder(selectedValue(transferForm, "destination_subfolder"));
+  return subfolder === null ? null : joinLocalPath(base, subfolder);
+}
+
+function selectedDestinationFolder(): FolderView | null {
+  if (!transferForm || !latestConfig) return null;
+  const id = selectedValue(transferForm, "destination_folder");
+  return (latestConfig.folders.find((raw) => text((raw as FolderView).id, "") === id) as FolderView | undefined) ?? null;
+}
+
+function remotePathForDestination(): string | null {
+  const folder = selectedDestinationFolder();
+  if (!folder?.local_path || !folder.remote_root || !transferForm) return null;
+  if (selectedValue(transferForm, "destination_path") !== folder.local_path) return null;
+  const subfolder = cleanSubfolder(selectedValue(transferForm, "destination_subfolder"));
+  return subfolder === null ? null : subfolder ? `${folder.remote_root.replace(/\/+$/, "")}/${subfolder}` : folder.remote_root;
+}
+
+function localPathForSource(): string | null {
+  if (!latestConfig || !transferSource) return null;
+  for (const raw of latestConfig.folders) {
+    const folder = raw as FolderView;
+    if (!folder.local_path || !folder.remote_root) continue;
+    const root = folder.remote_root.replace(/\/+$/, "");
+    if (transferSource === root) return folder.local_path;
+    if (transferSource.startsWith(`${root}/`)) return joinLocalPath(folder.local_path, transferSource.slice(root.length + 1));
+  }
+  return null;
+}
+
+function updateTransferLocationActions(): void {
+  const sourceLocal = document.querySelector<HTMLButtonElement>("[data-action='open-source-local']");
+  const destinationLocal = document.querySelector<HTMLButtonElement>("[data-action='open-destination-local']");
+  const destinationDropbox = document.querySelector<HTMLButtonElement>("[data-action='open-destination-dropbox']");
+  if (sourceLocal) sourceLocal.disabled = !localPathForSource();
+  if (destinationLocal) destinationLocal.disabled = !transferDestination();
+  if (destinationDropbox) destinationDropbox.disabled = !remotePathForDestination();
+}
+
+function updateTransferCommand(): void {
+  if (!transferCommand || !transferForm) return;
+  const destination = transferDestination();
+  const subfolder = cleanSubfolder(selectedValue(transferForm, "destination_subfolder"));
+  const dryRun = (transferForm.elements.namedItem("dry_run") as HTMLInputElement | null)?.checked ?? true;
+  const runButton = document.querySelector<HTMLButtonElement>("[data-action='run-transfer']");
+  if (runButton) runButton.textContent = dryRun ? "Run Dry Run" : "Copy To Local Folder";
+  if (subfolder === null) {
+    transferCommand.textContent = "Destination subfolder cannot contain ..";
+  } else if (!transferSource || !destination) {
+    transferCommand.textContent = "Choose a source and destination folder.";
+  } else {
+    transferCommand.textContent = `safe-sync pull ${shellQuote(transferSource)} ${shellQuote(destination)}${dryRun ? " --dry-run" : ""}`;
+  }
+  updateTransferLocationActions();
+}
+
+function sourceComputer(): ComputerView | null {
+  if (!transferForm) return null;
+  const machineId = selectedValue(transferForm, "source_computer");
+  return remoteComputerByMachineId(machineId);
+}
+
+function renderTransferOptions(): void {
+  if (!transferForm) return;
+  const computerSelect = formField(transferForm, "source_computer") as HTMLSelectElement | null;
+  const sourceFolderSelect = formField(transferForm, "source_folder") as HTMLSelectElement | null;
+  const destinationSelect = formField(transferForm, "destination_folder") as HTMLSelectElement | null;
+  const destinationPath = formField(transferForm, "destination_path") as HTMLInputElement | null;
+  if (!computerSelect || !sourceFolderSelect || !destinationSelect || !destinationPath) return;
+
+  const priorComputer = computerSelect.value;
+  const priorFolder = sourceFolderSelect.value;
+  const priorDestination = destinationSelect.value;
+  computerSelect.innerHTML = "";
+  for (const raw of latestComputers) {
+    const computer = raw as ComputerView;
+    const machineId = text(computer.machine_id, text(computer.machine, ""));
+    if (!machineId || !Array.isArray(computer.folders) || computer.folders.length === 0) continue;
+    const option = document.createElement("option");
+    option.value = machineId;
+    option.textContent = text(computer.machine_label, machineId);
+    computerSelect.append(option);
+  }
+  if (priorComputer && [...computerSelect.options].some((option) => option.value === priorComputer)) computerSelect.value = priorComputer;
+
+  const renderSourceFolders = (): void => {
+    const computer = sourceComputer();
+    sourceFolderSelect.innerHTML = "";
+    const folders = Array.isArray(computer?.folders) ? computer.folders : [];
+    for (const raw of folders) {
+      const folder = raw as Record<string, unknown>;
+      const remotePath = text(folder.remote_path, "");
+      if (!remotePath) continue;
+      const option = document.createElement("option");
+      option.value = remoteRoot(latestConfig?.remote_base ?? "dropbox:", remotePath);
+      option.textContent = text(folder.label, text(folder.id, remotePath));
+      sourceFolderSelect.append(option);
+    }
+    if (priorFolder && [...sourceFolderSelect.options].some((option) => option.value === priorFolder)) sourceFolderSelect.value = priorFolder;
+    transferSourceRoot = sourceFolderSelect.value;
+    transferSource = transferSourceRoot;
+  };
+  renderSourceFolders();
+  computerSelect.onchange = () => {
+    renderSourceFolders();
+    hideTransferBrowser();
+    updateTransferCommand();
+  };
+  sourceFolderSelect.onchange = () => {
+    transferSourceRoot = sourceFolderSelect.value;
+    transferSource = transferSourceRoot;
+    hideTransferBrowser();
+    updateTransferCommand();
+  };
+
+  destinationSelect.innerHTML = "";
+  for (const raw of latestConfig?.folders ?? []) {
+    const folder = raw as FolderView;
+    if (folder.enabled === false || !folder.id || !folder.local_path) continue;
+    const option = document.createElement("option");
+    option.value = folder.id;
+    option.textContent = `${text(folder.label, folder.id)} - ${folder.local_path}`;
+    destinationSelect.append(option);
+  }
+  if (priorDestination && [...destinationSelect.options].some((option) => option.value === priorDestination)) destinationSelect.value = priorDestination;
+  const selectedFolder = selectedDestinationFolder();
+  if (!destinationPath.value && selectedFolder?.local_path) destinationPath.value = selectedFolder.local_path;
+  destinationSelect.onchange = () => {
+    const folder = selectedDestinationFolder();
+    if (folder?.local_path) destinationPath.value = folder.local_path;
+    updateTransferCommand();
+  };
+  updateTransferCommand();
+}
+
+function hideTransferBrowser(): void {
+  if (transferBrowser) transferBrowser.hidden = true;
+  if (transferEntryList) transferEntryList.innerHTML = "";
+}
+
+function renderRemoteEntries(output: string, base: string): void {
+  if (!transferBrowser || !transferEntryList || !transferSelectedSource) return;
+  const entries = output.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 200);
+  transferSelectedSource.textContent = base;
+  transferEntryList.innerHTML = "";
+  for (const entry of entries) {
+    const directory = entry.endsWith("/");
+    const item = document.createElement("article");
+    item.className = "item transfer-entry";
+    const label = document.createElement("span");
+    label.textContent = entry;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.dataset.action = "select-transfer-entry";
+    button.dataset.entry = entry;
+    button.dataset.directory = String(directory);
+    button.textContent = directory ? "Open" : "Select";
+    item.append(label, button);
+    transferEntryList.append(item);
+  }
+  if (entries.length === 0) transferEntryList.textContent = "No files found in this folder.";
+  if (output.split("\n").filter(Boolean).length > entries.length) {
+    const note = document.createElement("p");
+    note.className = "reason";
+    note.textContent = "Showing the first 200 entries. Open a folder to narrow the list.";
+    transferEntryList.append(note);
+  }
+  transferBrowser.hidden = false;
+}
+
 function remoteComputerByMachineId(machineId: string | undefined | null): ComputerView | null {
   if (!machineId) return null;
   const match = latestComputers.find((entry) => {
@@ -349,6 +620,7 @@ function renderComputersView(): void {
       const remote = remoteComputerByMachineId(machineKey);
       const item = document.createElement("article");
       item.className = "item";
+      item.dataset.profileId = text(profile.id);
       item.innerHTML = `
         <div class="item-heading">
           <strong>${text(profile.label, text(profile.id))}</strong>
@@ -359,7 +631,8 @@ function renderComputersView(): void {
         </div>
         <span>${escapeHtml(text(profile.machine_label, text(profile.machine_id)))}</span>
         <span>${Number(profile.folder_count ?? 0)} folder(s)</span>
-        <span>${remote ? `Registry: ${escapeHtml(text(remote.updated_at, text(remote.generated_at)))} ` : "Run Backup Now to publish this computer to Dropbox."}</span>`;
+        <span>${remote ? `Registry: ${escapeHtml(text(remote.updated_at, text(remote.generated_at)))} ` : "Run Backup Now to publish this computer to Dropbox."}</span>
+        <div class="actions left"><button type="button" class="secondary" data-action="activate-profile" ${profile.active ? "disabled" : ""}>Use Profile</button></div>`;
       localComputerList.append(item);
     }
     if (profiles.length === 0) localComputerList.textContent = "No local computers configured";
@@ -451,6 +724,7 @@ function renderConfig(config: SafeSyncConfig): void {
     if (config.folders.length === 0) folderList.textContent = "No folders configured";
   }
   renderComputersView();
+  renderTransferOptions();
 }
 
 async function loadConfig(): Promise<void> {
@@ -471,6 +745,17 @@ async function saveSettings(event: SubmitEvent): Promise<void> {
   if (!settingsForm) return;
   setBusy("settings");
   try {
+    showUiCommand([
+      "config", "update",
+      "--machine-label", inputValue(settingsForm, "machine_label"),
+      "--profile-label", inputValue(settingsForm, "profile_label"),
+      "--remote-base", inputValue(settingsForm, "remote_base"),
+      "--poll-interval-seconds", String(numberValue(settingsForm, "poll_interval_seconds")),
+      "--debounce-seconds", String(numberValue(settingsForm, "debounce_seconds")),
+      "--min-interval-seconds", String(numberValue(settingsForm, "min_interval_seconds")),
+      "--fallback-interval-seconds", String(numberValue(settingsForm, "fallback_interval_seconds")),
+      "--rate-limit-backoff-seconds", String(numberValue(settingsForm, "rate_limit_backoff_seconds")),
+    ]);
     renderConfig(await invoke<SafeSyncConfig>("save_settings", {
       update: {
         machine_label: inputValue(settingsForm, "machine_label"),
@@ -497,6 +782,7 @@ async function addProfile(event: SubmitEvent): Promise<void> {
   setBusy("profile");
   try {
     const name = inputValue(addProfileForm, "name");
+    showUiCommand(["profiles", "add", name]);
     renderConfig(await invoke<SafeSyncConfig>("add_profile", {
       request: {
         name,
@@ -516,10 +802,14 @@ async function addFolder(event: SubmitEvent): Promise<void> {
   if (!addFolderForm) return;
   setBusy("folder");
   try {
+    const localPath = inputValue(addFolderForm, "local_path");
+    const label = inputValue(addFolderForm, "label");
+    const id = label || localPath.split("/").filter(Boolean).pop() || "folder";
+    showUiCommand(["folders", "add", id, localPath, "--label", label || id]);
     renderConfig(await invoke<SafeSyncConfig>("add_folder", {
       request: {
-        local_path: inputValue(addFolderForm, "local_path"),
-        label: inputValue(addFolderForm, "label"),
+        local_path: localPath,
+        label,
         remote_path: "",
         trash_path: "",
         disabled: false,
@@ -555,12 +845,63 @@ async function pickFolder(): Promise<void> {
   }
 }
 
+async function pickTransferDestination(): Promise<void> {
+  if (!transferForm) return;
+  setBusy("transfer-picker");
+  try {
+    const selection = await open({ directory: true, multiple: false, title: "Choose transfer destination" });
+    if (typeof selection === "string" && selection.length > 0) {
+      const input = formField(transferForm, "destination_path") as HTMLInputElement | null;
+      if (input) input.value = selection;
+      updateTransferCommand();
+      setMessage("Transfer destination selected", "ok");
+    }
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function openTransferLocal(kind: "source" | "destination"): Promise<void> {
+  const path = kind === "source" ? localPathForSource() : transferDestination();
+  if (!path) {
+    setMessage(kind === "source" ? "This source is not local on the active profile" : "Choose a local destination first", "error");
+    return;
+  }
+  setBusy("open-local");
+  try {
+    await invoke("open_local_folder", { path });
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function openTransferDropbox(kind: "source" | "destination"): Promise<void> {
+  const remoteRoot = kind === "source" ? transferSource : remotePathForDestination();
+  if (!remoteRoot) {
+    setMessage("This arbitrary local destination has no linked Dropbox folder", "error");
+    return;
+  }
+  setBusy("open-dropbox");
+  try {
+    await invoke("open_dropbox_location", { request: { remoteRoot } });
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
 async function removeFolder(button: HTMLElement): Promise<void> {
   const item = button.closest<HTMLElement>("[data-folder-id]");
   if (!item) return;
   const id = item.dataset.folderId ?? "";
   setBusy("folder");
   try {
+    showUiCommand(["folders", "remove", id]);
     renderConfig(await invoke<SafeSyncConfig>("remove_folder", { request: { id } }));
     setMessage("Folder removed", "ok");
   } catch (error) {
@@ -575,14 +916,18 @@ async function saveFolder(button: HTMLElement): Promise<void> {
   if (!item) return;
   const field = (name: string) => item.querySelector<HTMLInputElement>(`[data-folder-field='${name}']`);
   const id = item.dataset.folderId ?? "";
+  const label = field("label")?.value.trim() ?? id;
+  const localPath = field("local_path")?.value.trim() ?? "";
+  const enabled = field("enabled")?.checked ?? true;
   setBusy("folder");
   try {
+    showUiCommand(["folders", "update", id, localPath, "--label", label, enabled ? "--enabled" : "--disabled"]);
     renderConfig(await invoke<SafeSyncConfig>("update_folder", {
       request: {
         id,
-        label: field("label")?.value.trim() ?? id,
-        local_path: field("local_path")?.value.trim() ?? "",
-        enabled: field("enabled")?.checked ?? true,
+        label,
+        local_path: localPath,
+        enabled,
       },
     }));
     setMessage("Folder saved", "ok");
@@ -599,6 +944,7 @@ async function activateProfile(button: HTMLElement): Promise<void> {
   const id = item.dataset.profileId ?? "";
   setBusy("profile");
   try {
+    showUiCommand(["profiles", "activate", id]);
     renderConfig(await invoke<SafeSyncConfig>("activate_profile", { request: { id } }));
     await refreshStatusQuietly();
     setMessage("Profile switched", "ok");
@@ -616,6 +962,7 @@ async function loadComputers(): Promise<void> {
     latestComputers = computers;
     computersLoaded = true;
     renderComputersView();
+    renderTransferOptions();
     setMessage("Computers loaded", "ok");
     holdAction("computers");
   } catch (error) {
@@ -627,14 +974,21 @@ async function loadComputers(): Promise<void> {
 
 async function listRemote(): Promise<void> {
   if (!transferForm || !transferOutput) return;
+  if (!transferSource) {
+    transferOutput.textContent = "Choose a published computer and source folder first.";
+    setMessage("Choose a source first", "error");
+    return;
+  }
   setBusy("transfer");
   try {
+    showUiCommand(["list", transferSource, "--depth", "2"]);
     const result = await invoke<CommandResult>("list_remote", {
-      target: inputValue(transferForm, "source"),
-      depth: numberValue(transferForm, "depth") || 2,
+      target: transferSource,
+      depth: 2,
     });
-    transferOutput.textContent = result.output || "No output";
-    setMessage("Remote listed", "ok");
+    renderRemoteEntries(result.output, transferSource);
+    transferOutput.textContent = result.output || "No files found";
+    setMessage("Remote source listed", "ok");
     holdAction("transfer");
   } catch (error) {
     transferOutput.textContent = String(error);
@@ -648,15 +1002,27 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (!transferForm || !transferOutput) return;
   const dryRun = (transferForm.elements.namedItem("dry_run") as HTMLInputElement | null)?.checked ?? true;
+  const destination = transferDestination();
+  if (!transferSource || !destination) {
+    transferOutput.textContent = "Choose a remote source and an enabled destination folder.";
+    setMessage("Choose source and destination", "error");
+    return;
+  }
+  if (cleanSubfolder(selectedValue(transferForm, "destination_subfolder")) === null) {
+    transferOutput.textContent = "Destination subfolder cannot contain ..";
+    setMessage("Use a safe destination subfolder", "error");
+    return;
+  }
   setBusy("transfer");
   try {
+    showUiCommand(["pull", transferSource, destination, ...(dryRun ? ["--dry-run"] : [])]);
     const result = await invoke<CommandResult>("pull_remote", {
-      source: inputValue(transferForm, "source"),
-      destination: inputValue(transferForm, "destination"),
+      source: transferSource,
+      destination,
       dryRun,
     });
-    transferOutput.textContent = result.output || "Done";
-    setMessage(dryRun ? "Dry run complete" : "Pull complete", "ok");
+    transferOutput.textContent = `${result.output || "transfer queued"}\nThe daemon will run it after any active backup. Live progress appears above.`;
+    setMessage(dryRun ? "Dry run queued" : "Transfer queued", "ok");
     holdAction("transfer");
   } catch (error) {
     transferOutput.textContent = String(error);
@@ -664,6 +1030,58 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   } finally {
     setBusy(null);
   }
+}
+
+async function copyTransferCommand(): Promise<void> {
+  const command = transferCommand?.textContent ?? "";
+  if (!command.startsWith("safe-sync pull")) {
+    setMessage("Choose a source and destination before copying a command", "error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(command);
+    setMessage("Command copied", "ok");
+    holdAction("copy-transfer-command");
+  } catch (error) {
+    setMessage(`Could not copy command: ${String(error)}`, "error");
+  }
+}
+
+async function copyLastCommand(): Promise<void> {
+  if (!lastUiCommand) {
+    setMessage("No UI command has run yet", "error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(lastUiCommand);
+    setMessage("Command copied", "ok");
+    holdAction("copy-last-command");
+  } catch (error) {
+    setMessage(`Could not copy command: ${String(error)}`, "error");
+  }
+}
+
+function selectTransferEntry(button: HTMLElement): void {
+  const entry = button.dataset.entry;
+  if (!entry || !transferSource) return;
+  const selected = `${transferSource.replace(/\/+$/, "")}/${entry.replace(/^\/+|\/+$/g, "")}`;
+  if (button.dataset.directory === "true") {
+    transferSource = selected;
+    updateTransferCommand();
+    void listRemote();
+    return;
+  }
+  transferSource = selected;
+  updateTransferCommand();
+  if (transferSelectedSource) transferSelectedSource.textContent = transferSource;
+  setMessage("Remote file selected", "ok");
+}
+
+function resetTransferSource(): void {
+  transferSource = transferSourceRoot;
+  updateTransferCommand();
+  hideTransferBrowser();
+  setMessage("Using selected source folder", "ok");
 }
 
 async function refreshStatus(): Promise<void> {
@@ -695,7 +1113,7 @@ async function refreshStatusQuietly(): Promise<void> {
 
 function scheduleStatusRefresh(): void {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-  const refreshMs = latestStatus && ["syncing", "dirty", "cooldown", "backoff"].includes(syncState(latestStatus))
+  const refreshMs = latestStatus && ["syncing", "transferring", "dirty", "cooldown", "backoff"].includes(syncState(latestStatus))
     ? ACTIVE_REFRESH_MS
     : IDLE_REFRESH_MS;
   refreshTimer = window.setTimeout(() => {
@@ -708,6 +1126,7 @@ async function toggleBackend(): Promise<void> {
   const action = latestStatus ? desiredAction(latestStatus) : "start";
   setBusy("backend");
   try {
+    showUiCommand([action]);
     renderStatus(await invoke<SafeSyncStatus>("control_backend", { action }));
     holdAction("backend");
   } catch (error) {
@@ -720,6 +1139,7 @@ async function toggleBackend(): Promise<void> {
 async function backupNow(): Promise<void> {
   setBusy("backup");
   try {
+    showUiCommand(["backup"]);
     renderStatus(await invoke<SafeSyncStatus>("backup_now"));
     holdAction("backup");
   } catch (error) {
@@ -732,6 +1152,7 @@ async function backupNow(): Promise<void> {
 async function openLogs(): Promise<void> {
   setBusy("logs");
   try {
+    showUiCommand(["logs"]);
     await invoke("open_logs");
     holdAction("logs");
   } catch (error) {
@@ -769,6 +1190,10 @@ function activateTab(tab: string): void {
   }
   if (tab === "settings" && !configLoaded) void loadConfig();
   if (tab === "computers" && !computersLoaded) void loadComputers();
+  if (tab === "transfer") {
+    if (!configLoaded) void loadConfig();
+    if (!computersLoaded) void loadComputers();
+  }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -785,6 +1210,7 @@ window.addEventListener("DOMContentLoaded", () => {
   addProfileForm?.addEventListener("submit", (event) => void addProfile(event));
   addFolderForm?.addEventListener("submit", (event) => void addFolder(event));
   document.querySelector("[data-action='pick-folder']")?.addEventListener("click", () => void pickFolder());
+  document.querySelector("[data-action='pick-transfer-destination']")?.addEventListener("click", () => void pickTransferDestination());
   folderList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "save-folder") void saveFolder(target);
@@ -794,10 +1220,31 @@ window.addEventListener("DOMContentLoaded", () => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "activate-profile") void activateProfile(target);
   });
+  localComputerList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "activate-profile") void activateProfile(target);
+  });
   transferForm?.addEventListener("submit", (event) => void pullRemote(event));
+  transferForm?.addEventListener("input", updateTransferCommand);
+  transferForm?.addEventListener("change", updateTransferCommand);
+  transferEntryList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "select-transfer-entry") selectTransferEntry(target);
+  });
   document.querySelector("[data-action='reload-config']")?.addEventListener("click", () => void loadConfig());
   document.querySelector("[data-action='load-computers']")?.addEventListener("click", () => void loadComputers());
   document.querySelector("[data-action='list-remote']")?.addEventListener("click", () => void listRemote());
+  document.querySelector("[data-action='open-source-local']")?.addEventListener("click", () => void openTransferLocal("source"));
+  document.querySelector("[data-action='open-source-dropbox']")?.addEventListener("click", () => void openTransferDropbox("source"));
+  document.querySelector("[data-action='open-destination-local']")?.addEventListener("click", () => void openTransferLocal("destination"));
+  document.querySelector("[data-action='open-destination-dropbox']")?.addEventListener("click", () => void openTransferDropbox("destination"));
+  document.querySelector("[data-action='reset-transfer-source']")?.addEventListener("click", resetTransferSource);
+  document.querySelector("[data-action='copy-transfer-command']")?.addEventListener("click", () => void copyTransferCommand());
+  document.querySelector("[data-action='copy-last-command']")?.addEventListener("click", () => void copyLastCommand());
+  document.querySelector("[data-action='refresh-transfer']")?.addEventListener("click", () => {
+    void loadConfig();
+    void loadComputers();
+  });
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
     button.addEventListener("click", () => activateTab(button.dataset.tab ?? "status"));
   }

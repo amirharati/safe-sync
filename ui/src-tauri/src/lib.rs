@@ -743,6 +743,15 @@ fn open_dropbox_location(request: OpenDropboxRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_local_folder(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path.trim());
+    if !target.is_dir() {
+        return Err("local folder does not exist".to_string());
+    }
+    open_path(&target.to_string_lossy())
+}
+
+#[tauri::command]
 fn close_quick_panel(app: AppHandle<Wry>) {
     hide_quick_panel(&app);
 }
@@ -780,6 +789,7 @@ pub fn run() {
             open_logs,
             open_control_panel,
             open_dropbox_location,
+            open_local_folder,
             close_quick_panel,
             quit_tray,
             get_config,

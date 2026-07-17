@@ -246,6 +246,12 @@ def safe_id(value: str) -> str:
     return cleaned or "default"
 
 
+def bounded_seconds(name: str, value: int, minimum: int, maximum: int) -> int:
+    if value < minimum or value > maximum:
+        raise SystemExit(f"{name} must be between {minimum} and {maximum} seconds")
+    return value
+
+
 def default_install_id() -> str:
     return str(uuid.uuid4())
 
@@ -474,13 +480,37 @@ class Lock:
 
     def __enter__(self) -> "Lock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(self.fd, str(os.getpid()).encode())
-            return self
-        except FileExistsError:
-            pid = self.path.read_text(errors="ignore").strip()
-            raise SystemExit(f"Safe Sync already running (lock {self.path}, pid {pid or 'unknown'})")
+        for _attempt in range(2):
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, str(os.getpid()).encode())
+                return self
+            except FileExistsError:
+                pid = self.path.read_text(errors="ignore").strip()
+                if self._is_stale(pid):
+                    try:
+                        self.path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                raise SystemExit(f"Safe Sync already running (lock {self.path}, pid {pid or 'unknown'})")
+        raise SystemExit(f"Safe Sync could not acquire lock {self.path}")
+
+    @staticmethod
+    def _is_stale(pid: str) -> bool:
+        if not pid.isdigit():
+            return True
+        result = subprocess.run(
+            ["ps", "-p", pid, "-o", "command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        command = result.stdout.strip()
+        # A numeric PID alone is not sufficient: macOS can reuse it for an
+        # unrelated program after Safe Sync exits.
+        return result.returncode != 0 or "safe-sync" not in command
 
     def __exit__(self, *_exc: object) -> None:
         if self.fd is not None:
@@ -792,19 +822,35 @@ def cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_pull(args: argparse.Namespace) -> int:
-    config = normalized_config(load_config(Path(args.config).expanduser()))
-    src = args.source
-    dst = args.destination
+def run_pull_direct(config: dict[str, Any], src: str, dst: str, dry_run: bool) -> int:
     with Lock(lock_file(config)):
         save_status(config, state="syncing", last_start=now_iso(), last_command="pull", last_error=None)
         try:
-            code = run_command(config, copy_cmd(config, src, dst, args.dry_run), dry_run=args.dry_run)
+            code = run_command(config, copy_cmd(config, src, dst, dry_run), dry_run=dry_run)
         except BaseException as exc:
             save_status(config, state="error", last_error=str(exc), last_finish=now_iso())
             raise
         save_status(config, state="idle" if code == 0 else "error", last_success=now_iso() if code == 0 else None, last_error=None if code == 0 else f"rclone exit {code}", last_finish=now_iso())
         return code
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    config = normalized_config(load_config(Path(args.config).expanduser()))
+    try:
+        response = daemon_api(
+            config,
+            "pull",
+            source=args.source,
+            destination=args.destination,
+            dry_run=args.dry_run,
+        )
+    except OSError:
+        # A stopped daemon still permits the CLI to perform a one-off copy.
+        return run_pull_direct(config, args.source, args.destination, args.dry_run)
+    if not response.get("ok"):
+        raise SystemExit(str(response.get("error") or "daemon transfer request failed"))
+    print("transfer queued")
+    return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -1112,6 +1158,85 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
     return last_code, None
 
 
+def run_pull_runtime(config: dict[str, Any], request: dict[str, Any], api_state: DaemonApiState) -> int:
+    """Run an explicit copy inside the daemon's single rclone work queue."""
+    source = str(request["source"])
+    destination = str(request["destination"])
+    dry_run = bool(request.get("dry_run"))
+    publish_runtime_status(
+        api_state,
+        config,
+        state="transferring",
+        last_start=now_iso(),
+        last_command="pull",
+        source=source,
+        destination=destination,
+        current_folder_label=destination,
+        last_error=None,
+        last_warning=None,
+        last_progress="Starting requested transfer",
+        _activity_event=f"Transfer started: {source} -> {destination}",
+    )
+
+    def on_progress(line: str) -> None:
+        summary = summarize_progress_line(line)
+        if summary:
+            publish_runtime_status(
+                api_state,
+                config,
+                state="transferring",
+                current_folder_label=destination,
+                last_progress=summary,
+                current_file=current_file_from_progress(summary),
+                _activity_event=summary,
+            )
+
+    try:
+        code = run_command(config, copy_cmd(config, source, destination, dry_run), dry_run=dry_run, progress_callback=on_progress)
+    except BaseException as exc:
+        publish_runtime_status(api_state, config, state="error", last_error=str(exc), last_finish=now_iso())
+        return 1
+
+    if code == 0 and not text_looks_rate_limited(LAST_COMMAND_OUTPUT):
+        publish_runtime_status(
+            api_state,
+            config,
+            state="watching",
+            last_success=now_iso(),
+            last_finish=now_iso(),
+            last_error=None,
+            last_progress="Transfer complete",
+            _activity_event=f"Transfer complete: {source} -> {destination}",
+        )
+        return 0
+
+    if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
+        retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+        publish_runtime_status(
+            api_state,
+            config,
+            state="backoff",
+            last_warning=f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s",
+            last_error=None,
+            queued_backup=True,
+            backoff_seconds=retry_after,
+            backoff_until=future_iso(retry_after),
+            last_finish=now_iso(),
+            last_progress="Transfer paused by Dropbox throttling",
+        )
+        return RATE_LIMIT_EXIT
+
+    publish_runtime_status(
+        api_state,
+        config,
+        state="error",
+        last_error=f"rclone exit {code}",
+        last_finish=now_iso(),
+        last_progress="Transfer failed",
+    )
+    return code
+
+
 
 
 
@@ -1264,6 +1389,21 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             if api_state.consume_backup_request():
                 daemon.mark_dirty(now)
                 publish_runtime_status(api_state, config, state="dirty", last_error=None, last_warning=None, note="manual backup queued")
+
+            if api_state.snapshot().get("state") != "backoff":
+                pull_request = api_state.consume_pull_request()
+                if pull_request is not None:
+                    run_pull_runtime(config, pull_request, api_state)
+                    # The copy changes a watched local folder. Leave the prior
+                    # snapshot intact so the normal watcher schedules its backup.
+                    now = time.monotonic()
+            elif api_state.has_pull_request():
+                publish_runtime_status(
+                    api_state,
+                    config,
+                    queued_transfer=True,
+                    note="transfer queued until Dropbox cooldown ends",
+                )
 
             current_snapshots = folder_snapshots(config)
             changed = [folder_id for folder_id, snapshot in current_snapshots.items() if snapshot != previous_snapshots.get(folder_id)]

@@ -24,7 +24,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -87,6 +88,16 @@ input {
   min-height: 34px;
   border: 1px solid #c8d0d8;
   border-radius: 6px;
+  padding: 0 10px;
+}
+
+select {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #c8d0d8;
+  border-radius: 6px;
+  background: #ffffff;
   padding: 0 10px;
 }
 
@@ -346,6 +357,27 @@ dd[data-value="stopped"] { color: #9a6400; }
   gap: 10px;
 }
 
+.transfer-form .transfer-destination {
+  grid-column: span 2;
+}
+
+.transfer-locations {
+  margin-top: 10px;
+}
+
+.transfer-activity {
+  margin-top: 16px;
+  border-top: 1px solid #edf0f3;
+  padding-top: 12px;
+}
+
+.transfer-live-summary {
+  min-height: 34px;
+  margin: 0 0 10px;
+  color: #445260;
+  white-space: pre-line;
+}
+
 .settings-grid label,
 .transfer-form label {
   display: grid;
@@ -528,6 +560,54 @@ button.danger:hover:not(:disabled) {
   overflow-wrap: anywhere;
 }
 
+.transfer-browser,
+.command-preview {
+  margin-top: 18px;
+  border-top: 1px solid #edf0f3;
+  padding-top: 14px;
+}
+
+.last-command-panel {
+  margin-top: 16px;
+}
+
+.transfer-selected {
+  margin: -2px 0 10px;
+  color: #52606f;
+}
+
+.transfer-entry-list {
+  max-height: 280px;
+  overflow: auto;
+}
+
+.transfer-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.transfer-entry span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-entry button {
+  flex: 0 0 auto;
+  min-width: 64px;
+}
+
+.command-preview code {
+  display: block;
+  border: 1px solid #d8dde3;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 10px;
+  color: #24303b;
+  white-space: pre-wrap;
+}
+
 :root[data-panel="quick"],
 :root[data-panel="quick"] body {
   background: transparent;
@@ -639,6 +719,10 @@ button.danger:hover:not(:disabled) {
 :root[data-panel="quick"] .activity-panel {
   margin-top: 12px;
   padding-top: 10px;
+}
+
+:root[data-panel="quick"] .last-command-panel {
+  display: none;
 }
 
 :root[data-panel="quick"] .activity-head {

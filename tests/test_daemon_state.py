@@ -1,9 +1,13 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
+    Lock,
     enabled_folders,
     ensure_local_profiles_registered,
     folder_snapshots,
@@ -13,6 +17,7 @@ from safe_sync.cli import (
     registry_path,
     RATE_LIMIT_EXIT,
     backup_cmd,
+    bounded_seconds,
     copy_cmd,
     restart_backend_if_running,
     restore_last_sync_finish,
@@ -22,6 +27,7 @@ from safe_sync.cli import (
     status_health,
     unsafe_local_path_reason,
 )
+from safe_sync.api import DaemonApiState
 from safe_sync.path_filter import should_ignore_watch_event
 from safe_sync.service import backend_autostart_cmd, backend_autostart_status_text
 
@@ -180,6 +186,50 @@ def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
 
     assert "--max-duration" not in backup_cmd(config, dry_run=False)
     assert "--max-duration" not in copy_cmd(config, "dropbox:source", str(tmp_path), dry_run=False)
+
+
+def test_bounded_seconds_validates_settings_limits():
+    assert bounded_seconds("poll interval", 5, 1, 3600) == 5
+    with pytest.raises(SystemExit, match="poll interval must be between 1 and 3600 seconds"):
+        bounded_seconds("poll interval", 0, 1, 3600)
+
+
+def test_lock_recovers_when_a_reused_pid_belongs_to_another_app(monkeypatch, tmp_path):
+    path = tmp_path / "safe-sync.lock"
+    path.write_text("50666")
+
+    def fake_ps(*args, **_kwargs):
+        assert args[0][:3] == ["ps", "-p", "50666"]
+        return subprocess.CompletedProcess(args[0], 0, "/Applications/Dropbox.app/crashpad-handler\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_ps)
+
+    with Lock(path):
+        assert path.read_text() == str(os.getpid())
+
+    assert not path.exists()
+
+
+def test_daemon_state_queues_one_transfer_at_a_time():
+    state = DaemonApiState()
+
+    assert state.request_pull("dropbox:source", "/tmp/destination", False)
+    assert not state.request_pull("dropbox:other", "/tmp/other", False)
+    assert state.consume_pull_request() == {
+        "source": "dropbox:source",
+        "destination": "/tmp/destination",
+        "dry_run": False,
+    }
+    assert state.consume_pull_request() is None
+
+
+def test_daemon_state_marks_a_queued_transfer_in_live_status():
+    state = DaemonApiState()
+
+    assert state.request_pull("dropbox:source", "/tmp/destination", False)
+    assert state.snapshot()["queued_transfer"] is True
+    state.consume_pull_request()
+    assert state.snapshot()["queued_transfer"] is False
 
 
 def test_transfer_runner_does_not_set_a_whole_process_timeout(monkeypatch, tmp_path):
