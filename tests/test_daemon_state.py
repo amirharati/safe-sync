@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
     Lock,
+    cmd_daemon,
     enabled_folders,
     ensure_local_profiles_registered,
     folder_snapshots,
@@ -208,6 +210,46 @@ def test_lock_recovers_when_a_reused_pid_belongs_to_another_app(monkeypatch, tmp
         assert path.read_text() == str(os.getpid())
 
     assert not path.exists()
+
+
+def test_lock_refuses_a_live_safe_sync_owner(monkeypatch, tmp_path):
+    path = tmp_path / "safe-sync.lock"
+    path.write_text("12345")
+
+    def fake_ps(*args, **_kwargs):
+        return subprocess.CompletedProcess(args[0], 0, "python3 /home/user/bin/safe-sync daemon\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_ps)
+
+    with pytest.raises(SystemExit, match="Safe Sync already running"):
+        with Lock(path):
+            pass
+
+
+def test_daemon_holds_the_global_lock_for_its_full_lifetime(monkeypatch, tmp_path):
+    import safe_sync.cli as cli
+
+    captured = {}
+
+    class CapturingLock:
+        def __init__(self, path):
+            captured["path"] = path
+
+        def __enter__(self):
+            captured["entered"] = True
+            return self
+
+        def __exit__(self, *_args):
+            captured["exited"] = True
+
+    monkeypatch.setattr(cli, "Lock", CapturingLock)
+    monkeypatch.setattr(cli, "load_config", lambda _path: {"lock_file": str(tmp_path / "daemon.lock")})
+    monkeypatch.setattr(cli, "normalized_config", lambda config: config)
+    monkeypatch.setattr(cli, "run_daemon", lambda _args, _path, _config: 0)
+
+    assert cmd_daemon(SimpleNamespace(config=str(tmp_path / "config.json"))) == 0
+    assert captured["entered"] is True
+    assert captured["exited"] is True
 
 
 def test_daemon_state_queues_one_transfer_at_a_time():

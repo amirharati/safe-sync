@@ -1341,6 +1341,11 @@ def run_all_backups(config: dict[str, Any], dry_run: bool) -> tuple[int, str | N
 def cmd_daemon(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser()
     config = normalized_config(load_config(config_path))
+    with Lock(lock_file(config)):
+        return run_daemon(args, config_path, config)
+
+
+def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, Any]) -> int:
     validate_local_path(config)
     settings = watch_settings_from_config(config, args)
     daemon = WatchDaemon(settings)
