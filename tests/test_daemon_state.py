@@ -29,7 +29,7 @@ from safe_sync.cli import (
 )
 from safe_sync.api import DaemonApiState
 from safe_sync.path_filter import should_ignore_watch_event
-from safe_sync.service import backend_autostart_cmd, backend_autostart_status_text
+from safe_sync.service import backend_autostart_cmd, backend_autostart_status_text, service_status_text, systemd_unit
 
 
 def test_debounce_waits_for_quiet_window():
@@ -597,14 +597,33 @@ def test_backend_autostart_mac_commands(monkeypatch, tmp_path):
     assert backend_autostart_cmd("disable", "Darwin") == ["launchctl", "disable", "gui/501/com.safe-sync.daemon"]
 
 
-def test_backend_autostart_non_mac_is_todo():
+def test_backend_autostart_linux_commands(monkeypatch, tmp_path):
+    unit = tmp_path / "safe-sync-daemon.service"
+    unit.write_text("unit")
+    monkeypatch.setattr("safe_sync.service.systemd_unit_path", lambda: unit)
+
+    assert backend_autostart_cmd("enable", "Linux") == ["systemctl", "--user", "enable", "safe-sync-daemon.service"]
+    assert backend_autostart_cmd("disable", "Linux") == ["systemctl", "--user", "disable", "safe-sync-daemon.service"]
+
+
+def test_linux_service_status_and_unit(monkeypatch, tmp_path):
+    monkeypatch.setattr("safe_sync.service.os_name", lambda: "Linux")
+    monkeypatch.setattr("safe_sync.service.systemd_service_active", lambda: True)
+
+    assert service_status_text() == "service: running"
+    rendered = systemd_unit(tmp_path / "config.json", tmp_path / "safe-sync")
+    assert "ExecStart=" in rendered
+    assert "Restart=always" in rendered
+    assert "WantedBy=default.target" in rendered
+
+
+def test_backend_autostart_windows_is_todo():
     import pytest
 
     with pytest.raises(SystemExit) as exc:
-        backend_autostart_cmd("enable", "Linux")
+        backend_autostart_cmd("enable", "Windows")
 
-    assert "TODO on Linux" in str(exc.value)
-    assert "unsupported OS Linux" in backend_autostart_status_text("Linux")
+    assert "TODO on Windows" in str(exc.value)
     assert "unsupported OS Windows" in backend_autostart_status_text("Windows")
 
 

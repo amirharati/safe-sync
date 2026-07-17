@@ -24,6 +24,7 @@ from safe_sync.service import (
     backend_autostart_status_text,
     install_script,
     launchd_plist,
+    systemd_unit,
     os_name,
     service_cmd,
     service_status_text,
@@ -1705,6 +1706,7 @@ def cmd_render_install(args: argparse.Namespace) -> int:
         program = Path.cwd() / program
     files = {
         "com.safe-sync.daemon.plist": launchd_plist(config_path, program),
+        "safe-sync-daemon.service": systemd_unit(config_path, program),
         "install-service.sh": install_script(install_dir),
     }
     for name, content in files.items():

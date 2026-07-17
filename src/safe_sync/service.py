@@ -11,6 +11,7 @@ from pathlib import Path
 
 DEFAULT_LOG_DIR = Path.home() / '.local' / 'log' / 'safe-sync'
 LAUNCHD_LABEL = 'com.safe-sync.daemon'
+SYSTEMD_UNIT = 'safe-sync-daemon.service'
 
 
 def os_name() -> str:
@@ -33,6 +34,26 @@ def launchd_service_target() -> str:
     return f'{launchd_domain()}/{launchd_label()}'
 
 
+def systemd_user_dir() -> Path:
+    return Path.home() / '.config' / 'systemd' / 'user'
+
+
+def systemd_unit_path() -> Path:
+    return systemd_user_dir() / SYSTEMD_UNIT
+
+
+def systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(['systemctl', '--user', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def systemd_service_active() -> bool:
+    return systemctl_user('is-active', '--quiet', SYSTEMD_UNIT).returncode == 0
+
+
+def systemd_service_enabled() -> bool:
+    return systemctl_user('is-enabled', '--quiet', SYSTEMD_UNIT).returncode == 0
+
+
 def launchd_disabled() -> bool | None:
     result = subprocess.run(['launchctl', 'print-disabled', launchd_domain()], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if result.returncode != 0:
@@ -49,7 +70,9 @@ def service_status_text() -> str:
     if system == 'Darwin':
         result = subprocess.run(['launchctl', 'list', launchd_label()], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         return 'service: running' if result.returncode == 0 else 'service: stopped'
-    if system in {'Linux', 'Windows'}:
+    if system == 'Linux':
+        return 'service: running' if systemd_service_active() else 'service: stopped'
+    if system == 'Windows':
         return f'service: unsupported OS {system} (TODO)'
     return f'service: unsupported OS {system}'
 
@@ -67,21 +90,34 @@ def backend_autostart_status_text(system: str | None = None) -> str:
         if disabled is False:
             return f'backend autostart: enabled ({service_state})'
         return f'backend autostart: unknown ({service_state})'
-    if system in {'Linux', 'Windows'}:
+    if system == 'Linux':
+        if not systemd_unit_path().exists():
+            return 'backend autostart: not installed'
+        service_state = service_status_text().split(':', 1)[1].strip()
+        return f'backend autostart: {"enabled" if systemd_service_enabled() else "disabled"} ({service_state})'
+    if system == 'Windows':
         return f'backend autostart: unsupported OS {system} (TODO)'
     return f'backend autostart: unsupported OS {system}'
 
 
 def backend_autostart_cmd(action: str, system: str | None = None) -> list[str]:
     system = system or os_name()
-    if system != 'Darwin':
+    if system == 'Darwin':
+        if not launchd_plist_path().exists():
+            raise SystemExit('Service is not installed. Run ./install.sh from the repo first.')
+        if action == 'enable':
+            return ['launchctl', 'enable', launchd_service_target()]
+        if action == 'disable':
+            return ['launchctl', 'disable', launchd_service_target()]
+    elif system == 'Linux':
+        if not systemd_unit_path().exists():
+            raise SystemExit('Service is not installed. Run ./install.sh from the repo first.')
+        if action == 'enable':
+            return ['systemctl', '--user', 'enable', SYSTEMD_UNIT]
+        if action == 'disable':
+            return ['systemctl', '--user', 'disable', SYSTEMD_UNIT]
+    else:
         raise SystemExit(f'Backend autostart {action} is TODO on {system}; macOS is supported first.')
-    if not launchd_plist_path().exists():
-        raise SystemExit('Service is not installed. Run ./install.sh from the repo first.')
-    if action == 'enable':
-        return ['launchctl', 'enable', launchd_service_target()]
-    if action == 'disable':
-        return ['launchctl', 'disable', launchd_service_target()]
     raise SystemExit(f'Unknown backend autostart action: {action}')
 
 
@@ -91,7 +127,11 @@ def require_service_installed() -> None:
         if not launchd_plist_path().exists():
             raise SystemExit('Service is not installed. Run ./install.sh from the repo first.')
         return
-    if system in {'Linux', 'Windows'}:
+    if system == 'Linux':
+        if not systemd_unit_path().exists():
+            raise SystemExit('Service is not installed. Run ./install.sh from the repo first.')
+        return
+    if system == 'Windows':
         raise SystemExit(f'Service control is TODO on {system}; macOS is supported first.')
     raise SystemExit(f'Unsupported OS: {system}')
 
@@ -99,19 +139,23 @@ def require_service_installed() -> None:
 def service_cmd(action: str) -> int:
     system = os_name()
     require_service_installed()
-    if system != 'Darwin':
-        raise SystemExit(f'Service control is TODO on {system}; macOS is supported first.')
-
-    plist = str(launchd_plist_path())
-    if action == 'start':
-        result = subprocess.run(['launchctl', 'load', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    elif action == 'stop':
-        result = subprocess.run(['launchctl', 'unload', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    elif action == 'restart':
-        subprocess.run(['launchctl', 'unload', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        result = subprocess.run(['launchctl', 'load', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if system == 'Darwin':
+        plist = str(launchd_plist_path())
+        if action == 'start':
+            result = subprocess.run(['launchctl', 'load', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        elif action == 'stop':
+            result = subprocess.run(['launchctl', 'unload', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        elif action == 'restart':
+            subprocess.run(['launchctl', 'unload', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            result = subprocess.run(['launchctl', 'load', plist], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        else:
+            raise SystemExit(f'Unknown service action: {action}')
+    elif system == 'Linux':
+        if action not in {'start', 'stop', 'restart'}:
+            raise SystemExit(f'Unknown service action: {action}')
+        result = systemctl_user(action, SYSTEMD_UNIT)
     else:
-        raise SystemExit(f'Unknown service action: {action}')
+        raise SystemExit(f'Service control is TODO on {system}; macOS is supported first.')
     if result.stdout:
         print(result.stdout, end='')
     if result.returncode == 0:
@@ -152,6 +196,27 @@ def launchd_plist(config_path: Path, program: Path, label: str = LAUNCHD_LABEL) 
 '''
 
 
+def systemd_unit(config_path: Path, program: Path) -> str:
+    log = DEFAULT_LOG_DIR / 'systemd-daemon.log'
+    return f'''[Unit]
+Description=Safe Sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={program} --config {config_path} daemon
+Restart=always
+RestartSec=5
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+'''
+
+
 def install_script(generated_dir: Path) -> str:
     return f'''#!/bin/sh
 set -eu
@@ -163,8 +228,11 @@ case "$(uname -s)" in
     launchctl enable "gui/$(id -u)/{LAUNCHD_LABEL}" 2>/dev/null || true
     ;;
   Linux)
-    echo "Linux service install is TODO; macOS is supported first." >&2
-    exit 1
+    mkdir -p "$HOME/.config/systemd/user"
+    mkdir -p "$HOME/.local/log/safe-sync"
+    cp "$GENERATED_DIR/{SYSTEMD_UNIT}" "$HOME/.config/systemd/user/{SYSTEMD_UNIT}"
+    systemctl --user daemon-reload
+    systemctl --user enable --now {SYSTEMD_UNIT}
     ;;
   *)
     echo "Unsupported OS: $(uname -s)" >&2
