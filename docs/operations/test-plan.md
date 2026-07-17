@@ -62,7 +62,7 @@ Expected:
 
 Real test backup should only happen after dry-run output is reviewed.
 
-## Current Dropbox Backoff Behavior
+## Transfer Duration And Dropbox Backoff
 
 During the first real test on 2026-07-12, Dropbox returned:
 
@@ -71,6 +71,6 @@ too_many_requests
 Trying again in 300 seconds
 ```
 
-Safe Sync now has an outer command timeout and rclone max-duration settings so a daemon run will fail visibly instead of waiting forever.
+Safe Sync deliberately has no whole-transfer deadline. Large models and data files may take as long as they need while progress continues. rclone still has short connection and inactive-network timeouts, so a genuinely stalled transfer fails visibly and the daemon can retry it.
 
 If this happens during testing, wait a few minutes and retry. Do not keep hammering Dropbox in a loop.

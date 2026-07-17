@@ -12,8 +12,11 @@ from safe_sync.cli import (
     registry_doc,
     registry_path,
     RATE_LIMIT_EXIT,
+    backup_cmd,
+    copy_cmd,
     restart_backend_if_running,
     restore_last_sync_finish,
+    run_command,
     run_backup_with_config,
     selected_folders,
     status_health,
@@ -165,6 +168,31 @@ def test_watch_filter_ignores_generated_paths():
     assert should_ignore_watch_event("/tmp/project/dist/app.js")
     assert not should_ignore_watch_event("/tmp/project/data/results.csv")
     assert not should_ignore_watch_event("/tmp/project/models/model.pt")
+
+
+def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
+    config = {
+        "local_path": str(tmp_path),
+        "remote_root": "dropbox:computer-backups/test/machine/folder",
+        "trash_root": "dropbox:computer-backups/test/.trash/machine/folder",
+        "filter_file": str(tmp_path / "filter.txt"),
+    }
+
+    assert "--max-duration" not in backup_cmd(config, dry_run=False)
+    assert "--max-duration" not in copy_cmd(config, "dropbox:source", str(tmp_path), dry_run=False)
+
+
+def test_transfer_runner_does_not_set_a_whole_process_timeout(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, "ok")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert run_command({"log_dir": str(tmp_path)}, ["rclone", "sync"], dry_run=False) == 0
+    assert "timeout" not in captured
 
 
 def test_temporary_config_change_does_not_restart_installed_backend(monkeypatch, tmp_path):

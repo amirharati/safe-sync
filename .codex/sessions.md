@@ -10,7 +10,9 @@
 - Resume: `codex resume 019f5868-30d4-7802-99fb-f649205f4a67`
 - Summary: Ran an isolated real-Dropbox dogfood test with Alpha and Beta simulated computers, separate daemon runtime paths, multi-folder backup, registry publication, ignore policy, replacement/delete/rename/empty-directory handling with remote trash, selective Alpha-to-Beta pull, and rapid API backup requests. Found and fixed two daemon hardening issues: temporary `--config` mutations could restart the real macOS LaunchAgent, and manual backup requests arriving while sync was in flight could cause an unnecessary second no-op run.
 - Commits/PRs: `Harden daemon profile isolation` checkpoint
-- Status: Deep daemon dogfood passed; backend suite is 31 passed. Temporary test data remains under `/tmp` and a disposable Dropbox test prefix for inspection.
+- Status: Deep daemon dogfood passed; backend regression suite is 33 passed. Temporary test data remains under `/tmp` and a disposable Dropbox test prefix for inspection.
+- Additional notes: Removed whole-transfer deadlines from backup and selective pull on 2026-07-17. Safe Sync no longer passes rclone `--max-duration` and no longer applies a Python subprocess timeout to transfers, so large files may continue as long as they make network progress. The short rclone connection (`10s`) and inactive-network (`30s`) timeouts remain. Regression suite increased to 33 passing tests.
+- Additional notes 2: Restarted the installed macOS daemon after the timeout change. Its live API returned `health: ok`, `state: watching`, and `last_error: null` while monitoring the configured `test3` and `dist` folders.
 - Next steps: Commit this daemon checkpoint, then return to UI finishing work and later perform a production-install soak on macOS before Linux packaging.
 
 ## 2026-07-14 - Safe Sync tray UI hardening

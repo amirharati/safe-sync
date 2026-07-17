@@ -157,30 +157,17 @@ def run_command(
     log = log_path(config)
     log.parent.mkdir(parents=True, exist_ok=True)
     header = f"\n[{now_iso()}] $ {' '.join(cmd)}\n"
-    timeout = int(config.get("command_timeout_seconds", 180))
     with log.open("a") as fh:
         fh.write(header)
         fh.flush()
         if progress_callback is None:
-            try:
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-                output = result.stdout or ""
-                LAST_COMMAND_OUTPUT = output
-                print(output, end="")
-                fh.write(output)
-                fh.write(f"[{now_iso()}] exit={result.returncode} dry_run={dry_run}\n")
-                return int(result.returncode)
-            except subprocess.TimeoutExpired as exc:
-                output = exc.stdout or ""
-                if isinstance(output, bytes):
-                    output = output.decode(errors="replace")
-                LAST_COMMAND_OUTPUT = output
-                print(output, end="")
-                fh.write(output)
-                message = f"[{now_iso()}] timeout after {timeout}s; treating run as failed\n"
-                print(message, end="")
-                fh.write(message)
-                return 124
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            output = result.stdout or ""
+            LAST_COMMAND_OUTPUT = output
+            print(output, end="")
+            fh.write(output)
+            fh.write(f"[{now_iso()}] exit={result.returncode} dry_run={dry_run}\n")
+            return int(result.returncode)
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -188,7 +175,6 @@ def run_command(
             text=True,
             bufsize=1,
         )
-        started = time.monotonic()
         lines: list[str] = []
         assert process.stdout is not None
         try:
@@ -198,13 +184,6 @@ def run_command(
                 fh.write(line)
                 if progress_callback:
                     progress_callback(line.rstrip("\n"))
-                if time.monotonic() - started > timeout:
-                    process.kill()
-                    message = f"[{now_iso()}] timeout after {timeout}s; treating run as failed\n"
-                    print(message, end="")
-                    fh.write(message)
-                    LAST_COMMAND_OUTPUT = "".join(lines)
-                    return 124
             returncode = process.wait()
             output = "".join(lines)
             LAST_COMMAND_OUTPUT = output
@@ -343,8 +322,6 @@ def normalized_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("status_path", str(DEFAULT_STATUS))
     normalized.setdefault("log_dir", str(DEFAULT_LOG_DIR))
     normalized.setdefault("lock_file", str(Path.home() / ".local" / "state" / "safe-sync" / "safe-sync.lock"))
-    normalized.setdefault("command_timeout_seconds", 180)
-    normalized.setdefault("rclone_max_duration_seconds", 120)
     normalized.setdefault("poll_interval_seconds", 5)
     normalized.setdefault("debounce_seconds", 20)
     normalized.setdefault("min_interval_seconds", 120)
@@ -382,7 +359,6 @@ def write_config(path: Path, config: dict[str, Any]) -> dict[str, Any]:
     active_profile = next(profile for profile in normalized["profiles"] if profile["id"] == normalized["active_profile_id"])
     persisted = {
         "active_profile_id": normalized["active_profile_id"],
-        "command_timeout_seconds": normalized["command_timeout_seconds"],
         "debounce_seconds": normalized["debounce_seconds"],
         "fallback_interval_seconds": normalized["fallback_interval_seconds"],
         "filter_file": normalized["filter_file"],
@@ -396,7 +372,6 @@ def write_config(path: Path, config: dict[str, Any]) -> dict[str, Any]:
         "preserve_metadata": normalized["preserve_metadata"],
         "profiles": normalized["profiles"],
         "rate_limit_backoff_seconds": normalized["rate_limit_backoff_seconds"],
-        "rclone_max_duration_seconds": normalized["rclone_max_duration_seconds"],
         "remote_base": active_profile["remote_base"],
         "status_path": normalized["status_path"],
         "socket_path": normalized["socket_path"],
@@ -539,7 +514,6 @@ def backup_cmd(config: dict[str, Any], dry_run: bool) -> list[str]:
         "--backup-dir", trash,
         "--create-empty-src-dirs",
         "--stats", "10s",
-        "--max-duration", f"{int(config.get('rclone_max_duration_seconds', 120))}s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
         "--log-level", "INFO",
@@ -556,7 +530,6 @@ def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool) -> list[
         rclone_bin(config), "copy", src, dst,
         "--filter-from", str(filter_file(config)),
         "--stats", "10s",
-        "--max-duration", f"{int(config.get('rclone_max_duration_seconds', 120))}s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
         "--log-level", "INFO",
@@ -609,8 +582,6 @@ def default_config(machine: str) -> dict[str, Any]:
         "status_path": str(DEFAULT_STATUS),
         "log_dir": str(DEFAULT_LOG_DIR),
         "lock_file": str(Path.home() / ".local" / "state" / "safe-sync" / "safe-sync.lock"),
-        "command_timeout_seconds": 180,
-        "rclone_max_duration_seconds": 120,
         "poll_interval_seconds": 5,
         "debounce_seconds": 20,
         "min_interval_seconds": 120,
@@ -1541,7 +1512,7 @@ def rclone_capture(config: dict[str, Any], cmd: list[str], input_text: str | Non
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        timeout=int(config.get("command_timeout_seconds", 180)),
+        timeout=180,
     )
 
 
