@@ -546,6 +546,10 @@ function renderTransferOptions(): void {
   };
 
   destinationSelect.innerHTML = "";
+  const customDestination = document.createElement("option");
+  customDestination.value = "";
+  customDestination.textContent = "Choose any local folder";
+  destinationSelect.append(customDestination);
   for (const raw of latestConfig?.folders ?? []) {
     const folder = raw as FolderView;
     if (folder.enabled === false || !folder.id || !folder.local_path) continue;
@@ -559,7 +563,11 @@ function renderTransferOptions(): void {
   if (!destinationPath.value && selectedFolder?.local_path) destinationPath.value = selectedFolder.local_path;
   destinationSelect.onchange = () => {
     const folder = selectedDestinationFolder();
-    if (folder?.local_path) destinationPath.value = folder.local_path;
+    if (folder?.local_path) {
+      destinationPath.value = folder.local_path;
+    } else {
+      destinationPath.value = "";
+    }
     updateTransferCommand();
   };
   updateTransferCommand();
@@ -853,6 +861,8 @@ async function pickTransferDestination(): Promise<void> {
     if (typeof selection === "string" && selection.length > 0) {
       const input = formField(transferForm, "destination_path") as HTMLInputElement | null;
       if (input) input.value = selection;
+      const watchedFolder = formField(transferForm, "destination_folder") as HTMLSelectElement | null;
+      if (watchedFolder) watchedFolder.value = "";
       updateTransferCommand();
       setMessage("Transfer destination selected", "ok");
     }
@@ -1004,7 +1014,7 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   const dryRun = (transferForm.elements.namedItem("dry_run") as HTMLInputElement | null)?.checked ?? true;
   const destination = transferDestination();
   if (!transferSource || !destination) {
-    transferOutput.textContent = "Choose a remote source and an enabled destination folder.";
+    transferOutput.textContent = "Choose a remote source and any local destination folder.";
     setMessage("Choose source and destination", "error");
     return;
   }

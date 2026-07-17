@@ -169,11 +169,11 @@
           </div>
           <p class="reason section-copy">Copies a chosen remote file or folder to any local destination. The source is never changed.</p>
           <form class="transfer-form" data-transfer-form>
-            <label>Source computer <select name="source_computer"></select></label>
-            <label>Source folder <select name="source_folder"></select></label>
-            <label>Use watched folder <select name="destination_folder"></select></label>
-            <label class="transfer-destination">Destination path
-              <span class="path-picker"><input name="destination_path" placeholder="Choose any local folder" /><button type="button" class="secondary" data-action="pick-transfer-destination">Choose…</button></span>
+            <label>Remote computer <select name="source_computer"></select></label>
+            <label>Remote folder to copy <select name="source_folder"></select></label>
+            <label>Watched-folder shortcut (optional) <select name="destination_folder"></select></label>
+            <label class="transfer-destination">Local destination folder
+              <span class="path-picker"><input name="destination_path" placeholder="Choose any local folder" /><button type="button" class="secondary" data-action="pick-transfer-destination">Choose Folder</button></span>
             </label>
             <label>Destination subfolder <input name="destination_subfolder" placeholder="received-from-laptop" /></label>
             <div class="check-row">
