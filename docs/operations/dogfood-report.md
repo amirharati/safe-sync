@@ -69,3 +69,34 @@ A real daemon-watch test was run from a temporary folder under the Codex workspa
 
 - Dropbox returned one 300-second rate-limit retry during remote listing; waiting succeeded.
 - The direct temp daemon uses the same process path as the OS service, so `safe-sync status` still reports the installed service state globally. For the real installed config, this is correct; for temporary configs, service state can be unrelated to the direct daemon process.
+
+
+# Deep Two-Profile Daemon Dogfood - 2026-07-17
+
+## Scope
+
+- Isolated local roots: `/tmp/safe-sync-deep-dogfood-20260717-alpha` and `/tmp/safe-sync-deep-dogfood-20260717-beta`.
+- Isolated config, socket, lock, status, and logs: `/tmp/safe-sync-deep-dogfood-20260717-state`.
+- Disposable Dropbox prefix: `dropbox:computer-backups/test/deep-dogfood-20260717`.
+- No real Safe Sync configuration or normal backup folder was changed.
+
+## Verified
+
+- Alpha profile watched two folders and completed its startup reconcile with fresh live API status.
+- Registry self-healing published separate Alpha and Beta computer records under `.registry/computers/`.
+- Filter behavior excluded `node_modules/`, `.venv/`, and `dist/`, while source files, experiment data, and a model file were uploaded.
+- A mixed watcher burst succeeded: file replacement, new file, new model output, deletion, rename, and empty-directory creation all reached the live remote.
+- Replaced and deleted paths were moved into timestamped remote trash before removal. This included the prior `src/app.py`, the deleted `models/model.pt`, and the pre-rename CSV.
+- Changing the active temporary profile made the Alpha daemon exit for reload; Beta then started against its own isolated inbox and remote tree.
+- A deliberate selective transfer copied Alpha's `src/app.py` into Beta's local inbox. Beta detected that local file and backed it up only under Beta's remote folder.
+- A six-file rapid burst plus two immediate API backup requests remained healthy and uploaded all files. After the coalescing fix, the second request did not trigger an unnecessary empty rclone pass.
+
+## Hardening Found During This Run
+
+- Temporary `--config` profile/folder/config mutations no longer restart the globally installed macOS LaunchAgent. Only the real default config may reload launchd.
+- Manual backup requests received during a successful full sync are absorbed by that sync. Requests remain queued on error or rate limit.
+
+## Verification
+
+- Backend regression suite: `31 passed`.
+- Final daemon API health: `ok`, `watching`, and `last_error: null`.

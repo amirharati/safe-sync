@@ -12,6 +12,7 @@ from safe_sync.cli import (
     registry_doc,
     registry_path,
     RATE_LIMIT_EXIT,
+    restart_backend_if_running,
     restore_last_sync_finish,
     run_backup_with_config,
     selected_folders,
@@ -164,6 +165,17 @@ def test_watch_filter_ignores_generated_paths():
     assert should_ignore_watch_event("/tmp/project/dist/app.js")
     assert not should_ignore_watch_event("/tmp/project/data/results.csv")
     assert not should_ignore_watch_event("/tmp/project/models/model.pt")
+
+
+def test_temporary_config_change_does_not_restart_installed_backend(monkeypatch, tmp_path):
+    monkeypatch.setattr("safe_sync.cli.os_name", lambda: "Darwin")
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("temporary config must not touch launchctl")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    restart_backend_if_running(tmp_path / "dogfood-config.json")
 
 
 

@@ -652,7 +652,10 @@ def config_view(config: dict[str, Any], config_path: Path | None = None) -> dict
     }
 
 
-def restart_backend_if_running() -> None:
+def restart_backend_if_running(config_path: Path | None = None) -> None:
+    """Reload launchd only when the installed configuration changed."""
+    if config_path is not None and config_path.expanduser().resolve() != DEFAULT_CONFIG.expanduser().resolve():
+        return
     if os_name() != "Darwin":
         return
     plist = Path.home() / "Library" / "LaunchAgents" / "com.safe-sync.daemon.plist"
@@ -1336,6 +1339,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                 rate_limited = code == RATE_LIMIT_EXIT
                 daemon.note_sync_finished(after, rate_limited=rate_limited)
                 if code == 0:
+                    # A full successful run covers manual requests received while rclone was busy.
+                    # Local changes made during that run are still detected by the fresh snapshot.
+                    api_state.consume_backup_request()
                     previous_snapshots = folder_snapshots(config)
                     publish_runtime_status(api_state, config, state="watching", last_success=now_iso(), last_finish=now_iso(), last_error=None, last_warning=None, queued_backup=False)
                 elif rate_limited:
@@ -1392,7 +1398,7 @@ def cmd_folders(args: argparse.Namespace) -> int:
                 break
         updated = write_config(config_path, config)
         update_registry(updated)
-        restart_backend_if_running()
+        restart_backend_if_running(config_path)
         print(folder_id)
         return 0
     if args.folder_cmd == "update":
@@ -1416,7 +1422,7 @@ def cmd_folders(args: argparse.Namespace) -> int:
                 break
         updated = write_config(config_path, config)
         update_registry(updated)
-        restart_backend_if_running()
+        restart_backend_if_running(config_path)
         print(folder_id)
         return 0
     if args.folder_cmd == "remove":
@@ -1431,7 +1437,7 @@ def cmd_folders(args: argparse.Namespace) -> int:
                 break
         updated = write_config(config_path, config)
         update_registry(updated)
-        restart_backend_if_running()
+        restart_backend_if_running(config_path)
         print(folder_id)
         return 0
     raise SystemExit(f"Unknown folders command: {args.folder_cmd}")
@@ -1474,7 +1480,7 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         config["active_profile_id"] = profile_id
         updated = write_config(config_path, config)
         update_registry(updated)
-        restart_backend_if_running()
+        restart_backend_if_running(config_path)
         print(profile_id)
         return 0
     raise SystemExit(f"Unknown profiles command: {args.profile_cmd}")
@@ -1510,7 +1516,7 @@ def cmd_config(args: argparse.Namespace) -> int:
                 break
         updated = write_config(config_path, config)
         update_registry(updated)
-        restart_backend_if_running()
+        restart_backend_if_running(config_path)
         print(json.dumps(config_view(updated, config_path), indent=2, sort_keys=True))
         return 0
     raise SystemExit(f"Unknown config command: {args.config_cmd}")

@@ -1,5 +1,18 @@
 # Codex Sessions
 
+## 2026-07-17 - Deep daemon dogfood and profile isolation
+- Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`
+- Parent Session ID: none
+- Task title: `Troubleshoot bisync retry loop`
+- Surface: Codex Desktop
+- Project path: `/Users/amir/projects/safe-sync`
+- Original cwd: `/Users/amir/Documents/Codex/2026-07-12/g-bisync-2026-07-12-18`
+- Resume: `codex resume 019f5868-30d4-7802-99fb-f649205f4a67`
+- Summary: Ran an isolated real-Dropbox dogfood test with Alpha and Beta simulated computers, separate daemon runtime paths, multi-folder backup, registry publication, ignore policy, replacement/delete/rename/empty-directory handling with remote trash, selective Alpha-to-Beta pull, and rapid API backup requests. Found and fixed two daemon hardening issues: temporary `--config` mutations could restart the real macOS LaunchAgent, and manual backup requests arriving while sync was in flight could cause an unnecessary second no-op run.
+- Commits/PRs: `Harden daemon profile isolation` checkpoint
+- Status: Deep daemon dogfood passed; backend suite is 31 passed. Temporary test data remains under `/tmp` and a disposable Dropbox test prefix for inspection.
+- Next steps: Commit this daemon checkpoint, then return to UI finishing work and later perform a production-install soak on macOS before Linux packaging.
+
 ## 2026-07-14 - Safe Sync tray UI hardening
 - Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`
 - Parent Session ID: none
