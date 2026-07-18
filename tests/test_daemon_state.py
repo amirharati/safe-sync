@@ -119,7 +119,7 @@ def test_setup_requires_explicit_opt_in_for_projects_root(monkeypatch, tmp_path)
     config = normalized_config(default_config("test-machine"))
     monkeypatch.setattr("safe_sync.cli.unsafe_local_path_reason", lambda _path: "refusing unsafe local_path")
 
-    with pytest.raises(SystemExit, match="allow_unsafe_local_path"):
+    with pytest.raises(SystemExit, match="safe-sync setup --folder"):
         add_setup_folder(config, str(projects))
 
     assert add_setup_folder(config, str(projects), allow_unsafe_local_path=True) == "projects"

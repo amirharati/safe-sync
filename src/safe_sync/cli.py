@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -260,7 +261,8 @@ def validate_local_path(config: dict[str, Any]) -> None:
         path = resolved_path(str(folder["local_path"]))
         reason = unsafe_local_path_reason(path)
         if reason and not normalized.get("allow_unsafe_local_path") and not folder.get("allow_unsafe_local_path"):
-            raise SystemExit(f"{reason}\nSet allow_unsafe_local_path=true only if you are certain.")
+            command = f"safe-sync setup --folder {shlex.quote(str(path))} --allow-unsafe-local-path"
+            raise SystemExit(f"{reason}\nIf this broad folder is intentional, rerun:\n  {command}")
 
 
 def safe_id(value: str) -> str:
