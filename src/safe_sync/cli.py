@@ -950,6 +950,14 @@ def cmd_list(args: argparse.Namespace) -> int:
     return run_command(config, [rclone_bin(config), "lsf", args.target, "--max-depth", str(args.depth)])
 
 
+def cmd_rclone(args: argparse.Namespace) -> int:
+    """Run the Safe Sync-managed rclone without exposing its runtime path."""
+    config = load_config(Path(args.config).expanduser())
+    if not args.rclone_args:
+        raise SystemExit("Usage: safe-sync rclone <rclone command>")
+    return subprocess.run([rclone_bin(config), *args.rclone_args], check=False).returncode
+
+
 def parse_status_time(value: Any) -> dt.datetime | None:
     if not isinstance(value, str):
         return None
@@ -1821,7 +1829,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{setup,backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,doctor}",
+        metavar="{setup,backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,rclone,doctor}",
     )
 
     init = sub.add_parser("init-config")
@@ -1883,6 +1891,10 @@ def parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("target")
     list_cmd.add_argument("--depth", type=int, default=1)
     list_cmd.set_defaults(func=cmd_list)
+
+    rclone = sub.add_parser("rclone", help="Run the rclone binary managed by Safe Sync")
+    rclone.add_argument("rclone_args", nargs=argparse.REMAINDER)
+    rclone.set_defaults(func=cmd_rclone)
 
     config_cmd = sub.add_parser("config")
     config_sub = config_cmd.add_subparsers(dest="config_cmd", required=True)

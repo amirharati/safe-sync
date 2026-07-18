@@ -51,7 +51,6 @@ folders, remote backups, or trash.
 
 ```bash
 safe-sync setup
-safe-sync setup --headless
 ```
 
 Setup is separate from installation and may be resumed safely. It must:
@@ -67,6 +66,11 @@ Setup is separate from installation and may be resumed safely. It must:
 
 Desktop setup may offer to open the installed control panel after CLI setup is
 complete. The CLI remains the complete and supported setup path.
+
+Current implementation: setup accepts an existing rclone remote and invokes
+the Safe Sync-managed rclone through `safe-sync rclone config`. A dedicated
+Safe Sync-owned rclone config and full guided UI onboarding are planned follow
+up work.
 
 ### Update
 

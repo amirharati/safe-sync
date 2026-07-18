@@ -63,11 +63,12 @@ Safe Sync installs and pins its own runtime copy of `rclone`; do **not** install
 rclone separately. Source installation does require the following tools before
 you run the installer:
 
-| Mode | Required tools |
+| Mode | Supported now | Required tools |
 | --- | --- |
-| macOS desktop | Python 3, Node/npm, Rust/cargo, Xcode Command Line Tools, `curl`, `unzip` |
-| macOS/Linux headless | Python 3, `curl`, `unzip`, and `shasum` or `sha256sum` |
-| Linux desktop | Not yet packaged; use `--headless` for the supported source-install path |
+| macOS desktop | Yes | Python 3, Node/npm, Rust/cargo, Xcode Command Line Tools, `curl`, `unzip` |
+| macOS headless | Yes | Python 3, `curl`, `unzip`, and `shasum` or `sha256sum` |
+| Linux headless | Yes | Python 3, `curl`, `unzip`, and `sha256sum` |
+| Linux desktop | Later | The UI works in development, but production desktop installation is not packaged yet |
 
 On a typical macOS development machine:
 
@@ -88,6 +89,108 @@ The installer deliberately does not invoke Homebrew, apt, or another package
 manager on your behalf. It fails before staging an installation when a required
 tool is missing, and tells you which tool to install. This keeps operating
 system dependency ownership visible and under your control.
+
+### macOS Desktop: Clean-Machine Steps
+
+1. Install Xcode Command Line Tools and the source-build prerequisites:
+
+   ```bash
+   xcode-select --install
+   brew install git python node rust
+   ```
+
+   Install Homebrew from [brew.sh](https://brew.sh/) first if `brew` is not
+   available.
+
+2. Clone the project and install the production desktop app:
+
+   ```bash
+   git clone <repository-url>
+   cd safe-sync
+   ./install.sh
+   ```
+
+   This installs the `safe-sync` command in `~/.local/bin`, the managed daemon,
+   and `~/Applications/Safe Sync.app`. If your shell cannot find `safe-sync`,
+   add `~/.local/bin` to your zsh startup file and open a new terminal:
+
+   ```bash
+   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+   ```
+
+3. Authorize Dropbox once. In the interactive rclone menu, create a remote
+   named `dropbox`, choose Dropbox as its storage type, and complete its browser
+   sign-in flow:
+
+   ```bash
+   safe-sync rclone config
+   ```
+
+4. Choose only the local folders this computer should back up, then verify and
+   start the daemon:
+
+   ```bash
+   safe-sync setup --remote dropbox:computer-backups --folder ~/projects --folder ~/data
+   safe-sync status
+   ```
+
+   Do not point a watched folder at your entire Dropbox folder. Each selected
+   local folder receives its own backup path under `dropbox:computer-backups`.
+
+### Linux Server: Clean-Machine Steps
+
+1. Install the headless prerequisites on Ubuntu/Debian:
+
+   ```bash
+   sudo apt update
+   sudo apt install -y git python3 curl unzip
+   ```
+
+   `sha256sum` is supplied by the standard core utilities package. For another
+   Linux distribution, install the equivalent packages through its package
+   manager.
+
+2. Clone and install the backend-only service:
+
+   ```bash
+   git clone <repository-url>
+   cd safe-sync
+   ./install.sh --headless
+   ```
+
+3. Ensure your shell can find the installed command:
+
+   ```bash
+   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+4. Configure Dropbox and the folders to back up:
+
+   ```bash
+   safe-sync rclone config
+   safe-sync setup --remote dropbox:computer-backups --folder ~/projects --folder ~/data
+   safe-sync status
+   ```
+
+   For a server without a browser, run `safe-sync rclone authorize dropbox` on
+   a trusted machine with a browser, then follow rclone's token handoff during
+   the server's `safe-sync rclone config` flow.
+
+5. A Linux user service normally runs while you are logged in. For an
+   always-on server, ask an administrator or run:
+
+   ```bash
+   sudo loginctl enable-linger "$USER"
+   ```
+
+### UI and CLI Setup
+
+The **first** setup is currently CLI-led because Dropbox authorization is an
+rclone interaction. After `safe-sync setup` succeeds, the macOS tray/control
+panel can manage settings, profiles, watched folders, backup requests, and
+selective transfers. A guided UI onboarding flow is planned; it is not yet a
+replacement for the CLI commands above.
 
 From a downloaded/cloned repo:
 
@@ -124,10 +227,9 @@ To add an explicit local folder and choose the remote base during setup:
 safe-sync setup --remote dropbox:computer-backups --folder ~/work
 ```
 
-If the named rclone Dropbox remote does not already exist, the command tells
-you to run its managed rclone binary's `config` flow and then rerun setup. On a
-headless server, run `rclone authorize dropbox` on a browser-equipped machine
-and paste the token into rclone's config prompt on the server.
+If the named Dropbox remote does not already exist, run `safe-sync rclone
+config` and then rerun setup. `safe-sync rclone` always invokes the exact
+rclone binary that Safe Sync installed and pinned.
 
 The installer does the following:
 
