@@ -130,25 +130,22 @@ install_command() {
 
 ensure_command_on_path() {
   COMMAND_DIR="$1"
-  case ":$PATH:" in
-    *":$COMMAND_DIR:"*)
-      return 0
-      ;;
-  esac
-  case "${SHELL:-}" in
-    */zsh) PROFILE="$HOME/.zshrc" ;;
-    */bash) PROFILE="$HOME/.bashrc" ;;
+  case "$(uname -s):${SHELL:-}" in
+    Darwin:*) PROFILE="$HOME/.zshrc" ;;
+    Linux:*) PROFILE="$HOME/.bashrc" ;;
     *) PROFILE="$HOME/.profile" ;;
   esac
-  MARKER="# Added by Safe Sync"
-  if ! grep -Fqx "$MARKER" "$PROFILE" 2>/dev/null; then
+  PATH_EXPORT="export PATH=\"$COMMAND_DIR:\$PATH\""
+  if ! grep -Fqx "$PATH_EXPORT" "$PROFILE" 2>/dev/null; then
     {
-      printf '\n%s\n' "$MARKER"
-      printf 'export PATH="%s:$PATH"\n' "$COMMAND_DIR"
+      printf '\n# Added by Safe Sync\n%s\n' "$PATH_EXPORT"
     } >> "$PROFILE"
   fi
   PATH_PROFILE="$PROFILE"
-  return 1
+  case ":$PATH:" in
+    *":$COMMAND_DIR:"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 
