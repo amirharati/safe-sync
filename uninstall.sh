@@ -13,6 +13,9 @@ TRAY_LABEL="com.safe-sync.tray"
 DAEMON_PLIST="$HOME/Library/LaunchAgents/$DAEMON_LABEL.plist"
 TRAY_PLIST="$HOME/Library/LaunchAgents/$TRAY_LABEL.plist"
 APP_TARGET="${SAFE_SYNC_APP_DIR:-$HOME/Applications}/Safe Sync.app"
+LINUX_DESKTOP_FILE="$HOME/.local/share/applications/safe-sync.desktop"
+LINUX_AUTOSTART_FILE="$HOME/.config/autostart/safe-sync.desktop"
+LINUX_ICON_FILE="$HOME/.local/share/icons/hicolor/128x128/apps/safe-sync.png"
 
 usage() {
   cat <<'EOF'
@@ -53,6 +56,7 @@ case "$(uname -s)" in
   Linux)
     systemctl --user disable --now safe-sync-daemon.service 2>/dev/null || true
     rm -f "$HOME/.config/systemd/user/safe-sync-daemon.service"
+    rm -f "$LINUX_DESKTOP_FILE" "$LINUX_AUTOSTART_FILE" "$LINUX_ICON_FILE"
     systemctl --user daemon-reload 2>/dev/null || true
     ;;
   *)

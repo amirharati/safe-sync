@@ -146,9 +146,10 @@ The final paths must be stable and user-scoped:
 ~/.local/bin/safe-sync        user-facing CLI wrapper
 ```
 
-macOS desktop installation additionally installs the app under `~/Applications`
-by default. Linux desktop packaging is a later source-install target, followed
-by a release package.
+macOS desktop installation installs the app under `~/Applications` by default.
+Linux source desktop installation installs the executable under
+`~/.local/share/safe-sync/ui/` with Applications-menu and desktop-autostart
+entries. Release packages for both platforms are later work.
 
 ## Safety Rules
 

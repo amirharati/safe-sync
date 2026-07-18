@@ -68,7 +68,7 @@ you run the installer:
 | macOS desktop | Yes | Python 3, Node/npm, Rust/cargo, Xcode Command Line Tools, `curl`, `unzip` |
 | macOS headless | Yes | Python 3, `curl`, `unzip`, and `shasum` or `sha256sum` |
 | Linux headless | Yes | Python 3, `curl`, `unzip`, and `sha256sum` |
-| Linux desktop | Later | The UI works in development, but production desktop installation is not packaged yet |
+| Linux desktop | Yes, source install | Python 3, Node/npm, Rust/cargo, GTK/WebKit/AppIndicator build libraries, `curl`, `unzip` |
 
 On a typical macOS development machine:
 
@@ -137,33 +137,35 @@ system dependency ownership visible and under your control.
    Do not point a watched folder at your entire Dropbox folder. Each selected
    local folder receives its own backup path under `dropbox:computer-backups`.
 
-### Linux Server: Clean-Machine Steps
+### Ubuntu/Debian Desktop: Clean-Machine Steps
 
-1. Install the headless prerequisites on Ubuntu/Debian:
+1. Install the desktop source-build prerequisites:
 
    ```bash
    sudo apt update
-   sudo apt install -y git python3 curl unzip
+   sudo apt install -y git python3 curl unzip build-essential pkg-config libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev
    ```
 
-   `sha256sum` is supplied by the standard core utilities package. For another
-   Linux distribution, install the equivalent packages through its package
-   manager.
+   Install Node/npm and Rust/cargo through your normal toolchain workflow. The
+   Ubuntu VM development setup uses `nvm` for Node and `rustup` for Rust.
 
-2. Clone and install the backend-only service:
+2. Clone and install Safe Sync, including its user-scope tray application:
 
    ```bash
    git clone <repository-url>
    cd safe-sync
-   ./install.sh --headless
+   ./install.sh
    ```
+
+   This adds **Safe Sync** to the desktop Applications menu, installs a desktop
+   autostart entry, and launches the tray app. The app itself is stored under
+   `~/.local/share/safe-sync/ui/`; it is not copied to a macOS-style
+   `~/Applications` directory.
 
 3. Ensure your shell can find the installed command:
 
-   ```bash
-   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
+   The installer adds `~/.local/bin` to your Bash or Zsh startup file when it
+   is missing. Open a new terminal after installation; no manual edit is needed.
 
 4. Configure Dropbox and the folders to back up:
 
@@ -183,6 +185,22 @@ system dependency ownership visible and under your control.
    ```bash
    sudo loginctl enable-linger "$USER"
    ```
+
+### Linux Server: Headless Steps
+
+For a server without a desktop session, install only the backend prerequisites:
+
+```bash
+sudo apt update
+sudo apt install -y git python3 curl unzip
+git clone <repository-url>
+cd safe-sync
+./install.sh --headless
+```
+
+Then use the Dropbox and `safe-sync setup` commands from the desktop section
+above. Headless installation does not need Node, Rust, GTK, WebKit, or the tray
+app.
 
 ### UI and CLI Setup
 
@@ -404,8 +422,8 @@ The macOS installer writes:
 ~/Applications/Safe Sync.app                          (macOS desktop)
 ```
 
-Linux desktop packaging and Windows support remain backlog items. Linux
-headless/CLI and systemd user service installation are supported now.
+Windows support remains backlog. Linux source installation now supports the
+tray application, CLI, and systemd user service; release packages are later.
 
 ## Test Folder Reminder
 

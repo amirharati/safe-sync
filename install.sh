@@ -14,6 +14,13 @@ TRAY_PLIST="$HOME/Library/LaunchAgents/$TRAY_LABEL.plist"
 APP_NAME="Safe Sync.app"
 APP_INSTALL_DIR="${SAFE_SYNC_APP_DIR:-$HOME/Applications}"
 APP_TARGET="$APP_INSTALL_DIR/$APP_NAME"
+LINUX_UI_DIR="${SAFE_SYNC_LINUX_UI_DIR:-$HOME/.local/share/safe-sync/ui}"
+LINUX_APP_TARGET="$LINUX_UI_DIR/safe-sync-ui"
+LINUX_DESKTOP_DIR="$HOME/.local/share/applications"
+LINUX_AUTOSTART_DIR="$HOME/.config/autostart"
+LINUX_ICON_DIR="$HOME/.local/share/icons/hicolor/128x128/apps"
+LINUX_DESKTOP_FILE="$LINUX_DESKTOP_DIR/safe-sync.desktop"
+LINUX_AUTOSTART_FILE="$LINUX_AUTOSTART_DIR/safe-sync.desktop"
 
 INSTALL_UI=1
 UPDATE=0
@@ -119,6 +126,29 @@ install_command() {
     chmod 755 "$TARGET"
   fi
   printf '%s\n' "$TARGET"
+}
+
+ensure_command_on_path() {
+  COMMAND_DIR="$1"
+  case ":$PATH:" in
+    *":$COMMAND_DIR:"*)
+      return 0
+      ;;
+  esac
+  case "${SHELL:-}" in
+    */zsh) PROFILE="$HOME/.zshrc" ;;
+    */bash) PROFILE="$HOME/.bashrc" ;;
+    *) PROFILE="$HOME/.profile" ;;
+  esac
+  MARKER="# Added by Safe Sync"
+  if ! grep -Fqx "$MARKER" "$PROFILE" 2>/dev/null; then
+    {
+      printf '\n%s\n' "$MARKER"
+      printf 'export PATH="%s:$PATH"\n' "$COMMAND_DIR"
+    } >> "$PROFILE"
+  fi
+  PATH_PROFILE="$PROFILE"
+  return 1
 }
 
 
@@ -262,7 +292,7 @@ build_tray_app() {
 
 stop_tray_app() {
   case "$(uname -s)" in
-    Darwin)
+    Darwin|Linux)
       # The LaunchAgent owns /usr/bin/open, not the app process itself. Stop the
       # previous bundle before replacing it so an update cannot leave it alive.
       pkill -x safe-sync-ui 2>/dev/null || true
@@ -304,26 +334,68 @@ EOF
 install_tray_app() {
   case "$(uname -s)" in
     Darwin)
+      build_tray_app
+      APP_SOURCE="$ROOT_DIR/ui/src-tauri/target/release/bundle/macos/$APP_NAME"
+      if [ ! -d "$APP_SOURCE" ]; then
+        echo "Expected built app not found: $APP_SOURCE" >&2
+        exit 1
+      fi
+
+      stop_tray_app
+      mkdir -p "$APP_INSTALL_DIR"
+      rm -rf "$APP_TARGET"
+      cp -R "$APP_SOURCE" "$APP_TARGET"
+      install_tray_launch_agent
+      /usr/bin/open "$APP_TARGET" 2>/dev/null || true
+      TRAY_MESSAGE="Tray app: $APP_TARGET"
+      TRAY_AUTOSTART_MESSAGE="Tray autostart: $TRAY_PLIST"
+      ;;
+    Linux)
+      build_tray_app
+      APP_SOURCE="$ROOT_DIR/ui/src-tauri/target/release/safe-sync-ui"
+      if [ ! -x "$APP_SOURCE" ]; then
+        echo "Expected built Linux tray executable not found: $APP_SOURCE" >&2
+        exit 1
+      fi
+
+      stop_tray_app
+      mkdir -p "$LINUX_UI_DIR" "$LINUX_DESKTOP_DIR" "$LINUX_AUTOSTART_DIR" "$LINUX_ICON_DIR"
+      cp "$APP_SOURCE" "$LINUX_APP_TARGET"
+      chmod 755 "$LINUX_APP_TARGET"
+      cp "$ROOT_DIR/ui/src-tauri/icons/128x128.png" "$LINUX_ICON_DIR/safe-sync.png"
+      cat > "$LINUX_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Safe Sync
+Comment=Safe Sync tray and control panel
+Exec=/usr/bin/env SAFE_SYNC_BIN=$TARGET $LINUX_APP_TARGET
+TryExec=$LINUX_APP_TARGET
+Icon=safe-sync
+Terminal=false
+Categories=Utility;
+EOF
+      cat > "$LINUX_AUTOSTART_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Safe Sync
+Exec=/usr/bin/env SAFE_SYNC_BIN=$TARGET $LINUX_APP_TARGET
+TryExec=$LINUX_APP_TARGET
+Icon=safe-sync
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+      if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$LINUX_DESKTOP_DIR" 2>/dev/null || true
+      fi
+      SAFE_SYNC_BIN="$TARGET" "$LINUX_APP_TARGET" >/dev/null 2>&1 &
+      TRAY_MESSAGE="Tray app: $LINUX_APP_TARGET"
+      TRAY_AUTOSTART_MESSAGE="Tray launcher: $LINUX_DESKTOP_FILE; autostart: $LINUX_AUTOSTART_FILE"
       ;;
     *)
-      echo "Tray app install is TODO for $(uname -s); macOS is supported first." >&2
+      echo "Tray app install is not supported for $(uname -s). Use --headless." >&2
       return 0
       ;;
   esac
-
-  build_tray_app
-  APP_SOURCE="$ROOT_DIR/ui/src-tauri/target/release/bundle/macos/$APP_NAME"
-  if [ ! -d "$APP_SOURCE" ]; then
-    echo "Expected built app not found: $APP_SOURCE" >&2
-    exit 1
-  fi
-
-  stop_tray_app
-  mkdir -p "$APP_INSTALL_DIR"
-  rm -rf "$APP_TARGET"
-  cp -R "$APP_SOURCE" "$APP_TARGET"
-  install_tray_launch_agent
-  /usr/bin/open "$APP_TARGET" 2>/dev/null || true
 }
 
 require_python
@@ -342,6 +414,11 @@ RCLONE=$(install_managed_rclone)
 configure_rclone "$RCLONE"
 activate_staged_runtime
 TARGET=$(install_command)
+if ensure_command_on_path "$(dirname "$TARGET")"; then
+  PATH_MESSAGE="Command directory is already in PATH."
+else
+  PATH_MESSAGE="Command directory was added to $PATH_PROFILE for new shell sessions. Open a new terminal to use safe-sync by name."
+fi
 install_service_files "$TARGET"
 if has_enabled_folders; then
   "$TARGET" restart >/dev/null
@@ -363,17 +440,10 @@ fi
 echo "Command: $TARGET"
 echo "Config: $CONFIG"
 echo "Runtime: $RUNTIME_CURRENT"
-case ":$PATH:" in
-  *":$(dirname "$TARGET"):"*)
-    ;;
-  *)
-    echo "Warning: $(dirname "$TARGET") is not in PATH for this shell."
-    echo "Add it to PATH or run: $TARGET"
-    ;;
-esac
+echo "$PATH_MESSAGE"
 echo "$BACKEND_MESSAGE"
 if [ "$INSTALL_UI" = "1" ]; then
-  echo "Tray app: $APP_TARGET"
-  echo "Tray autostart: $TRAY_PLIST"
+  echo "$TRAY_MESSAGE"
+  echo "$TRAY_AUTOSTART_MESSAGE"
 fi
 echo "Next step: safe-sync setup"
