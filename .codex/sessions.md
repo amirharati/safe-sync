@@ -1,5 +1,18 @@
 # Codex Sessions
 
+## 2026-07-17 - Source installation and setup foundation
+- Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`
+- Parent Session ID: none
+- Task title: `Troubleshoot bisync retry loop`
+- Surface: Codex Desktop
+- Project path: `/Users/amir/projects/safe-sync`
+- Original cwd: `/Users/amir/Documents/Codex/2026-07-12/g-bisync-2026-07-12-18`
+- Resume: `codex resume 019f5868-30d4-7802-99fb-f649205f4a67`
+- Summary: Documented the install/setup product contract and implemented its first source-install milestone. `install.sh` now stages a user runtime before activation, downloads a checksum-verified rclone v1.74.4 managed runtime, supports `--headless` and `--update`, installs the user daemon, and waits for a real watched folder before first start. Added normal/purge-safe `uninstall.sh`, a resumable CLI `safe-sync setup` flow for config/remote/folder validation and remote preflight, and aligned the README/roadmap.
+- Commits/PRs: pending commit
+- Status: Isolated macOS headless install, update, wrapper/runtime check, normal uninstall/config preservation, setup smoke test, shell syntax checks, and 42 backend tests passed. Linux desktop packaging, managed rclone config ownership, and GUI setup onboarding remain follow-up work.
+- Next steps: Commit this milestone, test the source installer on Ubuntu, then implement the full Dropbox authorization/config ownership workflow and production desktop packaging.
+
 ## 2026-07-17 - Deep daemon dogfood and profile isolation
 - Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`
 - Parent Session ID: none

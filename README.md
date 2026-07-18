@@ -25,6 +25,7 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 - [Test Plan](docs/operations/test-plan.md)
 - [Dogfood Report](docs/operations/dogfood-report.md)
 - [Tauri Tray Workflow](docs/operations/tauri-tray-workflow.md)
+- [Installation and Setup Plan](docs/operations/installation-and-setup-plan.md)
 - [Decisions](docs/decisions/0001-safe-sync-model.md)
 
 ## First Test Folder
@@ -51,9 +52,10 @@ tests/                        Unit tests for daemon state behavior
 Run the CLI through `bin/safe-sync`; edit implementation code under `src/safe_sync/`.
 
 
-## macOS Quickstart
+## Install From Source
 
-Safe Sync is macOS-first right now. Linux and Windows service install are explicit TODOs.
+Safe Sync currently supports source installation on macOS and Linux. Windows
+is intentionally deferred.
 
 From a downloaded/cloned repo:
 
@@ -62,18 +64,65 @@ cd /path/to/safe-sync
 ./install.sh
 ```
 
-This does six things:
+For a server with no desktop UI:
+
+```bash
+./install.sh --headless
+```
+
+The installer stages a user-scoped runtime, installs a checksum-verified
+managed rclone binary, installs the `safe-sync` command in `~/.local/bin`, and
+installs one user daemon. Desktop installation also builds and installs the
+Tauri tray app on macOS. It preserves existing Safe Sync configuration on
+repeat install or update:
+
+```bash
+./install.sh --update
+```
+
+Complete or validate setup after installation:
+
+```bash
+safe-sync setup
+```
+
+To add an explicit local folder and choose the remote base during setup:
+
+```bash
+safe-sync setup --remote dropbox:computer-backups --folder ~/work
+```
+
+If the named rclone Dropbox remote does not already exist, the command tells
+you to run its managed rclone binary's `config` flow and then rerun setup. On a
+headless server, run `rclone authorize dropbox` on a browser-equipped machine
+and paste the token into rclone's config prompt on the server.
+
+The installer does the following:
 
 1. Creates `~/.safe-sync/config.json` if it does not exist.
-2. Installs the single `safe-sync` command into `/usr/local/bin` when writable, otherwise `~/.local/bin`.
-3. Renders the macOS backend LaunchAgent from `src/safe_sync/service.py`.
-4. Installs the backend LaunchAgent at `~/Library/LaunchAgents/com.safe-sync.daemon.plist`.
-5. Builds the production Tauri tray app from `ui/` and installs it to `~/Applications/Safe Sync.app` by default.
-6. Installs and starts the tray LaunchAgent at `~/Library/LaunchAgents/com.safe-sync.tray.plist`.
+2. Stages `bin/`, `src/`, and configuration templates under `~/.local/share/safe-sync`.
+3. Downloads and verifies the Safe Sync-managed rclone runtime.
+4. Renders and installs the backend launchd (macOS) or systemd user (Linux) service.
+5. Starts the daemon when an existing configuration already has watched folders;
+   a first install starts it after `safe-sync setup` has added a folder.
+6. On macOS desktop installs, builds the production Tauri tray app at `~/Applications/Safe Sync.app` and enables its LaunchAgent.
 
-Set `SAFE_SYNC_INSTALL_UI=0 ./install.sh` for a backend-only install. Set `SAFE_SYNC_APP_DIR=/Applications ./install.sh` to install the tray app somewhere else.
+Set `SAFE_SYNC_INSTALL_UI=0 ./install.sh` for a backend-only install. Set
+`SAFE_SYNC_APP_DIR=/Applications ./install.sh` to install the macOS tray app
+somewhere else.
 
-The installer starts the tray app. It does not start the backend daemon. Start the daemon explicitly:
+Normal uninstall stops services and removes the installed runtime while
+preserving config and Dropbox authorization:
+
+```bash
+./uninstall.sh
+```
+
+`./uninstall.sh --purge` asks for an explicit confirmation before removing
+local configuration. Neither uninstall mode changes remote Dropbox backups or
+remote trash.
+
+Start the daemon explicitly when needed:
 
 ```bash
 safe-sync start
@@ -212,12 +261,17 @@ Service templates are rendered from `src/safe_sync/service.py`; generated launch
 The macOS installer writes:
 
 ```text
-~/Library/LaunchAgents/com.safe-sync.daemon.plist
-~/Library/LaunchAgents/com.safe-sync.tray.plist
-~/Applications/Safe Sync.app
+~/.local/share/safe-sync/current/
+~/.local/bin/safe-sync
+~/.safe-sync/config.json
+~/Library/LaunchAgents/com.safe-sync.daemon.plist     (macOS)
+~/Library/LaunchAgents/com.safe-sync.tray.plist       (macOS desktop)
+~/.config/systemd/user/safe-sync-daemon.service      (Linux)
+~/Applications/Safe Sync.app                          (macOS desktop)
 ```
 
-Linux and Windows service/UI install/control remain TODO/backlog.
+Linux desktop packaging and Windows support remain backlog items. Linux
+headless/CLI and systemd user service installation are supported now.
 
 ## Test Folder Reminder
 

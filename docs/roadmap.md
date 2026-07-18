@@ -1,5 +1,13 @@
 # Roadmap
 
+## Current Delivery Roadmap
+
+Installation and setup are the next product milestone. The authoritative
+contract is in [installation-and-setup-plan.md](operations/installation-and-setup-plan.md):
+source install first, desktop and headless modes, managed rclone, explicit
+Dropbox setup, safe update/uninstall, then two-machine real-world testing
+before release packages or Windows support.
+
 ## Phase 0: Docs and Existing Setup
 
 - Capture workflow decisions.

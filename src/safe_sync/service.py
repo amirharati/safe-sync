@@ -232,7 +232,7 @@ case "$(uname -s)" in
     mkdir -p "$HOME/.local/log/safe-sync"
     cp "$GENERATED_DIR/{SYSTEMD_UNIT}" "$HOME/.config/systemd/user/{SYSTEMD_UNIT}"
     systemctl --user daemon-reload
-    systemctl --user enable --now {SYSTEMD_UNIT}
+    systemctl --user enable {SYSTEMD_UNIT}
     ;;
   *)
     echo "Unsupported OS: $(uname -s)" >&2

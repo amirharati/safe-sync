@@ -589,8 +589,7 @@ def ensure_filter_template(path: Path) -> None:
 
 def default_config(machine: str) -> dict[str, Any]:
     ensure_filter_template(DEFAULT_FILTER)
-    folder_id = "test_sync"
-    remote_base = "dropbox:computer-backups/test"
+    remote_base = "dropbox:computer-backups"
     return {
         "active_profile_id": safe_id(machine),
         "remote_base": remote_base,
@@ -604,17 +603,7 @@ def default_config(machine: str) -> dict[str, Any]:
                 "install_id": default_install_id(),
                 "remote_base": remote_base,
                 "filter_file": str(DEFAULT_FILTER),
-                "folders": [
-                    {
-                        "id": folder_id,
-                        "label": "Test Sync",
-                        "local_path": "~/test_sync",
-                        "remote_path": f"{machine}/{folder_id}",
-                        "trash_path": f".trash/{machine}/{folder_id}",
-                        "filter_file": str(DEFAULT_FILTER),
-                        "enabled": True,
-                    }
-                ],
+                "folders": [],
             }
         ],
         "filter_file": str(DEFAULT_FILTER),
@@ -706,6 +695,98 @@ def cmd_migrate_config(args: argparse.Namespace) -> int:
     config.setdefault("rate_limit_backoff_seconds", 300)
     write_config(dst, config)
     print(f"migrated {src} -> {dst}")
+    return 0
+
+
+def set_active_remote_base(config: dict[str, Any], remote_base: str) -> None:
+    if ":" not in remote_base or not remote_base.split(":", 1)[0].strip():
+        raise SystemExit("remote must look like remote-name:path, for example dropbox:computer-backups")
+    config["remote_base"] = remote_base.rstrip("/")
+    for folder in config["folders"]:
+        folder["remote_root"] = remote_join(config["remote_base"], str(folder["remote_path"]))
+        folder["trash_root"] = remote_join(config["remote_base"], str(folder["trash_path"]))
+    for profile in config["profiles"]:
+        if profile["id"] == config["active_profile_id"]:
+            profile["remote_base"] = config["remote_base"]
+            profile["folders"] = config["folders"]
+            break
+
+
+def add_setup_folder(config: dict[str, Any], local_path: str) -> str:
+    path = resolved_path(local_path)
+    if not path.is_dir():
+        raise SystemExit(f"Setup folder does not exist or is not a directory: {path}")
+    folder_id = safe_id(path.name)
+    existing = next((folder for folder in config["folders"] if folder["id"] == folder_id), None)
+    if existing:
+        if resolved_path(str(existing["local_path"])) != path:
+            raise SystemExit(f"Folder id '{folder_id}' already belongs to {existing['local_path']}")
+        return folder_id
+    folder = {
+        "id": folder_id,
+        "label": path.name,
+        "local_path": str(path),
+        "remote_path": f"{config['machine_id']}/{folder_id}",
+        "trash_path": f".trash/{config['machine_id']}/{folder_id}",
+        "filter_file": str(config.get("filter_file", DEFAULT_FILTER)),
+        "enabled": True,
+    }
+    folder["remote_root"] = remote_join(str(config["remote_base"]), str(folder["remote_path"]))
+    folder["trash_root"] = remote_join(str(config["remote_base"]), str(folder["trash_path"]))
+    validate_local_path({**config, "folders": [folder]})
+    config["folders"].append(folder)
+    for profile in config["profiles"]:
+        if profile["id"] == config["active_profile_id"]:
+            profile["folders"] = config["folders"]
+            break
+    return folder_id
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Finish the local, repeatable portion of first-time configuration."""
+    config_path = Path(args.config).expanduser()
+    if not config_path.exists():
+        write_config(config_path, default_config(args.machine or machine_name()))
+        print(f"created config: {config_path}")
+    config = normalized_config(load_config(config_path))
+    if args.remote:
+        set_active_remote_base(config, args.remote)
+    added = [add_setup_folder(config, value) for value in args.folder]
+    updated = write_config(config_path, config)
+    print(f"profile: {updated['profile_id']}")
+    print(f"remote: {updated['remote_base']}")
+    if added:
+        print(f"folders added: {', '.join(added)}")
+
+    if args.skip_remote_check:
+        print("remote check: skipped")
+        return 0
+
+    if not enabled_folders(updated):
+        raise SystemExit("No folders are configured. Rerun setup with --folder /path/to/folder.")
+
+    remote_name = updated["remote_base"].split(":", 1)[0] + ":"
+    remotes = subprocess.run(
+        [rclone_bin(updated), "listremotes"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if remotes.returncode != 0 or remote_name not in remotes.stdout.splitlines():
+        raise SystemExit(
+            f"Dropbox remote '{remote_name}' is not configured. Run '{rclone_bin(updated)} config' "
+            "to create it, then rerun 'safe-sync setup'. For a headless server, use "
+            "'rclone authorize dropbox' on a browser-equipped machine and paste the token "
+            "into rclone's config prompt."
+        )
+    preflight(folder_config(updated, enabled_folders(updated)[0]))
+    registry_code = update_registry(updated)
+    if registry_code != 0:
+        raise SystemExit("Remote registry update failed; see logs")
+    print("remote preflight: ok")
+    if not args.skip_start:
+        service_cmd("start")
     return 0
 
 
@@ -1740,13 +1821,21 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,doctor}",
+        metavar="{setup,backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,doctor}",
     )
 
     init = sub.add_parser("init-config")
     init.add_argument("--force", action="store_true")
     init.add_argument("--machine")
     init.set_defaults(func=cmd_init_config)
+
+    setup = sub.add_parser("setup", help="Create or validate local configuration and verify Dropbox")
+    setup.add_argument("--remote", help="rclone base path, e.g. dropbox:computer-backups")
+    setup.add_argument("--folder", action="append", default=[], help="Local folder to add to the active profile; may be repeated")
+    setup.add_argument("--machine", help="Machine id to use only when creating a new config")
+    setup.add_argument("--skip-remote-check", action="store_true", help=argparse.SUPPRESS)
+    setup.add_argument("--skip-start", action="store_true", help=argparse.SUPPRESS)
+    setup.set_defaults(func=cmd_setup)
 
     migrate = sub.add_parser("migrate-config")
     migrate.add_argument("--from-path", default=str(LEGACY_CONFIG))

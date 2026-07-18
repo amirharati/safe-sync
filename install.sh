@@ -4,18 +4,90 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CONFIG_DIR="$HOME/.safe-sync"
 CONFIG="$CONFIG_DIR/config.json"
-SOURCE="$ROOT_DIR/bin/safe-sync"
+RUNTIME_DIR="${SAFE_SYNC_RUNTIME_DIR:-$HOME/.local/share/safe-sync}"
+RUNTIME_CURRENT="$RUNTIME_DIR/current"
+SOURCE=""
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+RCLONE_VERSION="v1.74.4"
 TRAY_LABEL="com.safe-sync.tray"
 TRAY_PLIST="$HOME/Library/LaunchAgents/$TRAY_LABEL.plist"
 APP_NAME="Safe Sync.app"
 APP_INSTALL_DIR="${SAFE_SYNC_APP_DIR:-$HOME/Applications}"
 APP_TARGET="$APP_INSTALL_DIR/$APP_NAME"
 
+INSTALL_UI=1
+UPDATE=0
+
+usage() {
+  cat <<'EOF'
+Usage: ./install.sh [--headless] [--update]
+
+  --headless  Install the CLI and daemon only; do not build the desktop app.
+  --update     Upgrade the installed Safe Sync runtime in place.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --headless)
+      INSTALL_UI=0
+      ;;
+    --update)
+      UPDATE=1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown install option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [ "${SAFE_SYNC_INSTALL_UI:-1}" = "0" ]; then
+  INSTALL_UI=0
+fi
+
+require_python() {
+  command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
+    echo "Python 3 is required. Install python3, then run ./install.sh again." >&2
+    exit 1
+  }
+}
+
+stage_runtime() {
+  mkdir -p "$RUNTIME_DIR"
+  STAGE_DIR=$(mktemp -d "$RUNTIME_DIR/.stage.XXXXXX")
+  cp -R "$ROOT_DIR/bin" "$ROOT_DIR/config" "$ROOT_DIR/src" "$STAGE_DIR/"
+  SOURCE="$STAGE_DIR/bin/safe-sync"
+}
+
+discard_staged_runtime() {
+  if [ -n "${STAGE_DIR:-}" ] && [ -d "$STAGE_DIR" ]; then
+    rm -rf "$STAGE_DIR"
+  fi
+}
+
+activate_staged_runtime() {
+  # Download/verification happens before this point, so a failed dependency
+  # install cannot replace a working runtime.
+  rm -rf "$RUNTIME_DIR/previous"
+  if [ -e "$RUNTIME_CURRENT" ]; then
+    mv "$RUNTIME_CURRENT" "$RUNTIME_DIR/previous"
+  fi
+  mv "$STAGE_DIR" "$RUNTIME_CURRENT"
+  STAGE_DIR=""
+  SOURCE="$RUNTIME_CURRENT/bin/safe-sync"
+  rm -rf "$RUNTIME_DIR/previous"
+}
+
 choose_bin_dir() {
   if [ -n "${SAFE_SYNC_BIN_DIR:-}" ]; then
     printf '%s\n' "$SAFE_SYNC_BIN_DIR"
-  elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-    printf '%s\n' /usr/local/bin
   else
     printf '%s\n' "$HOME/.local/bin"
   fi
@@ -35,21 +107,85 @@ install_command() {
 }
 
 
-find_rclone() {
-  if command -v rclone >/dev/null 2>&1; then
-    command -v rclone
-  elif [ -x /opt/homebrew/bin/rclone ]; then
-    printf '%s\n' /opt/homebrew/bin/rclone
-  elif [ -x /usr/local/bin/rclone ]; then
-    printf '%s\n' /usr/local/bin/rclone
+managed_rclone_asset() {
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64)
+      RCLONE_ASSET="rclone-${RCLONE_VERSION}-osx-arm64.zip"
+      RCLONE_SHA256="c2100e2d4a4b3be04c55cd45380cafe7647e1ad772bb055f52f00876ed701167"
+      ;;
+    Darwin:x86_64)
+      RCLONE_ASSET="rclone-${RCLONE_VERSION}-osx-amd64.zip"
+      RCLONE_SHA256="4188aa84043d7a6240912923f47639a9d2da21f3b40a521c065c8d92e66563f6"
+      ;;
+    Linux:x86_64)
+      RCLONE_ASSET="rclone-${RCLONE_VERSION}-linux-amd64.zip"
+      RCLONE_SHA256="fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d"
+      ;;
+    Linux:aarch64|Linux:arm64)
+      RCLONE_ASSET="rclone-${RCLONE_VERSION}-linux-arm64.zip"
+      RCLONE_SHA256="97685285c9ad6a0cf17d5844115d2a67245af6444db672187074bd9c358de419"
+      ;;
+    *)
+      echo "No managed rclone build is defined for $(uname -s) $(uname -m)." >&2
+      exit 1
+      ;;
+  esac
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
   else
-    return 1
+    echo "A SHA-256 tool (shasum or sha256sum) is required." >&2
+    exit 1
   fi
 }
 
+install_managed_rclone() {
+  managed_rclone_asset
+  RCLONE_TARGET="$RUNTIME_DIR/rclone/$RCLONE_VERSION/rclone"
+  if [ -x "$RCLONE_TARGET" ]; then
+    printf '%s\n' "$RCLONE_TARGET"
+    return
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    echo "curl is required to install Safe Sync's managed rclone runtime." >&2
+    exit 1
+  }
+  command -v unzip >/dev/null 2>&1 || {
+    echo "unzip is required to install Safe Sync's managed rclone runtime." >&2
+    exit 1
+  }
+  DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/safe-sync-rclone.XXXXXX")
+  cleanup_rclone_download() { rm -rf "$DOWNLOAD_DIR"; }
+  trap cleanup_rclone_download EXIT INT TERM
+  ARCHIVE="$DOWNLOAD_DIR/$RCLONE_ASSET"
+  curl -fsSL "https://downloads.rclone.org/$RCLONE_VERSION/$RCLONE_ASSET" -o "$ARCHIVE"
+  ACTUAL_SHA256=$(sha256_file "$ARCHIVE")
+  if [ "$ACTUAL_SHA256" != "$RCLONE_SHA256" ]; then
+    echo "Managed rclone checksum verification failed." >&2
+    exit 1
+  fi
+  unzip -q "$ARCHIVE" -d "$DOWNLOAD_DIR/unpacked"
+  RCLONE_SOURCE=$(find "$DOWNLOAD_DIR/unpacked" -type f -name rclone -perm -u+x | head -n 1)
+  if [ -z "$RCLONE_SOURCE" ]; then
+    echo "Managed rclone archive did not contain an executable." >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$RCLONE_TARGET")"
+  cp "$RCLONE_SOURCE" "$RCLONE_TARGET"
+  chmod 755 "$RCLONE_TARGET"
+  "$RCLONE_TARGET" version >/dev/null
+  trap - EXIT INT TERM
+  cleanup_rclone_download
+  printf '%s\n' "$RCLONE_TARGET"
+}
+
 configure_rclone() {
-  if RCLONE=$(find_rclone); then
-    /usr/bin/python3 - "$CONFIG" "$RCLONE" <<'PYCONFIG'
+  RCLONE="$1"
+  "$PYTHON_BIN" - "$CONFIG" "$RCLONE" <<'PYCONFIG'
 import json
 import sys
 from pathlib import Path
@@ -61,13 +197,21 @@ if config.get("rclone_bin") != rclone:
     config["rclone_bin"] = rclone
     path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
 PYCONFIG
-    echo "rclone: $RCLONE"
-  else
-    echo "Error: rclone not found." >&2
-    echo "Install it with: brew install rclone" >&2
-    echo "Then run ./install.sh again." >&2
-    exit 1
-  fi
+  echo "managed rclone: $RCLONE"
+}
+
+has_enabled_folders() {
+  "$PYTHON_BIN" - "$CONFIG" <<'PYFOLDERS'
+import json
+import sys
+
+config = json.loads(open(sys.argv[1]).read())
+active = config.get("active_profile_id")
+profiles = config.get("profiles", [])
+profile = next((item for item in profiles if item.get("id") == active), {})
+folders = profile.get("folders", config.get("folders", []))
+raise SystemExit(0 if any(folder.get("enabled", True) for folder in folders) else 1)
+PYFOLDERS
 }
 
 install_service_files() {
@@ -156,22 +300,39 @@ install_tray_app() {
   /usr/bin/open "$APP_TARGET" 2>/dev/null || true
 }
 
+require_python
+stage_runtime
+trap discard_staged_runtime EXIT INT TERM
 mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG" ]; then
   "$SOURCE" init-config
 fi
 
-configure_rclone
+RCLONE=$(install_managed_rclone)
+configure_rclone "$RCLONE"
+activate_staged_runtime
 TARGET=$(install_command)
 install_service_files "$TARGET"
-
-if [ "${SAFE_SYNC_INSTALL_UI:-1}" != "0" ]; then
-  install_tray_app
+if has_enabled_folders; then
+  "$TARGET" restart >/dev/null
+  BACKEND_MESSAGE="Backend service installed and started."
+else
+  BACKEND_MESSAGE="Backend service installed. It will start after safe-sync setup adds a folder."
 fi
 
-echo "Safe Sync installed."
+if [ "$INSTALL_UI" = "1" ]; then
+  install_tray_app
+fi
+trap - EXIT INT TERM
+
+if [ "$UPDATE" = "1" ]; then
+  echo "Safe Sync updated."
+else
+  echo "Safe Sync installed."
+fi
 echo "Command: $TARGET"
 echo "Config: $CONFIG"
+echo "Runtime: $RUNTIME_CURRENT"
 case ":$PATH:" in
   *":$(dirname "$TARGET"):"*)
     ;;
@@ -180,9 +341,9 @@ case ":$PATH:" in
     echo "Add it to PATH or run: $TARGET"
     ;;
 esac
-echo "Backend service: ~/Library/LaunchAgents/com.safe-sync.daemon.plist"
-if [ "${SAFE_SYNC_INSTALL_UI:-1}" != "0" ]; then
+echo "$BACKEND_MESSAGE"
+if [ "$INSTALL_UI" = "1" ]; then
   echo "Tray app: $APP_TARGET"
   echo "Tray autostart: $TRAY_PLIST"
 fi
-echo "Start daemon: safe-sync start"
+echo "Next step: safe-sync setup"
