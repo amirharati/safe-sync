@@ -113,6 +113,7 @@ const setupForm = document.querySelector<HTMLFormElement>("[data-setup-form]");
 const dropboxConnectionLabel = document.querySelector<HTMLElement>("[data-dropbox-connection]");
 const connectDropboxButton = document.querySelector<HTMLButtonElement>("[data-action='connect-dropbox']");
 const completeSetupButton = document.querySelector<HTMLButtonElement>("[data-action='complete-setup']");
+const reconnectDropboxButton = document.querySelector<HTMLButtonElement>("[data-action='reconnect-dropbox']");
 
 let latestStatus: SafeSyncStatus | null = null;
 let busyAction: string | null = null;
@@ -259,6 +260,7 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (action === "quit-tray") return "quit";
   if (action === "settings") return "settings";
   if (action === "connect-dropbox") return "dropbox-connect";
+  if (action === "reconnect-dropbox") return "dropbox-connect";
   if (action === "complete-setup") return "setup";
   if (action === "pick-setup-folder") return "setup-picker";
   if (action === "reload-config") return "config";
@@ -327,6 +329,7 @@ function renderStatus(status: SafeSyncStatus): void {
     stateLabel.dataset.health = currentTone;
   }
   if (reasonLabel) reasonLabel.textContent = text(status.health_reason);
+  if (reconnectDropboxButton) reconnectDropboxButton.hidden = !status.health_reason.includes("Dropbox authorization is invalid or revoked");
   if (setupPanel) setupPanel.hidden = status.health !== "setup_required";
   if (status.health === "setup_required" && !dropboxConnectionKnown) void refreshDropboxConnection();
   if (serviceLabel) {
@@ -1355,11 +1358,11 @@ async function pickSetupFolder(): Promise<void> {
   }
 }
 
-async function connectDropbox(): Promise<void> {
+async function connectDropbox(reconnect = false): Promise<void> {
   setBusy("dropbox-connect");
   try {
-    showUiCommand(["connect-dropbox"]);
-    const result = await invoke<CommandResult>("connect_dropbox");
+    showUiCommand(reconnect ? ["connect-dropbox", "--reconnect"] : ["connect-dropbox"]);
+    const result = await invoke<CommandResult>("connect_dropbox", { reconnect });
     renderDropboxConnection(true);
     setMessage(result.output || "Dropbox connected. Choose a folder to finish setup.", "ok");
     holdAction("dropbox-connect");
@@ -1464,6 +1467,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelector("[data-action='pick-folder']")?.addEventListener("click", () => void pickFolder());
   document.querySelector("[data-action='pick-setup-folder']")?.addEventListener("click", () => void pickSetupFolder());
   document.querySelector("[data-action='connect-dropbox']")?.addEventListener("click", () => void connectDropbox());
+  document.querySelector("[data-action='reconnect-dropbox']")?.addEventListener("click", () => void connectDropbox(true));
   setupForm?.addEventListener("submit", (event) => void completeSetup(event));
   document.querySelector("[data-action='pick-transfer-destination']")?.addEventListener("click", () => void pickTransferDestination());
   document.querySelector("[data-action='preview-transfer']")?.addEventListener("click", () => void previewTransferContents());

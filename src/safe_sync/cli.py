@@ -44,6 +44,15 @@ DEFAULT_RCLONE_CONFIG = CONFIG_HOME / "rclone.conf"
 TEMPLATE_FILTER = PROJECT_ROOT / "config" / "filter.txt"
 
 RATE_LIMIT_PATTERNS = ("too_many_requests", "too many requests", "rate limit", "rate_limit", "retry-after")
+AUTH_FAILURE_PATTERNS = (
+    "invalid_access_token",
+    "expired_access_token",
+    "invalid token",
+    "token has expired",
+    "authorization has been revoked",
+    "authentication failed",
+    "unauthorized",
+)
 RATE_LIMIT_EXIT = 75
 LAST_COMMAND_OUTPUT = ""
 
@@ -558,7 +567,18 @@ def preflight(config: dict[str, Any]) -> None:
         if text_looks_rate_limited(output):
             retry_after = rate_limit_retry_after_seconds(output, int(config.get("rate_limit_backoff_seconds", 300)))
             raise RateLimitedError(f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s", retry_after)
+        if text_looks_auth_failure(output):
+            raise SystemExit(reconnect_dropbox_message())
         raise SystemExit("Remote preflight failed; see log")
+
+
+def text_looks_auth_failure(output: str) -> bool:
+    lowered = output.lower()
+    return any(pattern in lowered for pattern in AUTH_FAILURE_PATTERNS)
+
+
+def reconnect_dropbox_message() -> str:
+    return "Dropbox authorization is invalid or revoked. Reconnect with: safe-sync connect-dropbox"
 
 
 def backup_cmd(config: dict[str, Any], dry_run: bool) -> list[str]:
@@ -1014,7 +1034,8 @@ def cmd_connect_dropbox(args: argparse.Namespace) -> int:
     if remotes.returncode != 0:
         print(remotes.stdout or "", end="")
         return int(remotes.returncode)
-    if f"{remote_name}:" in remotes.stdout.splitlines():
+    remote_exists = f"{remote_name}:" in remotes.stdout.splitlines()
+    if remote_exists and not getattr(args, "reconnect", False):
         print("Dropbox is already connected to Safe Sync.")
         return 0
 
@@ -1025,10 +1046,19 @@ def cmd_connect_dropbox(args: argparse.Namespace) -> int:
         token = input("Paste the resulting Dropbox token here: ").strip()
         if not token:
             raise SystemExit("Dropbox token is required; no remote was created.")
-        command.extend(["config_is_local", "false", "token", token])
+        if remote_exists:
+            command = [rclone_bin(config), "config", "update", remote_name, "config_is_local", "false", "token", token]
+        else:
+            command.extend(["config_is_local", "false", "token", token])
     else:
         print("Opening Dropbox authorization in your browser...")
-    return subprocess.run(command, check=False, env=rclone_env(config)).returncode
+        if remote_exists:
+            command = [rclone_bin(config), "config", "reconnect", remote_name]
+    result = subprocess.run(command, check=False, env=rclone_env(config))
+    if result.returncode == 0 and enabled_folders(config):
+        service_cmd("restart")
+        print("Safe Sync backend restarted with the new Dropbox authorization.")
+    return result.returncode
 
 
 def parse_status_time(value: Any) -> dt.datetime | None:
@@ -1307,12 +1337,13 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     last_progress=f"Dropbox throttled folder {index} of {total_folders}",
                 )
                 return RATE_LIMIT_EXIT, folder["id"]
+            error = reconnect_dropbox_message() if text_looks_auth_failure(LAST_COMMAND_OUTPUT) else f"rclone exit {code}"
             publish_runtime_status(
                 api_state,
                 config,
                 state="error",
                 failed_folder=folder["id"],
-                last_error=f"rclone exit {code}",
+                last_error=error,
                 last_finish=now_iso(),
                 last_progress=f"Failed on folder {index} of {total_folders}",
             )
@@ -1605,7 +1636,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 previous_snapshots = current_snapshots
                 publish_runtime_status(api_state, config, state="dirty", changed_folders=changed, last_change=now_iso(), watcher="polling")
             elif daemon.state.state not in {DaemonState.SYNCING, DaemonState.BACKOFF}:
-                publish_runtime_status(api_state, config, state="watching", watcher="polling", last_error=None)
+                publish_runtime_status(api_state, config, state="watching", watcher="polling")
 
             if daemon.state.state == DaemonState.BACKOFF:
                 if daemon.backoff_expired(now):
@@ -1659,7 +1690,8 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                         queued_backup=True,
                     )
                 else:
-                    publish_runtime_status(api_state, config, state="error", failed_folder=failed_folder, last_error=f"{error_text}; remote/preflight failed")
+                    existing_error = str(api_state.snapshot().get("last_error") or error_text)
+                    publish_runtime_status(api_state, config, state="error", failed_folder=failed_folder, last_error=existing_error)
                 if args.once:
                     return code
 
@@ -1936,6 +1968,7 @@ def parser() -> argparse.ArgumentParser:
 
     connect_dropbox = sub.add_parser("connect-dropbox", help="Connect the default Safe Sync Dropbox remote")
     connect_dropbox.add_argument("--headless", action="store_true", help="Request a browser-machine token instead of opening a local browser")
+    connect_dropbox.add_argument("--reconnect", action="store_true", help="Replace an existing Dropbox authorization")
     connect_dropbox.set_defaults(func=cmd_connect_dropbox)
 
     migrate = sub.add_parser("migrate-config")

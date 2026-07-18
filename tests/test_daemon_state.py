@@ -29,6 +29,7 @@ from safe_sync.cli import (
     rclone_env,
     run_command,
     run_backup_with_config,
+    preflight,
     selected_folders,
     status_health,
     unsafe_local_path_reason,
@@ -111,6 +112,42 @@ def test_connect_dropbox_headless_skips_rclone_menu(monkeypatch, tmp_path):
 
     assert cmd_connect_dropbox(SimpleNamespace(config=str(config_path), headless=True)) == 0
     assert commands[-1] == ["rclone", "config", "create", "dropbox", "dropbox", "config_is_local", "false", "token", '{"access_token":"test"}']
+
+
+def test_connect_dropbox_headless_replaces_an_existing_token(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config = normalized_config(default_config("test-machine"))
+    config["rclone_bin"] = "rclone"
+    write_config(config_path, config)
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        output = "dropbox:\n" if command[1] == "listremotes" else ""
+        return subprocess.CompletedProcess(command, 0, output)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("builtins.input", lambda _prompt: '{"access_token":"replacement"}')
+
+    assert cmd_connect_dropbox(SimpleNamespace(config=str(config_path), headless=True, reconnect=True)) == 0
+    assert commands[-1] == ["rclone", "config", "update", "dropbox", "config_is_local", "false", "token", '{"access_token":"replacement"}']
+
+
+def test_preflight_requests_reconnect_for_revoked_dropbox_token(monkeypatch, tmp_path):
+    config = {
+        "rclone_bin": "rclone",
+        "remote_root": "dropbox:computer-backups/test",
+        "rate_limit_backoff_seconds": 300,
+        "log_dir": str(tmp_path),
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, "invalid_access_token: token has expired"),
+    )
+
+    with pytest.raises(SystemExit, match="safe-sync connect-dropbox"):
+        preflight(config)
 
 
 def test_setup_requires_explicit_opt_in_for_projects_root(monkeypatch, tmp_path):

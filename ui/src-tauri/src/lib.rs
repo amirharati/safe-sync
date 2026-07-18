@@ -507,8 +507,12 @@ async fn get_config() -> Result<SafeSyncConfigView, String> {
 }
 
 #[tauri::command]
-async fn connect_dropbox() -> Result<CommandResult, String> {
-    let output = run_safe_sync_blocking(vec!["connect-dropbox".to_string()]).await?;
+async fn connect_dropbox(reconnect: Option<bool>) -> Result<CommandResult, String> {
+    let mut args = vec!["connect-dropbox".to_string()];
+    if reconnect.unwrap_or(false) {
+        args.push("--reconnect".to_string());
+    }
+    let output = run_safe_sync_blocking(args).await?;
     Ok(CommandResult { ok: true, output })
 }
 

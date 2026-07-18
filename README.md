@@ -242,6 +242,21 @@ systemctl --user is-active safe-sync-daemon.service
 
 Expected values are `Linger=yes`, `enabled`, and `active`.
 
+### Reconnecting Dropbox
+
+If Dropbox revokes Safe Sync's authorization, the daemon stays running and the
+tray, control panel, and `safe-sync status` report a reconnect-required error.
+Desktop users can select **Reconnect Dropbox** in the status panel. On a
+headless server, run:
+
+```bash
+safe-sync connect-dropbox --headless --reconnect
+```
+
+Then provide a fresh JSON token using the same browser-machine handoff as the
+initial headless setup. Safe Sync restarts the backend automatically after a
+successful reconnect when watched folders already exist.
+
 ### UI and CLI Setup
 
 Desktop installs provide guided setup in the Safe Sync control panel. It uses
