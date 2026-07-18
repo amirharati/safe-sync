@@ -17,6 +17,7 @@
 - Additional notes 3: Protected-folder errors now print a copyable recovery command using the rejected absolute path, for example `safe-sync setup --folder /home/user/projects --allow-unsafe-local-path`, rather than referring to an internal config key.
 - Additional notes 4: Consolidated README and installation-plan startup guidance. Normal desktop/laptop installs use per-user login startup with no administrator privileges; Linux `sudo loginctl enable-linger "$USER"` is now clearly documented as the optional, uncommon server-only step for syncing immediately after reboot before login. Added macOS backend-only steps and updated the headless token handoff to Safe Sync commands.
 - Additional notes 5: Hardened Dropbox authorization recovery. Revoked/expired-token output is classified as reconnect-required, retained in live status rather than cleared on the next idle poll, and gives an exact reconnect command. Added `safe-sync connect-dropbox --reconnect`; successful reconnect restarts the backend when watched folders exist. The desktop status panel exposes a Reconnect Dropbox action for this failure. Regression suite: 50 passed; frontend build and Rust native check passed.
+- Additional notes 6: Refined the visible authorization-recovery state so both the tray popup and control panel headline it as `Reconnect Dropbox`, rather than the generic `Needs attention`, while retaining the exact error reason and recovery action.
 
 ## 2026-07-17 - Source installation and setup foundation
 - Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`

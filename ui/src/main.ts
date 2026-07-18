@@ -187,6 +187,7 @@ function tone(status: SafeSyncStatus): string {
 
 function headline(status: SafeSyncStatus): string {
   if (status.health === "setup_required") return "Setup required";
+  if (status.health_reason.includes("Dropbox authorization is invalid or revoked")) return "Reconnect Dropbox";
   if (status.health === "error") return "Needs attention";
   if (status.health === "warning") return syncState(status) === "backoff" ? "Waiting" : "Warning";
   if (status.service_state === "stopped") return "Stopped";
