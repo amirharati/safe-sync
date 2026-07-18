@@ -286,7 +286,16 @@ build_tray_app() {
   (
     cd "$ROOT_DIR/ui"
     npm ci
-    npm run tauri build
+    case "$(uname -s)" in
+      Linux)
+        # The source installer owns a user-scoped executable and XDG entries;
+        # it does not need a system .deb/.rpm package or root privileges.
+        npm run tauri -- build --no-bundle
+        ;;
+      *)
+        npm run tauri build
+        ;;
+    esac
   )
 }
 
