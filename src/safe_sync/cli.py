@@ -250,10 +250,16 @@ def unsafe_local_path_reason(path: Path) -> str | None:
 
 
 def validate_local_path(config: dict[str, Any]) -> None:
-    for folder in enabled_folders(config):
+    normalized = normalized_config(config)
+    # Callers validating a prospective folder pass it at the top level before
+    # it is attached to the active profile. Respect that candidate list.
+    folders = config.get("folders") if isinstance(config.get("folders"), list) else normalized["folders"]
+    for folder in folders:
+        if not folder.get("enabled", True):
+            continue
         path = resolved_path(str(folder["local_path"]))
         reason = unsafe_local_path_reason(path)
-        if reason and not config.get("allow_unsafe_local_path") and not folder.get("allow_unsafe_local_path"):
+        if reason and not normalized.get("allow_unsafe_local_path") and not folder.get("allow_unsafe_local_path"):
             raise SystemExit(f"{reason}\nSet allow_unsafe_local_path=true only if you are certain.")
 
 
@@ -732,7 +738,7 @@ def set_active_remote_base(config: dict[str, Any], remote_base: str) -> None:
             break
 
 
-def add_setup_folder(config: dict[str, Any], local_path: str) -> str:
+def add_setup_folder(config: dict[str, Any], local_path: str, allow_unsafe_local_path: bool = False) -> str:
     path = resolved_path(local_path)
     if not path.is_dir():
         raise SystemExit(f"Setup folder does not exist or is not a directory: {path}")
@@ -741,6 +747,9 @@ def add_setup_folder(config: dict[str, Any], local_path: str) -> str:
     if existing:
         if resolved_path(str(existing["local_path"])) != path:
             raise SystemExit(f"Folder id '{folder_id}' already belongs to {existing['local_path']}")
+        if allow_unsafe_local_path:
+            existing["allow_unsafe_local_path"] = True
+        validate_local_path({**config, "folders": [existing]})
         return folder_id
     folder = {
         "id": folder_id,
@@ -751,6 +760,8 @@ def add_setup_folder(config: dict[str, Any], local_path: str) -> str:
         "filter_file": str(config.get("filter_file", DEFAULT_FILTER)),
         "enabled": True,
     }
+    if allow_unsafe_local_path:
+        folder["allow_unsafe_local_path"] = True
     folder["remote_root"] = remote_join(str(config["remote_base"]), str(folder["remote_path"]))
     folder["trash_root"] = remote_join(str(config["remote_base"]), str(folder["trash_path"]))
     validate_local_path({**config, "folders": [folder]})
@@ -771,7 +782,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     config = normalized_config(load_config(config_path))
     if args.remote:
         set_active_remote_base(config, args.remote)
-    added = [add_setup_folder(config, value) for value in args.folder]
+    added = [add_setup_folder(config, value, args.allow_unsafe_local_path) for value in args.folder]
     updated = write_config(config_path, config)
     print(f"profile: {updated['profile_id']}")
     print(f"remote: {updated['remote_base']}")
@@ -796,10 +807,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
     )
     if remotes.returncode != 0 or remote_name not in remotes.stdout.splitlines():
         raise SystemExit(
-            f"Dropbox remote '{remote_name}' is not configured. Run 'safe-sync rclone config' "
+            f"Dropbox remote '{remote_name}' is not configured. Run 'safe-sync connect-dropbox' "
             "to create it, then rerun 'safe-sync setup'. For a headless server, use "
-            "'rclone authorize dropbox' on a browser-equipped machine and paste the token "
-            "into rclone's config prompt."
+            "'safe-sync connect-dropbox --headless'."
         )
     preflight(folder_config(updated, enabled_folders(updated)[0]))
     registry_code = update_registry(updated)
@@ -1917,6 +1927,7 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument("--remote", help="rclone base path, e.g. dropbox:computer-backups")
     setup.add_argument("--folder", action="append", default=[], help="Local folder to add to the active profile; may be repeated")
     setup.add_argument("--machine", help="Machine id to use only when creating a new config")
+    setup.add_argument("--allow-unsafe-local-path", action="store_true", help="Explicitly allow protected broad paths such as ~/projects for folders in this setup command")
     setup.add_argument("--skip-remote-check", action="store_true", help=argparse.SUPPRESS)
     setup.add_argument("--skip-start", action="store_true", help=argparse.SUPPRESS)
     setup.set_defaults(func=cmd_setup)

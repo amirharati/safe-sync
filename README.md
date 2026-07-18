@@ -204,6 +204,13 @@ safe-sync setup --folder ~/projects --folder ~/data
 safe-sync status
 ```
 
+Safe Sync protects unusually broad roots such as `~/projects` by default. If
+you deliberately want to back up that whole root, make the choice explicit:
+
+```bash
+safe-sync setup --folder ~/projects --allow-unsafe-local-path
+```
+
 Headless installation does not need Node, Rust, GTK, WebKit, or the tray app.
 
 ### UI and CLI Setup
