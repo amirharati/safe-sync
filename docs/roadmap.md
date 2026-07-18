@@ -15,18 +15,21 @@ before release packages or Windows support.
 **Priority:** polish; defer until after real two-machine installation testing.
 
 **Observed:** the production macOS app installed at `~/Applications/Safe Sync.app`
-appears in the Dock/taskbar when its tray icon or control panel is used. The
-earlier development launch did not show this behavior.
+stays out of the Dock while its tray icon is idle, but appears in the
+Dock/taskbar whenever a user clicks the tray icon and the quick popup becomes
+visible. It disappears again when that popup closes. The earlier development
+launch did not show this behavior. This is specifically the quick popup, not
+an always-visible app-launch entry.
 
 **What has already been tried:** the bundled `Info.plist` contains
 `LSUIElement=true`, and the Tauri startup sets
 `ActivationPolicy::Accessory`. Both are present in the built production bundle.
 
-**Investigation:** compare Finder/LaunchAgent `/usr/bin/open` launch behavior
-with a direct executable launch; inspect whether showing the ordinary control
-panel window promotes the accessory app; then choose a native `NSPanel` or an
-alternative app-launch strategy if macOS requires it. Keep the control panel
-usable and do not regress the menu-bar quick panel.
+**Investigation:** the quick popup is currently an ordinary borderless
+`NSWindow`, which may promote the accessory app while visible. Compare an
+AppKit non-activating `NSPanel` and an `NSPopover` implementation that keeps
+the popup open across its internal actions. Avoid changing the successful
+first-click positioning behavior; preserve a usable normal control panel.
 
 ## Phase 0: Docs and Existing Setup
 
