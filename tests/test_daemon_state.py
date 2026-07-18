@@ -190,6 +190,22 @@ def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
     assert "--max-duration" not in copy_cmd(config, "dropbox:source", str(tmp_path), dry_run=False)
 
 
+def test_copy_command_limits_a_transfer_to_selected_files_and_folders(tmp_path):
+    command = copy_cmd(
+        {"filter_file": str(tmp_path / "filter.txt")},
+        "dropbox:source",
+        str(tmp_path),
+        dry_run=True,
+        selected_paths=["report.csv", "assets/"],
+    )
+
+    assert command.count("--include") == 2
+    assert "/report.csv" in command
+    assert "/assets/**" in command
+    assert "--create-empty-src-dirs" in command
+    assert "--dry-run" in command
+
+
 def test_bounded_seconds_validates_settings_limits():
     assert bounded_seconds("poll interval", 5, 1, 3600) == 5
     with pytest.raises(SystemExit, match="poll interval must be between 1 and 3600 seconds"):
@@ -261,6 +277,7 @@ def test_daemon_state_queues_one_transfer_at_a_time():
         "source": "dropbox:source",
         "destination": "/tmp/destination",
         "dry_run": False,
+        "selected_paths": [],
     }
     assert state.consume_pull_request() is None
 

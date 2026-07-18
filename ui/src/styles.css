@@ -611,6 +611,22 @@ button.danger:hover:not(:disabled) {
   margin-top: 2px;
 }
 
+.transfer-selection .preview-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.transfer-selection .preview-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-selection .preview-list button {
+  flex: 0 0 auto;
+}
+
 .last-command-panel {
   margin-top: 16px;
 }

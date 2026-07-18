@@ -37,7 +37,7 @@ class DaemonApiState:
             self._backup_requested = False
             return requested
 
-    def request_pull(self, source: str, destination: str, dry_run: bool) -> bool:
+    def request_pull(self, source: str, destination: str, dry_run: bool, selected_paths: list[str] | None = None) -> bool:
         """Queue one explicit remote-to-local transfer for the daemon."""
         with self._lock:
             if self._pull_request is not None:
@@ -46,6 +46,7 @@ class DaemonApiState:
                 "source": source,
                 "destination": destination,
                 "dry_run": dry_run,
+                "selected_paths": list(selected_paths or []),
             }
             self._status["queued_transfer"] = True
             return True
@@ -78,9 +79,12 @@ class _DaemonApiHandler(socketserver.StreamRequestHandler):
             elif command == "pull":
                 source = str(request.get("source") or "")
                 destination = str(request.get("destination") or "")
+                selected_paths = request.get("selected_paths") or []
                 if not source or not destination:
                     response = {"ok": False, "error": "source and destination are required"}
-                elif self.server.api_state.request_pull(source, destination, bool(request.get("dry_run"))):
+                elif not isinstance(selected_paths, list) or not all(isinstance(path, str) and path.strip() for path in selected_paths):
+                    response = {"ok": False, "error": "selected paths must be a list of non-empty paths"}
+                elif self.server.api_state.request_pull(source, destination, bool(request.get("dry_run")), selected_paths):
                     response = {"ok": True, "queued": True}
                 else:
                     response = {"ok": False, "error": "another transfer is already queued"}

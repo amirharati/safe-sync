@@ -669,15 +669,18 @@ fn list_local_folder(path: String) -> Result<LocalFolderPreview, String> {
 }
 
 #[tauri::command]
-async fn pull_remote(source: String, destination: String, dry_run: bool) -> Result<CommandResult, String> {
+async fn pull_remote(source: String, destination: String, dry_run: bool, selected_paths: Vec<String>) -> Result<CommandResult, String> {
     if source.trim().is_empty() || destination.trim().is_empty() {
         return Err("source and destination are required".to_string());
     }
-    let args = if dry_run {
-        vec!["pull".to_string(), source, destination, "--dry-run".to_string()]
-    } else {
-        vec!["pull".to_string(), source, destination]
-    };
+    let mut args = vec!["pull".to_string(), source, destination];
+    if dry_run {
+        args.push("--dry-run".to_string());
+    }
+    for selected_path in selected_paths {
+        args.push("--select".to_string());
+        args.push(selected_path);
+    }
     let output = run_safe_sync_blocking(args).await?;
     Ok(CommandResult { ok: true, output })
 }

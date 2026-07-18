@@ -103,6 +103,8 @@ const previewSourcePath = document.querySelector<HTMLElement>("[data-preview-sou
 const previewSourceList = document.querySelector<HTMLElement>("[data-preview-source-list]");
 const previewDestinationPath = document.querySelector<HTMLElement>("[data-preview-destination-path]");
 const previewDestinationList = document.querySelector<HTMLElement>("[data-preview-destination-list]");
+const transferSelection = document.querySelector<HTMLElement>("[data-transfer-selection]");
+const transferSelectionList = document.querySelector<HTMLElement>("[data-transfer-selection-list]");
 const lastCommand = document.querySelector<HTMLElement>("[data-last-command]");
 
 let latestStatus: SafeSyncStatus | null = null;
@@ -118,6 +120,7 @@ let latestComputers: Array<Record<string, unknown>> = [];
 let transferSourceRoot = "";
 let transferSource = "";
 let transferSourceIsDirectory = true;
+const selectedTransferPaths = new Set<string>();
 let lastUiCommand = "";
 
 function text(value: unknown, fallback = "-"): string {
@@ -455,7 +458,7 @@ function transferDestination(): string | null {
   // rclone copies a directory's contents. For an arbitrary destination, add its
   // source name so a remote `assets` folder becomes `Documents/assets`.
   if (transferSourceIsDirectory && !selectedDestinationFolder()) {
-    const name = remoteSourceName(transferSource);
+    const name = remoteSourceName(transferSourceRoot);
     return name ? joinLocalPath(parent, name) : parent;
   }
   return parent;
@@ -508,7 +511,8 @@ function updateTransferCommand(): void {
   } else if (!transferSource || !destination) {
     transferCommand.textContent = "Choose a source and destination folder.";
   } else {
-    transferCommand.textContent = `safe-sync pull ${shellQuote(transferSource)} ${shellQuote(destination)}${dryRun ? " --dry-run" : ""}`;
+    const selected = [...selectedTransferPaths].map((path) => ` --select ${shellQuote(path)}`).join("");
+    transferCommand.textContent = `safe-sync pull ${shellQuote(transferSourceRoot)} ${shellQuote(destination)}${dryRun ? " --dry-run" : ""}${selected}`;
   }
   updateTransferLocationActions();
 }
@@ -559,6 +563,8 @@ function renderTransferOptions(): void {
     transferSourceRoot = sourceFolderSelect.value;
     transferSource = transferSourceRoot;
     transferSourceIsDirectory = true;
+    selectedTransferPaths.clear();
+    renderTransferSelection();
   };
   renderSourceFolders();
   computerSelect.onchange = () => {
@@ -570,6 +576,8 @@ function renderTransferOptions(): void {
     transferSourceRoot = sourceFolderSelect.value;
     transferSource = transferSourceRoot;
     transferSourceIsDirectory = true;
+    selectedTransferPaths.clear();
+    renderTransferSelection();
     hideTransferBrowser();
     updateTransferCommand();
   };
@@ -607,6 +615,41 @@ function hideTransferBrowser(): void {
   if (transferEntryList) transferEntryList.innerHTML = "";
 }
 
+function relativeTransferPath(path: string): string | null {
+  const root = transferSourceRoot.replace(/\/+$/, "");
+  if (!root || !path.startsWith(`${root}/`)) return null;
+  return path.slice(root.length + 1);
+}
+
+function renderTransferSelection(): void {
+  if (!transferSelection || !transferSelectionList) return;
+  transferSelectionList.innerHTML = "";
+  for (const path of [...selectedTransferPaths].sort((left, right) => left.localeCompare(right))) {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = path;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary";
+    remove.dataset.action = "remove-transfer-entry";
+    remove.dataset.path = path;
+    remove.textContent = "Remove";
+    item.append(label, remove);
+    transferSelectionList.append(item);
+  }
+  transferSelection.hidden = selectedTransferPaths.size === 0;
+}
+
+function toggleTransferSelection(path: string): void {
+  if (selectedTransferPaths.has(path)) {
+    selectedTransferPaths.delete(path);
+  } else {
+    selectedTransferPaths.add(path);
+  }
+  renderTransferSelection();
+  updateTransferCommand();
+}
+
 function renderRemoteEntries(output: string, base: string): void {
   if (!transferBrowser || !transferEntryList || !transferSelectedSource) return;
   const entries = output.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 200);
@@ -618,14 +661,24 @@ function renderRemoteEntries(output: string, base: string): void {
     item.className = "item transfer-entry";
     const label = document.createElement("span");
     label.textContent = entry;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "secondary";
-    button.dataset.action = "select-transfer-entry";
-    button.dataset.entry = entry;
-    button.dataset.directory = String(directory);
-    button.textContent = directory ? "Open" : "Select";
-    item.append(label, button);
+    item.append(label);
+    if (directory) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "secondary";
+      open.dataset.action = "open-transfer-entry";
+      open.dataset.entry = entry;
+      open.textContent = "Open";
+      item.append(open);
+    }
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "secondary";
+    select.dataset.action = "toggle-transfer-entry";
+    select.dataset.entry = entry;
+    select.dataset.directory = String(directory);
+    select.textContent = directory ? "Add Folder" : "Add File";
+    item.append(select);
     transferEntryList.append(item);
   }
   if (entries.length === 0) transferEntryList.textContent = "No files found in this folder.";
@@ -1061,17 +1114,17 @@ async function previewTransferContents(): Promise<void> {
   }
   setBusy("transfer-preview");
   try {
-    showUiCommand(["list", transferSource, "--depth", "1"]);
+    showUiCommand(["list", transferSourceRoot, "--depth", "1"]);
     const [remote, local] = await Promise.all([
-      invoke<CommandResult>("list_remote", { target: transferSource, depth: 1 }),
+      invoke<CommandResult>("list_remote", { target: transferSourceRoot, depth: 1 }),
       invoke<LocalFolderPreview>("list_local_folder", { path: destination }),
     ]);
-    if (previewSourcePath) previewSourcePath.textContent = transferSource;
+    if (previewSourcePath) previewSourcePath.textContent = transferSourceRoot;
     if (previewDestinationPath) previewDestinationPath.textContent = local.path;
     renderPreviewList(
       previewSourceList,
       remote.output.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 200),
-      "No entries found in the selected remote source.",
+      selectedTransferPaths.size > 0 ? `Selected: ${[...selectedTransferPaths].join(", ")}` : "No entries found in the selected remote source.",
       remote.output.split("\n").filter(Boolean).length > 200,
     );
     renderPreviewList(
@@ -1107,11 +1160,12 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   }
   setBusy("transfer");
   try {
-    showUiCommand(["pull", transferSource, destination, ...(dryRun ? ["--dry-run"] : [])]);
+    showUiCommand(["pull", transferSourceRoot, destination, ...(dryRun ? ["--dry-run"] : []), ...[...selectedTransferPaths].flatMap((path) => ["--select", path])]);
     const result = await invoke<CommandResult>("pull_remote", {
-      source: transferSource,
+      source: transferSourceRoot,
       destination,
       dryRun,
+      selectedPaths: [...selectedTransferPaths],
     });
     transferOutput.textContent = `${result.output || "transfer queued"}\nThe daemon will run it after any active backup. Live progress appears above.`;
     setMessage(dryRun ? "Dry run queued" : "Transfer queued", "ok");
@@ -1153,30 +1207,31 @@ async function copyLastCommand(): Promise<void> {
   }
 }
 
-function selectTransferEntry(button: HTMLElement): void {
+function openTransferEntry(button: HTMLElement): void {
   const entry = button.dataset.entry;
   if (!entry || !transferSource) return;
   const selected = `${transferSource.replace(/\/+$/, "")}/${entry.replace(/^\/+|\/+$/g, "")}`;
-  if (button.dataset.directory === "true") {
-    transferSource = selected;
-    transferSourceIsDirectory = true;
-    updateTransferCommand();
-    void listRemote();
-    return;
-  }
   transferSource = selected;
-  transferSourceIsDirectory = false;
-  updateTransferCommand();
-  if (transferSelectedSource) transferSelectedSource.textContent = transferSource;
-  setMessage("Remote file selected", "ok");
+  transferSourceIsDirectory = true;
+  void listRemote();
+}
+
+function addTransferEntry(button: HTMLElement): void {
+  const entry = button.dataset.entry;
+  if (!entry || !transferSource) return;
+  const selected = `${transferSource.replace(/\/+$/, "")}/${entry.replace(/^\/+|\/+$/g, "")}`;
+  const relative = relativeTransferPath(selected);
+  if (!relative) return;
+  toggleTransferSelection(button.dataset.directory === "true" ? `${relative}/` : relative);
+  setMessage("Transfer selection updated", "ok");
 }
 
 function resetTransferSource(): void {
   transferSource = transferSourceRoot;
   transferSourceIsDirectory = true;
-  updateTransferCommand();
   hideTransferBrowser();
-  setMessage("Using selected source folder", "ok");
+  void listRemote();
+  setMessage("Browsing selected source folder", "ok");
 }
 
 async function refreshStatus(): Promise<void> {
@@ -1325,7 +1380,12 @@ window.addEventListener("DOMContentLoaded", () => {
   transferForm?.addEventListener("change", updateTransferCommand);
   transferEntryList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
-    if (target?.dataset.action === "select-transfer-entry") selectTransferEntry(target);
+    if (target?.dataset.action === "open-transfer-entry") openTransferEntry(target);
+    if (target?.dataset.action === "toggle-transfer-entry") addTransferEntry(target);
+  });
+  transferSelectionList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "remove-transfer-entry" && target.dataset.path) toggleTransferSelection(target.dataset.path);
   });
   document.querySelector("[data-action='reload-config']")?.addEventListener("click", () => void loadConfig());
   document.querySelector("[data-action='load-computers']")?.addEventListener("click", () => void loadComputers());
@@ -1335,6 +1395,11 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelector("[data-action='open-destination-local']")?.addEventListener("click", () => void openTransferLocal("destination"));
   document.querySelector("[data-action='open-destination-dropbox']")?.addEventListener("click", () => void openTransferDropbox("destination"));
   document.querySelector("[data-action='reset-transfer-source']")?.addEventListener("click", resetTransferSource);
+  document.querySelector("[data-action='clear-transfer-selection']")?.addEventListener("click", () => {
+    selectedTransferPaths.clear();
+    renderTransferSelection();
+    updateTransferCommand();
+  });
   document.querySelector("[data-action='copy-transfer-command']")?.addEventListener("click", () => void copyTransferCommand());
   document.querySelector("[data-action='copy-last-command']")?.addEventListener("click", () => void copyLastCommand());
   document.querySelector("[data-action='refresh-transfer']")?.addEventListener("click", () => {

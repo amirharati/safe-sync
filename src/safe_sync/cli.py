@@ -556,15 +556,24 @@ def backup_cmd(config: dict[str, Any], dry_run: bool) -> list[str]:
     return cmd
 
 
-def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool) -> list[str]:
+def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool, selected_paths: list[str] | None = None) -> list[str]:
     cmd = [
         rclone_bin(config), "copy", src, dst,
         "--filter-from", str(filter_file(config)),
+        "--create-empty-src-dirs",
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
         "--log-level", "INFO",
     ]
+    for selected_path in selected_paths or []:
+        normalized = selected_path.strip().strip("/")
+        if not normalized or ".." in normalized.split("/"):
+            raise SystemExit(f"unsafe selected path: {selected_path}")
+        if selected_path.endswith("/"):
+            cmd.extend(["--include", f"/{normalized}/**"])
+        else:
+            cmd.extend(["--include", f"/{normalized}"])
     if config.get("preserve_metadata"):
         cmd.append("--metadata")
     if dry_run:
@@ -823,11 +832,11 @@ def cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_pull_direct(config: dict[str, Any], src: str, dst: str, dry_run: bool) -> int:
+def run_pull_direct(config: dict[str, Any], src: str, dst: str, dry_run: bool, selected_paths: list[str] | None = None) -> int:
     with Lock(lock_file(config)):
         save_status(config, state="syncing", last_start=now_iso(), last_command="pull", last_error=None)
         try:
-            code = run_command(config, copy_cmd(config, src, dst, dry_run), dry_run=dry_run)
+            code = run_command(config, copy_cmd(config, src, dst, dry_run, selected_paths), dry_run=dry_run)
         except BaseException as exc:
             save_status(config, state="error", last_error=str(exc), last_finish=now_iso())
             raise
@@ -844,10 +853,11 @@ def cmd_pull(args: argparse.Namespace) -> int:
             source=args.source,
             destination=args.destination,
             dry_run=args.dry_run,
+            selected_paths=args.select,
         )
     except OSError:
         # A stopped daemon still permits the CLI to perform a one-off copy.
-        return run_pull_direct(config, args.source, args.destination, args.dry_run)
+        return run_pull_direct(config, args.source, args.destination, args.dry_run, args.select)
     if not response.get("ok"):
         raise SystemExit(str(response.get("error") or "daemon transfer request failed"))
     print("transfer queued")
@@ -1164,6 +1174,7 @@ def run_pull_runtime(config: dict[str, Any], request: dict[str, Any], api_state:
     source = str(request["source"])
     destination = str(request["destination"])
     dry_run = bool(request.get("dry_run"))
+    selected_paths = [str(path) for path in request.get("selected_paths") or []]
     publish_runtime_status(
         api_state,
         config,
@@ -1175,7 +1186,7 @@ def run_pull_runtime(config: dict[str, Any], request: dict[str, Any], api_state:
         current_folder_label=destination,
         last_error=None,
         last_warning=None,
-        last_progress="Starting requested transfer",
+        last_progress=f"Starting requested transfer ({len(selected_paths)} selected items)" if selected_paths else "Starting requested transfer",
         _activity_event=f"Transfer started: {source} -> {destination}",
     )
 
@@ -1193,7 +1204,7 @@ def run_pull_runtime(config: dict[str, Any], request: dict[str, Any], api_state:
             )
 
     try:
-        code = run_command(config, copy_cmd(config, source, destination, dry_run), dry_run=dry_run, progress_callback=on_progress)
+        code = run_command(config, copy_cmd(config, source, destination, dry_run, selected_paths), dry_run=dry_run, progress_callback=on_progress)
     except BaseException as exc:
         publish_runtime_status(api_state, config, state="error", last_error=str(exc), last_finish=now_iso())
         return 1
@@ -1776,6 +1787,7 @@ def parser() -> argparse.ArgumentParser:
     pull.add_argument("source", help="Full rclone source path, e.g. dropbox:computer-backups/test/linux/test_sync/data")
     pull.add_argument("destination")
     pull.add_argument("--dry-run", action="store_true")
+    pull.add_argument("--select", action="append", default=[], help="Relative file path or folder path ending in / to copy from the source")
     pull.set_defaults(func=cmd_pull)
 
     list_cmd = sub.add_parser("list")
