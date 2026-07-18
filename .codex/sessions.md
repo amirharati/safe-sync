@@ -13,6 +13,7 @@
 - Status: Isolated macOS headless install, update, wrapper/runtime check, normal uninstall/config preservation, setup smoke test, shell syntax checks, and 42 backend tests passed. The source installer preflights Python/runtime tools and desktop Node/Rust requirements before it stages any files; rclone is app-managed. Linux desktop packaging, managed rclone config ownership, and GUI setup onboarding remain follow-up work.
 - Next steps: Commit this milestone, test the source installer on Ubuntu, then implement the full Dropbox authorization/config ownership workflow and production desktop packaging.
 - Additional notes: Fixed the production macOS tray app appearing in the Dock/taskbar after installation. The app now has both a merged `Info.plist` with `LSUIElement=true` and Tauri's runtime `ActivationPolicy::Accessory`, while retaining its normal control-panel window. `cargo check`, frontend build, and production macOS bundle passed; the built bundle's `Info.plist` confirms `LSUIElement => true`.
+- Additional notes 2: The installed app still appeared in the user's Dock/taskbar after the above update, unlike dev mode. Deferred as roadmap issue `MAC-001` with reproduction, attempted fixes, and investigation path; it is polish priority after real two-machine install testing.
 
 ## 2026-07-17 - Deep daemon dogfood and profile isolation
 - Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`

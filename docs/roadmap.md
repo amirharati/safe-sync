@@ -8,6 +8,26 @@ source install first, desktop and headless modes, managed rclone, explicit
 Dropbox setup, safe update/uninstall, then two-machine real-world testing
 before release packages or Windows support.
 
+## Open Issues
+
+### MAC-001: Installed tray app still appears in the Dock/taskbar
+
+**Priority:** polish; defer until after real two-machine installation testing.
+
+**Observed:** the production macOS app installed at `~/Applications/Safe Sync.app`
+appears in the Dock/taskbar when its tray icon or control panel is used. The
+earlier development launch did not show this behavior.
+
+**What has already been tried:** the bundled `Info.plist` contains
+`LSUIElement=true`, and the Tauri startup sets
+`ActivationPolicy::Accessory`. Both are present in the built production bundle.
+
+**Investigation:** compare Finder/LaunchAgent `/usr/bin/open` launch behavior
+with a direct executable launch; inspect whether showing the ordinary control
+panel window promotes the accessory app; then choose a native `NSPanel` or an
+alternative app-launch strategy if macOS requires it. Keep the control panel
+usable and do not regress the menu-bar quick panel.
+
 ## Phase 0: Docs and Existing Setup
 
 - Capture workflow decisions.
