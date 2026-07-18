@@ -57,6 +57,38 @@ Run the CLI through `bin/safe-sync`; edit implementation code under `src/safe_sy
 Safe Sync currently supports source installation on macOS and Linux. Windows
 is intentionally deferred.
 
+### Prerequisites
+
+Safe Sync installs and pins its own runtime copy of `rclone`; do **not** install
+rclone separately. Source installation does require the following tools before
+you run the installer:
+
+| Mode | Required tools |
+| --- | --- |
+| macOS desktop | Python 3, Node/npm, Rust/cargo, Xcode Command Line Tools, `curl`, `unzip` |
+| macOS/Linux headless | Python 3, `curl`, `unzip`, and `shasum` or `sha256sum` |
+| Linux desktop | Not yet packaged; use `--headless` for the supported source-install path |
+
+On a typical macOS development machine:
+
+```bash
+xcode-select --install
+brew install python node rust
+```
+
+Then confirm the environment before installing:
+
+```bash
+python3 --version
+npm --version
+cargo --version
+```
+
+The installer deliberately does not invoke Homebrew, apt, or another package
+manager on your behalf. It fails before staging an installation when a required
+tool is missing, and tells you which tool to install. This keeps operating
+system dependency ownership visible and under your control.
+
 From a downloaded/cloned repo:
 
 ```bash

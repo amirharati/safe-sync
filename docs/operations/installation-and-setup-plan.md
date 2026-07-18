@@ -110,9 +110,11 @@ Build-from-source prerequisites are separate from runtime dependencies:
   desktop app when requested.
 - Source-build only: Python, Node, Rust, and platform UI build libraries.
 
-The installer must report missing prerequisites clearly and install them through
-an available supported package manager only with user approval. The later binary
-installer removes Node and Rust from the end-user dependency list.
+The source installer must report missing prerequisites before it stages a
+runtime. It deliberately does not invoke Homebrew, apt, or another package
+manager: users install OS-owned build tools through their normal system
+workflow. The later binary installer removes Node and Rust from the end-user
+dependency list.
 
 ## Dropbox Authorization
 

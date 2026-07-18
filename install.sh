@@ -59,6 +59,21 @@ require_python() {
   }
 }
 
+require_runtime_tools() {
+  command -v curl >/dev/null 2>&1 || {
+    echo "curl is required to download Safe Sync's managed rclone runtime." >&2
+    exit 1
+  }
+  command -v unzip >/dev/null 2>&1 || {
+    echo "unzip is required to unpack Safe Sync's managed rclone runtime." >&2
+    exit 1
+  }
+  if ! command -v shasum >/dev/null 2>&1 && ! command -v sha256sum >/dev/null 2>&1; then
+    echo "A SHA-256 tool (shasum or sha256sum) is required to verify rclone." >&2
+    exit 1
+  fi
+}
+
 stage_runtime() {
   mkdir -p "$RUNTIME_DIR"
   STAGE_DIR=$(mktemp -d "$RUNTIME_DIR/.stage.XXXXXX")
@@ -301,6 +316,10 @@ install_tray_app() {
 }
 
 require_python
+require_runtime_tools
+if [ "$INSTALL_UI" = "1" ]; then
+  require_ui_tools
+fi
 stage_runtime
 trap discard_staged_runtime EXIT INT TERM
 mkdir -p "$CONFIG_DIR"
