@@ -10,6 +10,7 @@ from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
     Lock,
     cmd_daemon,
+    default_config,
     enabled_folders,
     ensure_local_profiles_registered,
     folder_snapshots,
@@ -23,11 +24,13 @@ from safe_sync.cli import (
     copy_cmd,
     restart_backend_if_running,
     restore_last_sync_finish,
+    rclone_env,
     run_command,
     run_backup_with_config,
     selected_folders,
     status_health,
     unsafe_local_path_reason,
+    write_config,
 )
 from safe_sync.api import DaemonApiState
 from safe_sync.path_filter import should_ignore_watch_event
@@ -618,6 +621,39 @@ def test_rclone_bin_uses_common_homebrew_fallback(monkeypatch):
     monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/rclone")
 
     assert rclone_bin({}) == "/opt/homebrew/bin/rclone"
+
+
+def test_rclone_env_uses_dedicated_config_without_touching_global_config(tmp_path):
+    dedicated = tmp_path / "safe-sync-rclone.conf"
+
+    assert rclone_env({"rclone_config": str(dedicated)}) == {
+        **os.environ,
+        "RCLONE_CONFIG": str(dedicated),
+    }
+    assert rclone_env({}) is None
+
+
+def test_default_config_owns_a_dedicated_rclone_config():
+    config = default_config("test-machine")
+
+    assert config["rclone_config"].endswith(".safe-sync/rclone.conf")
+
+
+def test_write_config_preserves_managed_rclone_paths(tmp_path):
+    path = tmp_path / "config.json"
+    config = {
+        "machine_id": "test-machine",
+        "remote_base": "dropbox:computer-backups",
+        "folders": [],
+        "rclone_bin": "/tmp/managed-rclone",
+        "rclone_config": str(tmp_path / "rclone.conf"),
+    }
+
+    write_config(path, config)
+
+    persisted = json.loads(path.read_text())
+    assert persisted["rclone_bin"] == "/tmp/managed-rclone"
+    assert persisted["rclone_config"] == str(tmp_path / "rclone.conf")
 
 
 def test_backend_autostart_status_mac_not_installed(monkeypatch, tmp_path):

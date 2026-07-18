@@ -99,14 +99,17 @@ configuration/state. It never deletes remote Dropbox backups or trash.
 
 ## Dependency Ownership
 
-Safe Sync owns the rclone version it executes. The installer downloads a
-pinned, verified rclone binary for the current macOS/Linux architecture and
-stores it in Safe Sync's runtime directory. The generated config points at that
-binary, so machine-specific PATH order cannot silently change sync behavior.
+Safe Sync owns the rclone version it executes and, for new installations, its
+rclone configuration. The installer downloads a pinned, verified rclone binary
+for the current macOS/Linux architecture and stores it in Safe Sync's runtime
+directory. New configs point rclone at `~/.safe-sync/rclone.conf`, so a new
+machine always performs its own Dropbox authorization instead of inheriting a
+system rclone token.
 
-The installer may detect an existing system rclone only to assist migration; it
-does not depend on it after a successful managed install, and uninstall never
-removes it.
+Existing Safe Sync configurations created before this ownership model retain
+their global rclone config until the user runs `safe-sync rclone config`; that
+explicit command migrates them to the Safe Sync-owned config. Uninstall never
+removes unrelated system rclone configuration.
 
 Build-from-source prerequisites are separate from runtime dependencies:
 
@@ -124,10 +127,11 @@ dependency list.
 
 Setup supports two ownership choices:
 
-1. **Existing rclone remote.** Safe Sync references a remote already present in
-   the user's rclone config. Uninstall does not alter that config or its token.
-2. **Safe Sync-managed remote.** Safe Sync keeps a dedicated rclone config and
-   remote under `~/.safe-sync`. It may be removed only by explicit purge.
+1. **Safe Sync-managed remote (default for new installs).** Safe Sync keeps a
+   dedicated rclone config and remote under `~/.safe-sync`. It may be removed
+   only by explicit purge.
+2. **Legacy global rclone remote.** Older Safe Sync configs may continue using
+   an existing user rclone config until the user explicitly migrates it.
 
 Headless OAuth uses rclone's standard handoff: the server asks for a token,
 the user runs `rclone authorize "dropbox"` on a trusted browser-equipped

@@ -60,8 +60,10 @@ is intentionally deferred.
 ### Prerequisites
 
 Safe Sync installs and pins its own runtime copy of `rclone`; do **not** install
-rclone separately. Source installation does require the following tools before
-you run the installer:
+rclone separately. A new Safe Sync installation also owns its rclone config at
+`~/.safe-sync/rclone.conf`, including its Dropbox token. It never assumes a
+system rclone or a pre-existing Dropbox authorization. Source installation does
+require the following tools before you run the installer:
 
 | Mode | Supported now | Required tools |
 | --- | --- |
@@ -118,9 +120,9 @@ system dependency ownership visible and under your control.
    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
    ```
 
-3. Authorize Dropbox once. In the interactive rclone menu, create a remote
-   named `dropbox`, choose Dropbox as its storage type, and complete its browser
-   sign-in flow:
+3. Authorize Dropbox once. In the interactive Safe Sync-owned rclone config,
+   create a remote named `dropbox`, choose Dropbox as its storage type, and
+   complete its browser sign-in flow:
 
    ```bash
    safe-sync rclone config
@@ -247,7 +249,9 @@ safe-sync setup --remote dropbox:computer-backups --folder ~/work
 
 If the named Dropbox remote does not already exist, run `safe-sync rclone
 config` and then rerun setup. `safe-sync rclone` always invokes the exact
-rclone binary that Safe Sync installed and pinned.
+rclone binary and dedicated config that Safe Sync installed. For a config
+created by an older Safe Sync release, that command also performs the explicit
+one-time migration from the global rclone config to `~/.safe-sync/rclone.conf`.
 
 The installer does the following:
 

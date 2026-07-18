@@ -39,6 +39,7 @@ DEFAULT_STATUS = Path.home() / ".local" / "state" / "safe-sync" / "status.json"
 DEFAULT_SOCKET = Path.home() / ".local" / "state" / "safe-sync" / "daemon.sock"
 DEFAULT_LOG_DIR = Path.home() / ".local" / "log" / "safe-sync"
 DEFAULT_FILTER = CONFIG_HOME / "filter.txt"
+DEFAULT_RCLONE_CONFIG = CONFIG_HOME / "rclone.conf"
 TEMPLATE_FILTER = PROJECT_ROOT / "config" / "filter.txt"
 
 RATE_LIMIT_PATTERNS = ("too_many_requests", "too many requests", "rate limit", "rate_limit", "retry-after")
@@ -156,13 +157,14 @@ def run_command(
     global LAST_COMMAND_OUTPUT
     LAST_COMMAND_OUTPUT = ""
     log = log_path(config)
+    env = rclone_env(config)
     log.parent.mkdir(parents=True, exist_ok=True)
     header = f"\n[{now_iso()}] $ {' '.join(cmd)}\n"
     with log.open("a") as fh:
         fh.write(header)
         fh.flush()
         if progress_callback is None:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
             output = result.stdout or ""
             LAST_COMMAND_OUTPUT = output
             print(output, end="")
@@ -175,6 +177,7 @@ def run_command(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
         lines: list[str] = []
         assert process.stdout is not None
@@ -206,6 +209,18 @@ def rclone_bin(config: dict[str, Any]) -> str:
         if candidate.exists():
             return str(candidate)
     raise SystemExit("rclone not found in PATH")
+
+
+def rclone_env(config: dict[str, Any]) -> dict[str, str] | None:
+    """Return an explicit environment for a Safe Sync-owned rclone config."""
+    configured = config.get("rclone_config")
+    if not configured:
+        # Existing configs predate dedicated rclone ownership. Preserve their
+        # working global configuration until they are explicitly migrated.
+        return None
+    env = os.environ.copy()
+    env["RCLONE_CONFIG"] = str(Path(configured).expanduser())
+    return env
 
 
 def filter_file(config: dict[str, Any]) -> Path:
@@ -385,6 +400,9 @@ def write_config(path: Path, config: dict[str, Any]) -> dict[str, Any]:
     }
     persisted["install_id"] = active_profile["install_id"]
     persisted["folders"] = active_profile["folders"]
+    for key in ("rclone_bin", "rclone_config"):
+        if normalized.get(key):
+            persisted[key] = normalized[key]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(persisted, indent=2, sort_keys=True) + "\n")
     return normalized
@@ -525,7 +543,7 @@ class Lock:
 def preflight(config: dict[str, Any]) -> None:
     remote = config["remote_root"].split(":", 1)[0] + ":"
     cmd = [rclone_bin(config), "about", remote, "--timeout", "20s", "--contimeout", "10s", "--retries", "1", "--low-level-retries", "1"]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45, env=rclone_env(config))
     if result.returncode != 0:
         output = result.stdout or ""
         append_log(config, f"[{now_iso()}] preflight failed:\n{output}\n")
@@ -607,6 +625,7 @@ def default_config(machine: str) -> dict[str, Any]:
             }
         ],
         "filter_file": str(DEFAULT_FILTER),
+        "rclone_config": str(DEFAULT_RCLONE_CONFIG),
         "socket_path": str(DEFAULT_SOCKET),
         "status_path": str(DEFAULT_STATUS),
         "log_dir": str(DEFAULT_LOG_DIR),
@@ -630,6 +649,7 @@ def config_view(config: dict[str, Any], config_path: Path | None = None) -> dict
         "machine_id": normalized["machine_id"],
         "machine_label": normalized["machine_label"],
         "remote_base": normalized["remote_base"],
+        "rclone_config": normalized.get("rclone_config"),
         "socket_path": normalized["socket_path"],
         "poll_interval_seconds": int(normalized["poll_interval_seconds"]),
         "debounce_seconds": int(normalized["debounce_seconds"]),
@@ -772,10 +792,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
         stderr=subprocess.STDOUT,
         text=True,
         check=False,
+        env=rclone_env(updated),
     )
     if remotes.returncode != 0 or remote_name not in remotes.stdout.splitlines():
         raise SystemExit(
-            f"Dropbox remote '{remote_name}' is not configured. Run '{rclone_bin(updated)} config' "
+            f"Dropbox remote '{remote_name}' is not configured. Run 'safe-sync rclone config' "
             "to create it, then rerun 'safe-sync setup'. For a headless server, use "
             "'rclone authorize dropbox' on a browser-equipped machine and paste the token "
             "into rclone's config prompt."
@@ -952,10 +973,15 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_rclone(args: argparse.Namespace) -> int:
     """Run the Safe Sync-managed rclone without exposing its runtime path."""
-    config = load_config(Path(args.config).expanduser())
+    config_path = Path(args.config).expanduser()
+    config = load_config(config_path)
     if not args.rclone_args:
         raise SystemExit("Usage: safe-sync rclone <rclone command>")
-    return subprocess.run([rclone_bin(config), *args.rclone_args], check=False).returncode
+    if args.rclone_args[0] == "config" and not config.get("rclone_config"):
+        config["rclone_config"] = str(DEFAULT_RCLONE_CONFIG)
+        config = write_config(config_path, config)
+        print(f"Safe Sync rclone config: {config['rclone_config']}")
+    return subprocess.run([rclone_bin(config), *args.rclone_args], check=False, env=rclone_env(config)).returncode
 
 
 def parse_status_time(value: Any) -> dt.datetime | None:
@@ -1759,6 +1785,7 @@ def rclone_capture(config: dict[str, Any], cmd: list[str], input_text: str | Non
         stderr=subprocess.STDOUT,
         text=True,
         timeout=180,
+        env=rclone_env(config),
     )
 
 
