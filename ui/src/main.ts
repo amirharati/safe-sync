@@ -106,6 +106,7 @@ let latestConfig: SafeSyncConfig | null = null;
 let latestComputers: Array<Record<string, unknown>> = [];
 let transferSourceRoot = "";
 let transferSource = "";
+let transferSourceIsDirectory = true;
 let lastUiCommand = "";
 
 function text(value: unknown, fallback = "-"): string {
@@ -426,12 +427,26 @@ function joinLocalPath(base: string, subfolder: string): string {
   return subfolder ? `${base.replace(/[\\/]$/, "")}/${subfolder}` : base;
 }
 
+function remoteSourceName(source: string): string {
+  const cleaned = source.replace(/[\\/]+$/, "");
+  const separator = Math.max(cleaned.lastIndexOf("/"), cleaned.lastIndexOf("\\"));
+  return separator >= 0 ? cleaned.slice(separator + 1) : cleaned;
+}
+
 function transferDestination(): string | null {
   if (!transferForm) return null;
   const base = selectedValue(transferForm, "destination_path");
   if (!base) return null;
   const subfolder = cleanSubfolder(selectedValue(transferForm, "destination_subfolder"));
-  return subfolder === null ? null : joinLocalPath(base, subfolder);
+  if (subfolder === null) return null;
+  const parent = joinLocalPath(base, subfolder);
+  // rclone copies a directory's contents. For an arbitrary destination, add its
+  // source name so a remote `assets` folder becomes `Documents/assets`.
+  if (transferSourceIsDirectory && !selectedDestinationFolder()) {
+    const name = remoteSourceName(transferSource);
+    return name ? joinLocalPath(parent, name) : parent;
+  }
+  return parent;
 }
 
 function selectedDestinationFolder(): FolderView | null {
@@ -531,6 +546,7 @@ function renderTransferOptions(): void {
     if (priorFolder && [...sourceFolderSelect.options].some((option) => option.value === priorFolder)) sourceFolderSelect.value = priorFolder;
     transferSourceRoot = sourceFolderSelect.value;
     transferSource = transferSourceRoot;
+    transferSourceIsDirectory = true;
   };
   renderSourceFolders();
   computerSelect.onchange = () => {
@@ -541,6 +557,7 @@ function renderTransferOptions(): void {
   sourceFolderSelect.onchange = () => {
     transferSourceRoot = sourceFolderSelect.value;
     transferSource = transferSourceRoot;
+    transferSourceIsDirectory = true;
     hideTransferBrowser();
     updateTransferCommand();
   };
@@ -1077,11 +1094,13 @@ function selectTransferEntry(button: HTMLElement): void {
   const selected = `${transferSource.replace(/\/+$/, "")}/${entry.replace(/^\/+|\/+$/g, "")}`;
   if (button.dataset.directory === "true") {
     transferSource = selected;
+    transferSourceIsDirectory = true;
     updateTransferCommand();
     void listRemote();
     return;
   }
   transferSource = selected;
+  transferSourceIsDirectory = false;
   updateTransferCommand();
   if (transferSelectedSource) transferSelectedSource.textContent = transferSource;
   setMessage("Remote file selected", "ok");
@@ -1089,6 +1108,7 @@ function selectTransferEntry(button: HTMLElement): void {
 
 function resetTransferSource(): void {
   transferSource = transferSourceRoot;
+  transferSourceIsDirectory = true;
   updateTransferCommand();
   hideTransferBrowser();
   setMessage("Using selected source folder", "ok");
