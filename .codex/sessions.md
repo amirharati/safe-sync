@@ -12,6 +12,7 @@
 - Commits/PRs: pending commit
 - Status: `PYTHONPATH=src python -m pytest tests --rootdir=. -q` passed (46 tests); `npm run build` and `cargo check --manifest-path ui/src-tauri/Cargo.toml` passed. A clean temporary HOME returned `health: setup_required` from `safe-sync status` without creating configuration. Follow-up: the tray quick panel now shows only a clear `Open Setup` action during first-run state; the normal control panel owns Dropbox connection and the native folder picker. It visibly marks Dropbox connected and enables Finish Setup only then.
 - Next steps: Manual desktop click-through with a fresh Safe Sync config, including Dropbox browser consent, then commit and deploy to macOS/Linux test machines. Remote-only purge and explicit remote-profile import/ownership transfer are recorded as roadmap issues `REMOTE-001` and `PROFILE-001`.
+- Additional notes: Simplified headless Dropbox onboarding after a real SSH test exposed rclone's browser-loopback prompt. Added `safe-sync connect-dropbox`: desktop starts default browser authorization; `--headless` skips rclone's provider menu, explicitly asks only for the JSON token produced by `safe-sync rclone authorize dropbox` on a browser-equipped machine, and writes it with `config_is_local=false` so rclone never attempts a local callback. `safe-sync status` is now documented only as a post-setup health check.
 
 ## 2026-07-17 - Source installation and setup foundation
 - Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`

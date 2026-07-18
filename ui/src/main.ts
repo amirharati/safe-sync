@@ -1358,7 +1358,7 @@ async function pickSetupFolder(): Promise<void> {
 async function connectDropbox(): Promise<void> {
   setBusy("dropbox-connect");
   try {
-    showUiCommand(["rclone", "config", "create", "dropbox", "dropbox"]);
+    showUiCommand(["connect-dropbox"]);
     const result = await invoke<CommandResult>("connect_dropbox");
     renderDropboxConnection(true);
     setMessage(result.output || "Dropbox connected. Choose a folder to finish setup.", "ok");

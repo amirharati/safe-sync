@@ -126,7 +126,7 @@ system dependency ownership visible and under your control.
    folder, then click **Finish Setup**. The default remote is
    `dropbox:computer-backups`.
 
-4. Confirm the daemon is healthy:
+4. Confirm the daemon is healthy after setup:
 
    ```bash
    safe-sync status
@@ -189,9 +189,22 @@ cd safe-sync
 ./install.sh --headless
 ```
 
-Then use the Dropbox and `safe-sync setup` commands from the desktop section
-above. Headless installation does not need Node, Rust, GTK, WebKit, or the tray
-app.
+Then connect Dropbox without entering rclone's general configuration menu:
+
+```bash
+safe-sync connect-dropbox --headless
+```
+
+It asks for one token only. On a browser-equipped machine, run
+`safe-sync rclone authorize dropbox`, copy the JSON token it prints, and paste
+it into the headless command. Then choose folders and start the daemon:
+
+```bash
+safe-sync setup --folder ~/projects --folder ~/data
+safe-sync status
+```
+
+Headless installation does not need Node, Rust, GTK, WebKit, or the tray app.
 
 ### UI and CLI Setup
 
@@ -202,10 +215,11 @@ is still explicit: Safe Sync cannot and does not authorize an account without
 the user completing that browser step.
 
 The CLI remains the full setup path and is the required path for headless
-servers:
+servers. It has a defaulted Dropbox connection command, so there is no need to
+work through rclone's remote menu:
 
 ```bash
-safe-sync rclone config
+safe-sync connect-dropbox --headless
 safe-sync setup --remote dropbox:computer-backups --folder ~/projects --folder ~/data
 ```
 

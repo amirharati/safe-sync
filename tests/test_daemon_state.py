@@ -10,6 +10,7 @@ from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
     Lock,
     cmd_daemon,
+    cmd_connect_dropbox,
     default_config,
     enabled_folders,
     ensure_local_profiles_registered,
@@ -89,6 +90,26 @@ def test_status_health_reports_setup_required_before_the_first_folder():
 
     assert health["health"] == "setup_required"
     assert "Choose a folder" in health["reason"]
+
+
+def test_connect_dropbox_headless_skips_rclone_menu(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config = default_config("test-machine")
+    config["rclone_bin"] = "rclone"
+    write_config(config_path, config)
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "listremotes":
+            return subprocess.CompletedProcess(command, 0, "")
+        return subprocess.CompletedProcess(command, 0, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("builtins.input", lambda _prompt: '{"access_token":"test"}')
+
+    assert cmd_connect_dropbox(SimpleNamespace(config=str(config_path), headless=True)) == 0
+    assert commands[-1] == ["rclone", "config", "create", "dropbox", "dropbox", "config_is_local", "false", "token", '{"access_token":"test"}']
 
 
 def test_backup_preflight_rate_limit_sets_backoff_warning(monkeypatch, tmp_path):

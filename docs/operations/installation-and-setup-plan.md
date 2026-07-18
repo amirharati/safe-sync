@@ -74,6 +74,13 @@ The CLI remains the complete and supported setup path, and is required for
 headless servers. Safe Sync owns its rclone configuration under
 `~/.safe-sync/rclone.conf` for new installs.
 
+For CLI setup, `safe-sync connect-dropbox` selects Safe Sync's `dropbox`
+remote and all ordinary rclone defaults. `safe-sync connect-dropbox --headless`
+asks only for the resulting JSON token; it does not show rclone's
+remote/provider menu or create a remote until a token is supplied.
+`safe-sync status` is a post-setup health check, not an installation
+prerequisite.
+
 ### Update
 
 ```bash

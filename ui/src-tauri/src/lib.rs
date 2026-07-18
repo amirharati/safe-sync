@@ -508,21 +508,7 @@ async fn get_config() -> Result<SafeSyncConfigView, String> {
 
 #[tauri::command]
 async fn connect_dropbox() -> Result<CommandResult, String> {
-    let remotes = run_safe_sync_blocking(vec!["rclone".to_string(), "listremotes".to_string()]).await?;
-    if remotes.lines().any(|remote| remote.trim() == "dropbox:") {
-        return Ok(CommandResult {
-            ok: true,
-            output: "Dropbox is already connected to Safe Sync.".to_string(),
-        });
-    }
-
-    let output = run_safe_sync_blocking(vec![
-        "rclone".to_string(),
-        "config".to_string(),
-        "create".to_string(),
-        "dropbox".to_string(),
-        "dropbox".to_string(),
-    ]).await?;
+    let output = run_safe_sync_blocking(vec!["connect-dropbox".to_string()]).await?;
     Ok(CommandResult { ok: true, output })
 }
 

@@ -984,6 +984,41 @@ def cmd_rclone(args: argparse.Namespace) -> int:
     return subprocess.run([rclone_bin(config), *args.rclone_args], check=False, env=rclone_env(config)).returncode
 
 
+def cmd_connect_dropbox(args: argparse.Namespace) -> int:
+    """Create Safe Sync's default Dropbox remote without rclone's broad menu."""
+    config_path = Path(args.config).expanduser()
+    if not config_path.exists():
+        write_config(config_path, default_config(machine_name()))
+    config = normalized_config(load_config(config_path))
+    remote_name = "dropbox"
+    remotes = subprocess.run(
+        [rclone_bin(config), "listremotes"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        env=rclone_env(config),
+    )
+    if remotes.returncode != 0:
+        print(remotes.stdout or "", end="")
+        return int(remotes.returncode)
+    if f"{remote_name}:" in remotes.stdout.splitlines():
+        print("Dropbox is already connected to Safe Sync.")
+        return 0
+
+    command = [rclone_bin(config), "config", "create", remote_name, "dropbox"]
+    if args.headless:
+        print("Headless Dropbox authorization")
+        print("On a browser-equipped machine, run: safe-sync rclone authorize dropbox")
+        token = input("Paste the resulting Dropbox token here: ").strip()
+        if not token:
+            raise SystemExit("Dropbox token is required; no remote was created.")
+        command.extend(["config_is_local", "false", "token", token])
+    else:
+        print("Opening Dropbox authorization in your browser...")
+    return subprocess.run(command, check=False, env=rclone_env(config)).returncode
+
+
 def parse_status_time(value: Any) -> dt.datetime | None:
     if not isinstance(value, str):
         return None
@@ -1870,7 +1905,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{setup,backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,rclone,doctor}",
+        metavar="{setup,connect-dropbox,backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,rclone,doctor}",
     )
 
     init = sub.add_parser("init-config")
@@ -1885,6 +1920,10 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument("--skip-remote-check", action="store_true", help=argparse.SUPPRESS)
     setup.add_argument("--skip-start", action="store_true", help=argparse.SUPPRESS)
     setup.set_defaults(func=cmd_setup)
+
+    connect_dropbox = sub.add_parser("connect-dropbox", help="Connect the default Safe Sync Dropbox remote")
+    connect_dropbox.add_argument("--headless", action="store_true", help="Request a browser-machine token instead of opening a local browser")
+    connect_dropbox.set_defaults(func=cmd_connect_dropbox)
 
     migrate = sub.add_parser("migrate-config")
     migrate.add_argument("--from-path", default=str(LEGACY_CONFIG))
