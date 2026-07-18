@@ -927,6 +927,9 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let status = MenuItem::with_id(app, "status", "Safe Sync: Checking", false, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Open Control Panel", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "backend-toggle", "Start Backend", true, None::<&str>)?;

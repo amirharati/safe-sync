@@ -260,6 +260,16 @@ build_tray_app() {
   )
 }
 
+stop_tray_app() {
+  case "$(uname -s)" in
+    Darwin)
+      # The LaunchAgent owns /usr/bin/open, not the app process itself. Stop the
+      # previous bundle before replacing it so an update cannot leave it alive.
+      pkill -x safe-sync-ui 2>/dev/null || true
+      ;;
+  esac
+}
+
 install_tray_launch_agent() {
   mkdir -p "$HOME/Library/LaunchAgents"
   cat > "$TRAY_PLIST" <<EOF
@@ -308,6 +318,7 @@ install_tray_app() {
     exit 1
   fi
 
+  stop_tray_app
   mkdir -p "$APP_INSTALL_DIR"
   rm -rf "$APP_TARGET"
   cp -R "$APP_SOURCE" "$APP_TARGET"
