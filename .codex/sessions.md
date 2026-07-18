@@ -1,5 +1,18 @@
 # Codex Sessions
 
+## 2026-07-17 - Desktop first-run onboarding
+- Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`
+- Parent Session ID: none
+- Task title: `Troubleshoot bisync retry loop`
+- Surface: Codex Desktop
+- Project path: `/Users/amir/projects/safe-sync`
+- Original cwd: `/Users/amir/Documents/Codex/2026-07-12/g-bisync-2026-07-12-18`
+- Resume: `codex resume 019f5868-30d4-7802-99fb-f649205f4a67`
+- Summary: Replaced misleading first-run stale status with an explicit `setup_required` health state. `safe-sync status` now returns structured setup state even when no config file exists. The Tauri control panel now offers desktop onboarding: connect the Safe Sync-owned Dropbox remote through the normal browser authorization, choose a first local folder with the native picker, and finish setup through the existing verified `safe-sync setup --folder ...` path. Tray labels and backup controls recognize setup state. README and installation plan now document desktop-guided setup and retain CLI setup for headless servers.
+- Commits/PRs: pending commit
+- Status: `PYTHONPATH=src python -m pytest tests --rootdir=. -q` passed (46 tests); `npm run build` and `cargo check --manifest-path ui/src-tauri/Cargo.toml` passed. A clean temporary HOME returned `health: setup_required` from `safe-sync status` without creating configuration. Follow-up: the tray quick panel now shows only a clear `Open Setup` action during first-run state; the normal control panel owns Dropbox connection and the native folder picker. It visibly marks Dropbox connected and enables Finish Setup only then.
+- Next steps: Manual desktop click-through with a fresh Safe Sync config, including Dropbox browser consent, then commit and deploy to macOS/Linux test machines. Remote-only purge and explicit remote-profile import/ownership transfer are recorded as roadmap issues `REMOTE-001` and `PROFILE-001`.
+
 ## 2026-07-17 - Source installation and setup foundation
 - Session ID: `019f5868-30d4-7802-99fb-f649205f4a67`
 - Parent Session ID: none

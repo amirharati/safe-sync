@@ -120,19 +120,15 @@ system dependency ownership visible and under your control.
    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
    ```
 
-3. Authorize Dropbox once. In the interactive Safe Sync-owned rclone config,
-   create a remote named `dropbox`, choose Dropbox as its storage type, and
-   complete its browser sign-in flow:
+3. Open **Safe Sync** from Applications or its tray icon. On a new install it
+   shows **Setup required** instead of a misleading service error. Click
+   **Connect Dropbox**, approve the browser sign-in, choose the first local
+   folder, then click **Finish Setup**. The default remote is
+   `dropbox:computer-backups`.
+
+4. Confirm the daemon is healthy:
 
    ```bash
-   safe-sync rclone config
-   ```
-
-4. Choose only the local folders this computer should back up, then verify and
-   start the daemon:
-
-   ```bash
-   safe-sync setup --remote dropbox:computer-backups --folder ~/projects --folder ~/data
    safe-sync status
    ```
 
@@ -169,17 +165,10 @@ system dependency ownership visible and under your control.
    The installer adds `~/.local/bin` to your Bash or Zsh startup file when it
    is missing. Open a new terminal after installation; no manual edit is needed.
 
-4. Configure Dropbox and the folders to back up:
-
-   ```bash
-   safe-sync rclone config
-   safe-sync setup --remote dropbox:computer-backups --folder ~/projects --folder ~/data
-   safe-sync status
-   ```
-
-   For a server without a browser, run `safe-sync rclone authorize dropbox` on
-   a trusted machine with a browser, then follow rclone's token handoff during
-   the server's `safe-sync rclone config` flow.
+4. Open **Safe Sync** from Applications or the tray and complete the guided
+   setup: connect Dropbox, choose a local folder, and finish setup. Then run
+   `safe-sync status` to confirm the daemon is healthy. For a server without a
+   browser, use the headless handoff below.
 
 5. A Linux user service normally runs while you are logged in. For an
    always-on server, ask an administrator or run:
@@ -206,11 +195,19 @@ app.
 
 ### UI and CLI Setup
 
-The **first** setup is currently CLI-led because Dropbox authorization is an
-rclone interaction. After `safe-sync setup` succeeds, the macOS tray/control
-panel can manage settings, profiles, watched folders, backup requests, and
-selective transfers. A guided UI onboarding flow is planned; it is not yet a
-replacement for the CLI commands above.
+Desktop installs provide guided setup in the Safe Sync control panel. It uses
+the default remote `dropbox:computer-backups`, starts the normal Dropbox
+browser authorization, and asks for the first local folder. Dropbox approval
+is still explicit: Safe Sync cannot and does not authorize an account without
+the user completing that browser step.
+
+The CLI remains the full setup path and is the required path for headless
+servers:
+
+```bash
+safe-sync rclone config
+safe-sync setup --remote dropbox:computer-backups --folder ~/projects --folder ~/data
+```
 
 From a downloaded/cloned repo:
 

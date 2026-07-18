@@ -10,6 +10,30 @@ before release packages or Windows support.
 
 ## Open Issues
 
+### REMOTE-001: Optional remote backup purge
+
+**Priority:** after real two-machine install testing.
+
+Provide an explicit, deliberately-confirmed way to remove Safe Sync's Dropbox
+copy of a selected profile or folder without touching any local files. This
+must be available from both CLI and control panel, show the exact remote paths
+to be removed (including associated remote trash/registry data), require an
+unambiguous confirmation, and never be part of ordinary uninstall or local
+purge. The UI may offer this alongside local cleanup, but they must remain
+separate choices.
+
+### PROFILE-001: Import a remote profile onto a new computer
+
+**Priority:** after real two-machine install testing.
+
+Allow a user to intentionally import a registered remote profile when moving a
+workspace to a new computer. Import must be an explicit ownership-transfer
+operation: inspect the remote profile and its folders first, select new local
+paths, create a new local identity by default, and never activate an imported
+profile automatically. Document that one profile must not be actively used by
+two machines at the same time. Later work may detect concurrent ownership, but
+must not rely on that detection for safety.
+
 ### MAC-001: Installed tray app still appears in the Dock/taskbar
 
 **Priority:** polish; defer until after real two-machine installation testing.

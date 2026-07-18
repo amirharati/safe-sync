@@ -20,6 +20,7 @@ type SafeSyncConfig = {
   machine_id: string | null;
   machine_label: string | null;
   remote_base: string | null;
+  rclone_config: string | null;
   poll_interval_seconds: number;
   debounce_seconds: number;
   min_interval_seconds: number;
@@ -30,6 +31,7 @@ type SafeSyncConfig = {
 };
 
 type CommandResult = { ok: boolean; output: string };
+type DropboxConnection = { connected: boolean; output: string };
 type LocalFolderPreview = {
   path: string;
   exists: boolean;
@@ -106,6 +108,11 @@ const previewDestinationList = document.querySelector<HTMLElement>("[data-previe
 const transferSelection = document.querySelector<HTMLElement>("[data-transfer-selection]");
 const transferSelectionList = document.querySelector<HTMLElement>("[data-transfer-selection-list]");
 const lastCommand = document.querySelector<HTMLElement>("[data-last-command]");
+const setupPanel = document.querySelector<HTMLElement>("[data-setup-panel]");
+const setupForm = document.querySelector<HTMLFormElement>("[data-setup-form]");
+const dropboxConnectionLabel = document.querySelector<HTMLElement>("[data-dropbox-connection]");
+const connectDropboxButton = document.querySelector<HTMLButtonElement>("[data-action='connect-dropbox']");
+const completeSetupButton = document.querySelector<HTMLButtonElement>("[data-action='complete-setup']");
 
 let latestStatus: SafeSyncStatus | null = null;
 let busyAction: string | null = null;
@@ -122,6 +129,8 @@ let transferSource = "";
 let transferSourceIsDirectory = true;
 const selectedTransferPaths = new Set<string>();
 let lastUiCommand = "";
+let dropboxConnectionKnown = false;
+let dropboxConnected = false;
 
 function text(value: unknown, fallback = "-"): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
@@ -134,11 +143,38 @@ function setMessage(value: string, tone = "neutral"): void {
   }
 }
 
+function renderDropboxConnection(connected: boolean): void {
+  dropboxConnectionKnown = true;
+  dropboxConnected = connected;
+  if (dropboxConnectionLabel) {
+    dropboxConnectionLabel.textContent = connected ? "Dropbox connected" : "Connect Dropbox before finishing setup";
+    dropboxConnectionLabel.dataset.connected = String(connected);
+  }
+  if (connectDropboxButton) {
+    connectDropboxButton.textContent = connected ? "Dropbox Connected" : "Connect Dropbox";
+    connectDropboxButton.disabled = connected;
+  }
+  if (completeSetupButton) completeSetupButton.disabled = !connected;
+}
+
+async function refreshDropboxConnection(): Promise<void> {
+  try {
+    const connection = await invoke<DropboxConnection>("get_dropbox_connection");
+    renderDropboxConnection(connection.connected);
+  } catch (error) {
+    if (dropboxConnectionLabel) {
+      dropboxConnectionLabel.textContent = `Dropbox check failed: ${String(error)}`;
+      dropboxConnectionLabel.dataset.connected = "false";
+    }
+  }
+}
+
 function syncState(status: SafeSyncStatus): string {
   return text(status.sync_state?.state);
 }
 
 function tone(status: SafeSyncStatus): string {
+  if (status.health === "setup_required") return "warning";
   if (status.health === "error") return "error";
   if (status.health === "warning") return "warning";
   if (status.service_state === "stopped") return "stopped";
@@ -149,6 +185,7 @@ function tone(status: SafeSyncStatus): string {
 }
 
 function headline(status: SafeSyncStatus): string {
+  if (status.health === "setup_required") return "Setup required";
   if (status.health === "error") return "Needs attention";
   if (status.health === "warning") return syncState(status) === "backoff" ? "Waiting" : "Warning";
   if (status.service_state === "stopped") return "Stopped";
@@ -221,6 +258,9 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (action === "close-quick") return "close";
   if (action === "quit-tray") return "quit";
   if (action === "settings") return "settings";
+  if (action === "connect-dropbox") return "dropbox-connect";
+  if (action === "complete-setup") return "setup";
+  if (action === "pick-setup-folder") return "setup-picker";
   if (action === "reload-config") return "config";
   if (action === "pick-folder") return "folder-picker";
   if (action === "pick-transfer-destination") return "transfer-picker";
@@ -263,11 +303,13 @@ function setBusy(action: string | null): void {
   if (refreshButton) refreshButton.disabled = action === "refresh" || isHeld("refresh");
   if (toggleButton) toggleButton.disabled = action === "backend" || isHeld("backend") || latestStatus?.service_state === "unknown";
   if (backupButton) {
-    backupButton.disabled = action === "backup" || isHeld("backup") || latestStatus?.service_state !== "running";
+    backupButton.disabled = action === "backup" || isHeld("backup") || latestStatus?.service_state !== "running" || latestStatus?.health === "setup_required";
     backupButton.textContent = action === "backup" ? "Backing Up" : "Backup Now";
     backupButton.title = latestStatus?.service_state === "running" ? "" : "Start the backend before running Backup Now";
   }
   if (logsButton) logsButton.disabled = action === "logs" || isHeld("logs") || !hasLog(latestStatus);
+  if (connectDropboxButton && dropboxConnected) connectDropboxButton.disabled = true;
+  if (completeSetupButton) completeSetupButton.disabled = action === "setup" || isHeld("setup") || !dropboxConnected;
 }
 
 function renderStatus(status: SafeSyncStatus): void {
@@ -285,6 +327,8 @@ function renderStatus(status: SafeSyncStatus): void {
     stateLabel.dataset.health = currentTone;
   }
   if (reasonLabel) reasonLabel.textContent = text(status.health_reason);
+  if (setupPanel) setupPanel.hidden = status.health !== "setup_required";
+  if (status.health === "setup_required" && !dropboxConnectionKnown) void refreshDropboxConnection();
   if (serviceLabel) {
     serviceLabel.textContent = text(status.service_state);
     serviceLabel.dataset.value = status.service_state;
@@ -318,7 +362,7 @@ function renderStatus(status: SafeSyncStatus): void {
     : IDLE_REFRESH_MS;
   if (refreshLabel) refreshLabel.textContent = `Auto refresh every ${refreshMs / 1000}s`;
   if (toggleButton) {
-    toggleButton.textContent = action === "stop" ? "Stop Backend" : "Start Backend";
+    toggleButton.textContent = status.health === "setup_required" ? "Complete Setup" : action === "stop" ? "Stop Backend" : "Start Backend";
     toggleButton.dataset.intent = action;
   }
   setBusy(busyAction);
@@ -1273,12 +1317,70 @@ function scheduleStatusRefresh(): void {
 
 async function toggleBackend(): Promise<void> {
   if (!latestStatus) await refreshStatus();
+  if (latestStatus?.health === "setup_required") {
+    if (IS_QUICK_PANEL) {
+      await openControlPanel();
+    } else {
+      activateTab("status");
+      setupPanel?.querySelector<HTMLInputElement>("input")?.focus();
+    }
+    return;
+  }
   const action = latestStatus ? desiredAction(latestStatus) : "start";
   setBusy("backend");
   try {
     showUiCommand([action]);
     renderStatus(await invoke<SafeSyncStatus>("control_backend", { action }));
     holdAction("backend");
+  } catch (error) {
+    renderError(error);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function pickSetupFolder(): Promise<void> {
+  if (!setupForm) return;
+  setBusy("setup-picker");
+  try {
+    const selected = await open({ directory: true, multiple: false, title: "Choose a folder to back up" });
+    if (typeof selected === "string") {
+      const input = setupForm.elements.namedItem("local_path") as HTMLInputElement | null;
+      if (input) input.value = selected;
+    }
+  } catch (error) {
+    renderError(error);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function connectDropbox(): Promise<void> {
+  setBusy("dropbox-connect");
+  try {
+    showUiCommand(["rclone", "config", "create", "dropbox", "dropbox"]);
+    const result = await invoke<CommandResult>("connect_dropbox");
+    renderDropboxConnection(true);
+    setMessage(result.output || "Dropbox connected. Choose a folder to finish setup.", "ok");
+    holdAction("dropbox-connect");
+  } catch (error) {
+    renderError(error);
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function completeSetup(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  if (!setupForm) return;
+  const folder = inputValue(setupForm, "local_path");
+  setBusy("setup");
+  try {
+    showUiCommand(["setup", "--folder", folder]);
+    renderConfig(await invoke<SafeSyncConfig>("complete_setup", { request: { folder } }));
+    renderStatus(await invoke<SafeSyncStatus>("get_status"));
+    setMessage("Setup complete. Safe Sync is watching your folder.", "ok");
+    holdAction("setup");
   } catch (error) {
     renderError(error);
   } finally {
@@ -1360,6 +1462,9 @@ window.addEventListener("DOMContentLoaded", () => {
   addProfileForm?.addEventListener("submit", (event) => void addProfile(event));
   addFolderForm?.addEventListener("submit", (event) => void addFolder(event));
   document.querySelector("[data-action='pick-folder']")?.addEventListener("click", () => void pickFolder());
+  document.querySelector("[data-action='pick-setup-folder']")?.addEventListener("click", () => void pickSetupFolder());
+  document.querySelector("[data-action='connect-dropbox']")?.addEventListener("click", () => void connectDropbox());
+  setupForm?.addEventListener("submit", (event) => void completeSetup(event));
   document.querySelector("[data-action='pick-transfer-destination']")?.addEventListener("click", () => void pickTransferDestination());
   document.querySelector("[data-action='preview-transfer']")?.addEventListener("click", () => void previewTransferContents());
   folderList?.addEventListener("click", (event) => {

@@ -38,6 +38,7 @@ struct SafeSyncConfigView {
     machine_id: Option<String>,
     machine_label: Option<String>,
     remote_base: Option<String>,
+    rclone_config: Option<String>,
     poll_interval_seconds: u64,
     debounce_seconds: u64,
     min_interval_seconds: u64,
@@ -92,9 +93,20 @@ struct ActivateProfileRequest {
     id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CompleteSetupRequest {
+    folder: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CommandResult {
     ok: bool,
+    output: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DropboxConnection {
+    connected: bool,
     output: String,
 }
 
@@ -356,6 +368,9 @@ fn should_stop_backend(status: &SafeSyncStatus) -> bool {
 }
 
 fn toggle_label(status: &SafeSyncStatus) -> &'static str {
+    if status.health == "setup_required" {
+        return "Complete Setup";
+    }
     if should_stop_backend(status) {
         "Stop Backend"
     } else {
@@ -364,6 +379,9 @@ fn toggle_label(status: &SafeSyncStatus) -> &'static str {
 }
 
 fn status_label(status: &SafeSyncStatus) -> String {
+    if status.health == "setup_required" {
+        return "Safe Sync: Setup required".to_string();
+    }
     if status.health == "error" {
         return "Safe Sync: Error".to_string();
     }
@@ -405,7 +423,7 @@ fn update_items(
     let _ = toggle_item.set_text(toggle_label(status));
     let known = status.service_state != "unknown";
     let _ = toggle_item.set_enabled(known);
-    let _ = backup_item.set_enabled(status.service_state == "running");
+    let _ = backup_item.set_enabled(status.service_state == "running" && status.health != "setup_required");
     let _ = logs_item.set_enabled(status.log.as_ref().is_some_and(|path| !path.is_empty()));
 }
 
@@ -486,6 +504,47 @@ fn expand_home_path(path: &str) -> PathBuf {
 async fn get_config() -> Result<SafeSyncConfigView, String> {
     let stdout = run_safe_sync_blocking(vec!["config".to_string(), "show".to_string()]).await?;
     serde_json::from_str(&stdout).map_err(|err| format!("safe-sync config show returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn connect_dropbox() -> Result<CommandResult, String> {
+    let remotes = run_safe_sync_blocking(vec!["rclone".to_string(), "listremotes".to_string()]).await?;
+    if remotes.lines().any(|remote| remote.trim() == "dropbox:") {
+        return Ok(CommandResult {
+            ok: true,
+            output: "Dropbox is already connected to Safe Sync.".to_string(),
+        });
+    }
+
+    let output = run_safe_sync_blocking(vec![
+        "rclone".to_string(),
+        "config".to_string(),
+        "create".to_string(),
+        "dropbox".to_string(),
+        "dropbox".to_string(),
+    ]).await?;
+    Ok(CommandResult { ok: true, output })
+}
+
+#[tauri::command]
+async fn get_dropbox_connection() -> Result<DropboxConnection, String> {
+    let output = run_safe_sync_blocking(vec!["rclone".to_string(), "listremotes".to_string()]).await?;
+    Ok(DropboxConnection {
+        connected: output.lines().any(|remote| remote.trim() == "dropbox:"),
+        output,
+    })
+}
+
+#[tauri::command]
+async fn complete_setup(request: CompleteSetupRequest, app: AppHandle<Wry>) -> Result<SafeSyncConfigView, String> {
+    let folder = request.folder.trim();
+    if folder.is_empty() {
+        return Err("Choose a folder to back up".to_string());
+    }
+    run_safe_sync_blocking(vec!["setup".to_string(), "--folder".to_string(), folder.to_string()]).await?;
+    let status = read_status_with_self_heal(&app).await;
+    update_menu_state_from_app(&app, &status);
+    get_config().await
 }
 
 #[tauri::command]
@@ -909,6 +968,9 @@ pub fn run() {
             close_quick_panel,
             quit_tray,
             get_config,
+            connect_dropbox,
+            get_dropbox_connection,
+            complete_setup,
             save_settings,
             add_folder,
             update_folder,

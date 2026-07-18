@@ -64,13 +64,15 @@ Setup is separate from installation and may be resumed safely. It must:
 7. Register the profile remotely.
 8. Start the daemon and verify a fresh `safe-sync status` response.
 
-Desktop setup may offer to open the installed control panel after CLI setup is
-complete. The CLI remains the complete and supported setup path.
+Desktop setup is guided from the installed control panel: it begins Dropbox
+authorization using the default `dropbox:computer-backups` remote, asks for a
+first local folder, runs the same `safe-sync setup --folder ...` verification,
+and starts the daemon. It must display `Setup required` before completion, not
+`stale` or an error caused by a missing heartbeat.
 
-Current implementation: setup accepts an existing rclone remote and invokes
-the Safe Sync-managed rclone through `safe-sync rclone config`. A dedicated
-Safe Sync-owned rclone config and full guided UI onboarding are planned follow
-up work.
+The CLI remains the complete and supported setup path, and is required for
+headless servers. Safe Sync owns its rclone configuration under
+`~/.safe-sync/rclone.conf` for new installs.
 
 ### Update
 

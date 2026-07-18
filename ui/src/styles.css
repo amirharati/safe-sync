@@ -277,6 +277,60 @@ dd[data-value="stopped"] { color: #9a6400; }
   padding-top: 12px;
 }
 
+.setup-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 14px;
+  border: 1px solid #e4c57b;
+  border-left: 4px solid #b87900;
+  border-radius: 6px;
+  background: #fffaf0;
+}
+
+.setup-panel p {
+  margin: 4px 0 0;
+  color: #5f6b7a;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.setup-actions,
+.setup-folder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+
+.setup-connection {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.setup-connection span {
+  color: #697585;
+  font-size: 12px;
+}
+
+.setup-connection span[data-connected="true"] {
+  color: #23714a;
+  font-weight: 650;
+}
+
+.quick-setup-open {
+  display: none;
+}
+
+.setup-folder {
+  flex: 1 1 420px;
+}
+
+.setup-folder .path-picker {
+  flex: 1 1 260px;
+}
+
 .activity-head {
   margin-bottom: 10px;
 }
@@ -742,6 +796,36 @@ button.danger:hover:not(:disabled) {
 :root[data-panel="quick"] [data-view="computers"],
 :root[data-panel="quick"] [data-view="transfer"],
 :root[data-panel="quick"] .refresh-note {
+  display: none;
+}
+
+:root[data-panel="quick"] .setup-panel {
+  display: grid;
+  margin: 14px 0 0;
+  padding: 12px;
+}
+
+:root[data-panel="quick"] .setup-panel h2 {
+  font-size: 14px;
+}
+
+:root[data-panel="quick"] .setup-panel p {
+  font-size: 12px;
+}
+
+:root[data-panel="quick"] .setup-actions {
+  display: none;
+}
+
+:root[data-panel="quick"] .quick-setup-open {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+}
+
+:root[data-panel="quick"] .setup-panel ~ .facts,
+:root[data-panel="quick"] .setup-panel ~ .actions,
+:root[data-panel="quick"] .setup-panel ~ .activity-panel {
   display: none;
 }
 

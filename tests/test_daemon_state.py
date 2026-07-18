@@ -84,6 +84,13 @@ def test_status_health_reports_rate_limit_as_warning():
     assert "rate limited" in health["reason"]
 
 
+def test_status_health_reports_setup_required_before_the_first_folder():
+    health = status_health(default_config("test-machine"), "running", {"state": "unknown"})
+
+    assert health["health"] == "setup_required"
+    assert "Choose a folder" in health["reason"]
+
+
 def test_backup_preflight_rate_limit_sets_backoff_warning(monkeypatch, tmp_path):
     local = tmp_path / "local"
     local.mkdir()

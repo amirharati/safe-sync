@@ -1010,6 +1010,9 @@ def status_health(config: dict[str, Any], service_state: str, sync_state: dict[s
     elif last_warning:
         health = "warning"
         reason = str(last_warning)
+    elif not enabled_folders(config):
+        health = "setup_required"
+        reason = "Choose a folder and connect Dropbox to finish setup"
     elif service_state == "stopped":
         health = "stopped"
         reason = "daemon service is stopped"
@@ -1034,7 +1037,18 @@ def status_health(config: dict[str, Any], service_state: str, sync_state: dict[s
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    config = normalized_config(load_config(Path(args.config).expanduser()))
+    config_path = Path(args.config).expanduser()
+    if not config_path.exists():
+        print(json.dumps({
+            "daemon_seen_at": None,
+            "health": "setup_required",
+            "health_reason": "Safe Sync has not been configured yet",
+            "log": None,
+            "service_state": "not configured",
+            "sync_state": {"state": "setup_required"},
+        }, indent=2, sort_keys=True))
+        return 0
+    config = normalized_config(load_config(config_path))
     try:
         response = daemon_api(config, "status")
         if not response.get("ok"):

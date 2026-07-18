@@ -42,6 +42,23 @@
         </section>
 
         <section class="view is-active" data-view="status">
+          <section class="setup-panel" data-setup-panel hidden>
+            <div>
+              <h2>Finish setup</h2>
+              <p>Connect your Dropbox account, then choose the first folder you want Safe Sync to back up.</p>
+            </div>
+            <button type="button" class="primary quick-setup-open" data-action="open-control-panel">Open Setup</button>
+            <div class="setup-actions">
+              <div class="setup-connection">
+                <button type="button" class="secondary" data-action="connect-dropbox">Connect Dropbox</button>
+                <span data-dropbox-connection>Checking Dropbox connection</span>
+              </div>
+              <form class="setup-folder" data-setup-form>
+                <span class="path-picker"><input name="local_path" placeholder="Choose a folder" /><button type="button" class="secondary" data-action="pick-setup-folder">Browse...</button></span>
+                <button type="submit" class="primary" data-action="complete-setup" disabled>Finish Setup</button>
+              </form>
+            </div>
+          </section>
           <dl class="facts">
             <div>
               <dt>Backend</dt>
