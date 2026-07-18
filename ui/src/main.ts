@@ -30,6 +30,12 @@ type SafeSyncConfig = {
 };
 
 type CommandResult = { ok: boolean; output: string };
+type LocalFolderPreview = {
+  path: string;
+  exists: boolean;
+  entries: string[];
+  truncated: boolean;
+};
 
 type FolderView = Record<string, unknown> & { id?: string; label?: string; local_path?: string; remote_root?: string; enabled?: boolean };
 type ProfileView = Record<string, unknown> & {
@@ -92,6 +98,11 @@ const transferCommand = document.querySelector<HTMLElement>("[data-transfer-comm
 const transferLiveState = document.querySelector<HTMLElement>("[data-transfer-live-state]");
 const transferLiveSummary = document.querySelector<HTMLElement>("[data-transfer-live-summary]");
 const transferActivityList = document.querySelector<HTMLElement>("[data-transfer-activity-list]");
+const transferPreview = document.querySelector<HTMLElement>("[data-transfer-preview]");
+const previewSourcePath = document.querySelector<HTMLElement>("[data-preview-source-path]");
+const previewSourceList = document.querySelector<HTMLElement>("[data-preview-source-list]");
+const previewDestinationPath = document.querySelector<HTMLElement>("[data-preview-destination-path]");
+const previewDestinationList = document.querySelector<HTMLElement>("[data-preview-destination-list]");
 const lastCommand = document.querySelector<HTMLElement>("[data-last-command]");
 
 let latestStatus: SafeSyncStatus | null = null;
@@ -217,6 +228,7 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (action === "remove-folder") return "folder";
   if (action === "load-computers") return "computers";
   if (action === "list-remote") return "transfer";
+  if (action === "preview-transfer") return "transfer-preview";
   if (action === "run-transfer") return "transfer";
   if (action === "refresh-transfer") return "transfer";
   return action ?? null;
@@ -1025,6 +1037,59 @@ async function listRemote(): Promise<void> {
   }
 }
 
+function renderPreviewList(target: HTMLElement | null, entries: string[], emptyMessage: string, truncated = false): void {
+  if (!target) return;
+  target.innerHTML = "";
+  const lines = entries.length > 0 ? entries : [emptyMessage];
+  for (const line of lines) {
+    const item = document.createElement("li");
+    item.textContent = line;
+    target.append(item);
+  }
+  if (truncated) {
+    const item = document.createElement("li");
+    item.textContent = "... showing the first 200 entries";
+    target.append(item);
+  }
+}
+
+async function previewTransferContents(): Promise<void> {
+  const destination = transferDestination();
+  if (!transferSource || !destination) {
+    setMessage("Choose a source and destination first", "error");
+    return;
+  }
+  setBusy("transfer-preview");
+  try {
+    showUiCommand(["list", transferSource, "--depth", "1"]);
+    const [remote, local] = await Promise.all([
+      invoke<CommandResult>("list_remote", { target: transferSource, depth: 1 }),
+      invoke<LocalFolderPreview>("list_local_folder", { path: destination }),
+    ]);
+    if (previewSourcePath) previewSourcePath.textContent = transferSource;
+    if (previewDestinationPath) previewDestinationPath.textContent = local.path;
+    renderPreviewList(
+      previewSourceList,
+      remote.output.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 200),
+      "No entries found in the selected remote source.",
+      remote.output.split("\n").filter(Boolean).length > 200,
+    );
+    renderPreviewList(
+      previewDestinationList,
+      local.entries,
+      local.exists ? "This folder is empty." : "This folder will be created by the transfer.",
+      local.truncated,
+    );
+    if (transferPreview) transferPreview.hidden = false;
+    setMessage("Source and destination previewed", "ok");
+    holdAction("transfer-preview");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
 async function pullRemote(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (!transferForm || !transferOutput) return;
@@ -1241,6 +1306,7 @@ window.addEventListener("DOMContentLoaded", () => {
   addFolderForm?.addEventListener("submit", (event) => void addFolder(event));
   document.querySelector("[data-action='pick-folder']")?.addEventListener("click", () => void pickFolder());
   document.querySelector("[data-action='pick-transfer-destination']")?.addEventListener("click", () => void pickTransferDestination());
+  document.querySelector("[data-action='preview-transfer']")?.addEventListener("click", () => void previewTransferContents());
   folderList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "save-folder") void saveFolder(target);

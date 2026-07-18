@@ -98,6 +98,14 @@ struct CommandResult {
     output: String,
 }
 
+#[derive(Debug, Serialize)]
+struct LocalFolderPreview {
+    path: String,
+    exists: bool,
+    entries: Vec<String>,
+    truncated: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenDropboxRequest {
     #[serde(alias = "remoteRoot")]
@@ -624,6 +632,43 @@ async fn list_remote(target: String, depth: u64) -> Result<CommandResult, String
 }
 
 #[tauri::command]
+fn list_local_folder(path: String) -> Result<LocalFolderPreview, String> {
+    let target = expand_home_path(&path);
+    if !target.exists() {
+        return Ok(LocalFolderPreview {
+            path: target.to_string_lossy().into_owned(),
+            exists: false,
+            entries: Vec::new(),
+            truncated: false,
+        });
+    }
+    if !target.is_dir() {
+        return Err(format!("local path is not a folder: {}", target.display()));
+    }
+
+    let mut entries = std::fs::read_dir(&target)
+        .map_err(|err| format!("cannot read local folder {}: {err}", target.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                name.push('/');
+            }
+            name
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.to_lowercase());
+    let truncated = entries.len() > 200;
+    entries.truncate(200);
+    Ok(LocalFolderPreview {
+        path: target.to_string_lossy().into_owned(),
+        exists: true,
+        entries,
+        truncated,
+    })
+}
+
+#[tauri::command]
 async fn pull_remote(source: String, destination: String, dry_run: bool) -> Result<CommandResult, String> {
     if source.trim().is_empty() || destination.trim().is_empty() {
         return Err("source and destination are required".to_string());
@@ -869,6 +914,7 @@ pub fn run() {
             activate_profile,
             get_computers,
             list_remote,
+            list_local_folder,
             pull_remote
         ])
         .on_window_event(|window, event| {

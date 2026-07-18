@@ -181,6 +181,7 @@
             </div>
             <div class="actions left">
               <button type="button" class="secondary" data-action="list-remote">Browse Source</button>
+              <button type="button" class="secondary" data-action="preview-transfer">Preview Contents</button>
               <button type="submit" class="primary" data-action="run-transfer">Run Dry Run</button>
             </div>
           </form>
@@ -190,6 +191,23 @@
             <button type="button" class="secondary" data-action="open-destination-local">Open Destination Locally</button>
             <button type="button" class="secondary" data-action="open-destination-dropbox">Open Destination in Dropbox</button>
           </div>
+          <section class="transfer-preview" data-transfer-preview hidden>
+            <div class="section-title">
+              <h2>Folder Preview</h2>
+            </div>
+            <div class="transfer-preview-grid">
+              <section class="preview-column">
+                <h3>Remote Source</h3>
+                <p class="path" data-preview-source-path></p>
+                <ul class="preview-list" data-preview-source-list></ul>
+              </section>
+              <section class="preview-column">
+                <h3>Local Destination</h3>
+                <p class="path" data-preview-destination-path></p>
+                <ul class="preview-list" data-preview-destination-list></ul>
+              </section>
+            </div>
+          </section>
           <section class="transfer-activity" aria-live="polite">
             <div class="section-title activity-head">
               <h2>Transfer Activity</h2>

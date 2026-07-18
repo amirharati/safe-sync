@@ -567,6 +567,50 @@ button.danger:hover:not(:disabled) {
   padding-top: 14px;
 }
 
+.transfer-preview {
+  margin-top: 18px;
+  border-top: 1px solid #edf0f3;
+  padding-top: 14px;
+}
+
+.transfer-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.preview-column {
+  min-width: 0;
+}
+
+.preview-column h3 {
+  margin: 0 0 6px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.preview-list {
+  min-height: 48px;
+  max-height: 210px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid #d8dde3;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  list-style: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-list li + li {
+  margin-top: 2px;
+}
+
 .last-command-panel {
   margin-top: 16px;
 }
@@ -840,6 +884,10 @@ button.danger:hover:not(:disabled) {
   .transfer-form,
   .add-folder,
   .add-profile {
+    grid-template-columns: 1fr;
+  }
+
+  .transfer-preview-grid {
     grid-template-columns: 1fr;
   }
 
