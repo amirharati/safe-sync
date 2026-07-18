@@ -113,12 +113,9 @@ system dependency ownership visible and under your control.
    ```
 
    This installs the `safe-sync` command in `~/.local/bin`, the managed daemon,
-   and `~/Applications/Safe Sync.app`. If your shell cannot find `safe-sync`,
-   add `~/.local/bin` to your zsh startup file and open a new terminal:
-
-   ```bash
-   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-   ```
+   and `~/Applications/Safe Sync.app`. The installer adds `~/.local/bin` to
+   your shell startup file when needed; open a new terminal before using the
+   command by name.
 
 3. Open **Safe Sync** from Applications or its tray icon. On a new install it
    shows **Setup required** instead of a misleading service error. Click
@@ -170,13 +167,6 @@ system dependency ownership visible and under your control.
    `safe-sync status` to confirm the daemon is healthy. For a server without a
    browser, use the headless handoff below.
 
-5. A Linux user service normally runs while you are logged in. For an
-   always-on server, ask an administrator or run:
-
-   ```bash
-   sudo loginctl enable-linger "$USER"
-   ```
-
 ### Linux Server: Headless Steps
 
 For a server without a desktop session, install only the backend prerequisites:
@@ -212,6 +202,45 @@ safe-sync setup --folder ~/projects --allow-unsafe-local-path
 ```
 
 Headless installation does not need Node, Rust, GTK, WebKit, or the tray app.
+
+### macOS Headless Steps
+
+For a Mac that should run only the backend, install the headless runtime from
+the same cloned repository:
+
+```bash
+./install.sh --headless
+safe-sync connect-dropbox
+safe-sync setup --folder ~/work
+safe-sync status
+```
+
+This does not build or install the tray application. macOS starts the backend
+when that user logs in; it is not intended as a pre-login server service.
+
+### Startup After Reboot
+
+Normal desktop and laptop installs require **no** administrator access. Safe
+Sync installs a per-user daemon and starts it after that user logs in. The tray
+UI also starts after graphical login on desktop installs.
+
+On a Linux server, the same user service starts after the first login or SSH
+session. Only when you need syncing immediately after boot, before any login,
+enable user lingering once with administrator approval:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Confirm the always-on server setup with:
+
+```bash
+loginctl show-user "$USER" -p Linger
+systemctl --user is-enabled safe-sync-daemon.service
+systemctl --user is-active safe-sync-daemon.service
+```
+
+Expected values are `Linger=yes`, `enabled`, and `active`.
 
 ### UI and CLI Setup
 

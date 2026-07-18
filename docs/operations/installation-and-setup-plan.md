@@ -24,8 +24,10 @@ libraries. It retains every backup, profile, transfer, registry, trash, and
 status capability exposed by the CLI.
 
 On Linux, the installer supports an always-on systemd user service. It must
-explain when `loginctl enable-linger <user>` or an administrator-managed system
-service is required for a server that has no interactive login session.
+explain that no administrator access is needed for normal desktop/laptop use:
+the service starts when its user logs in. Only a server that must sync directly
+after boot, before any user login, requires `sudo loginctl enable-linger
+<user>` or an administrator-managed system service.
 
 ## User Workflows
 
@@ -143,9 +145,36 @@ Setup supports two ownership choices:
    an existing user rclone config until the user explicitly migrates it.
 
 Headless OAuth uses rclone's standard handoff: the server asks for a token,
-the user runs `rclone authorize "dropbox"` on a trusted browser-equipped
-machine, then pastes the resulting token into the server's active setup prompt.
-Tokens must not be placed in shell arguments, logs, or documentation examples.
+the user runs `safe-sync rclone authorize dropbox` on a trusted
+browser-equipped machine, then pastes the resulting JSON token into
+`safe-sync connect-dropbox --headless`. Tokens must not be placed in shell
+arguments, logs, or documentation examples.
+
+## Startup Behavior
+
+Installation creates a user-scoped backend service on macOS and Linux. On
+desktop installs, the tray UI is also registered for graphical-login startup.
+Neither normal workflow needs `sudo` or administrator access.
+
+Linux `systemd --user` services normally begin after the user logs in. For the
+uncommon always-on server case, where backup must resume directly after reboot
+without an SSH or console login, an administrator enables lingering once:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+The supported verification commands are:
+
+```bash
+loginctl show-user "$USER" -p Linger
+systemctl --user is-enabled safe-sync-daemon.service
+systemctl --user is-active safe-sync-daemon.service
+```
+
+Expected output for that server configuration is `Linger=yes`, `enabled`, and
+`active`. macOS remains user-login based; Safe Sync does not install a
+privileged pre-login service.
 
 ## Runtime Layout
 
