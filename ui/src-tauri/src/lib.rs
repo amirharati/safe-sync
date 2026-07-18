@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
@@ -15,6 +16,8 @@ use tauri::{AppHandle, Manager, WindowEvent, Wry};
 use objc2_app_kit::NSWindow;
 #[cfg(target_os = "macos")]
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SafeSyncStatus {
@@ -170,12 +173,49 @@ fn dropbox_home_url(remote_root: &str) -> Result<String, String> {
 }
 
 struct AppState {
+    // Held until process exit. This is the final singleton guard if desktop D-Bus is unavailable.
+    _ui_lock: Option<File>,
     status_item: Mutex<Option<MenuItem<Wry>>>,
     toggle_item: Mutex<Option<MenuItem<Wry>>>,
     backup_item: Mutex<Option<MenuItem<Wry>>>,
     logs_item: Mutex<Option<MenuItem<Wry>>>,
     last_tray_click: Mutex<Option<Instant>>,
     last_stale_heal_attempt: Mutex<Option<Instant>>,
+}
+
+fn ui_lock_path() -> Result<PathBuf, String> {
+    let home = env::var_os("HOME").ok_or_else(|| "cannot find the home directory".to_string())?;
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("safe-sync")
+        .join("safe-sync-ui.lock"))
+}
+
+#[cfg(unix)]
+fn acquire_ui_lock(path: &Path) -> Result<File, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "cannot determine Safe Sync UI state directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("cannot create Safe Sync UI state directory: {err}"))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|err| format!("cannot open Safe Sync UI lock: {err}"))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(file)
+    } else {
+        Err("Safe Sync UI is already running".to_string())
+    }
+}
+
+#[cfg(not(unix))]
+fn acquire_ui_lock(_path: &Path) -> Result<File, String> {
+    Err("Safe Sync UI singleton locking is not implemented on this OS".to_string())
 }
 
 
@@ -783,10 +823,18 @@ fn quit_tray(app: AppHandle<Wry>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let ui_lock = match ui_lock_path().and_then(|path| acquire_ui_lock(&path)) {
+        Ok(lock) => lock,
+        Err(message) => {
+            eprintln!("{message}");
+            return;
+        }
+    };
     let builder = tauri::Builder::default();
 
     builder
         .manage(AppState {
+            _ui_lock: Some(ui_lock),
             status_item: Mutex::new(None),
             toggle_item: Mutex::new(None),
             backup_item: Mutex::new(None),

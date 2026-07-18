@@ -2823,6 +2823,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "safe-sync-ui"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "objc2-app-kit",
  "objc2-foundation",
  "serde",
