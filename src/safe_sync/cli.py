@@ -1113,21 +1113,19 @@ def status_health(config: dict[str, Any], service_state: str, sync_state: dict[s
     return {"health": health, "reason": reason, "daemon_seen_at": daemon_seen_at}
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    config_path = Path(args.config).expanduser()
+def status_payload(config_path: Path, api_timeout_seconds: float = 5.0) -> dict[str, Any]:
     if not config_path.exists():
-        print(json.dumps({
+        return {
             "daemon_seen_at": None,
             "health": "setup_required",
             "health_reason": "Safe Sync has not been configured yet",
             "log": None,
             "service_state": "not configured",
             "sync_state": {"state": "setup_required"},
-        }, indent=2, sort_keys=True))
-        return 0
+        }
     config = normalized_config(load_config(config_path))
     try:
-        response = daemon_api(config, "status")
+        response = api_request(socket_path(config), {"command": "status"}, timeout_seconds=api_timeout_seconds)
         if not response.get("ok"):
             raise RuntimeError(str(response.get("error") or "daemon API error"))
         sync_state = dict(response.get("status") or {})
@@ -1137,14 +1135,44 @@ def cmd_status(args: argparse.Namespace) -> int:
     service_text = service_status_text()
     service_state = service_text.split(":", 1)[1].strip() if ":" in service_text else service_text
     health = status_health(config, service_state, sync_state)
-    print(json.dumps({
+    return {
         "daemon_seen_at": health["daemon_seen_at"],
         "health": health["health"],
         "health_reason": health["reason"],
         "log": str(log_path(config)),
         "service_state": service_state,
         "sync_state": sync_state,
-    }, indent=2, sort_keys=True))
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    payload = status_payload(Path(args.config).expanduser())
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_login_check(args: argparse.Namespace) -> int:
+    """Print a short interactive-shell notice only when Safe Sync needs attention."""
+    try:
+        payload = status_payload(Path(args.config).expanduser(), api_timeout_seconds=0.75)
+    except Exception as exc:
+        print(f"Safe Sync needs attention: health check failed ({exc}). Run: safe-sync status")
+        return 0
+
+    health = str(payload["health"])
+    if health == "ok":
+        return 0
+
+    reason = str(payload["health_reason"])
+    prefix = "Safe Sync warning" if health == "warning" else "Safe Sync needs attention"
+    if health == "setup_required":
+        print(f"{prefix}: {reason}. Run: safe-sync setup")
+    elif health == "stopped":
+        print(f"{prefix}: {reason}. Run: safe-sync start")
+    elif health == "error" and "Dropbox authorization is invalid or revoked" in reason:
+        print(f"{prefix}: {reason}. Run: safe-sync connect-dropbox --headless --reconnect")
+    else:
+        print(f"{prefix}: {reason}. Run: safe-sync status")
     return 0
 
 
@@ -1949,7 +1977,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{setup,connect-dropbox,backup,start,stop,restart,status,logs,autostart,config,profiles,folders,computers,pull,list,rclone,doctor}",
+        metavar="{setup,connect-dropbox,backup,start,stop,restart,status,login-check,logs,autostart,config,profiles,folders,computers,pull,list,rclone,doctor}",
     )
 
     init = sub.add_parser("init-config")
@@ -2039,6 +2067,9 @@ def parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status")
     status.set_defaults(func=cmd_status)
+
+    login_check = sub.add_parser("login-check", help=argparse.SUPPRESS)
+    login_check.set_defaults(func=cmd_login_check)
 
     folders_cmd = sub.add_parser("folders")
     folders_sub = folders_cmd.add_subparsers(dest="folder_cmd", required=True)

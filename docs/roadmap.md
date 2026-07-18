@@ -39,8 +39,9 @@ must not rely on that detection for safety.
 **Priority:** after real two-machine install testing.
 
 Headless installations have no tray icon. Current diagnosis is through
-`safe-sync status`, `safe-sync logs`, and the systemd user-service journal over
-SSH. Add opt-in notification destinations such as email or a generic webhook
+`safe-sync status`, `safe-sync logs`, the systemd user-service journal over
+SSH, and the Linux headless install's interactive-Bash health hint. Add opt-in
+notification destinations such as email or a generic webhook
 for persistent error/reconnect-required states. Notifications must never expose
 Dropbox tokens, local file contents, or full transfer paths by default.
 

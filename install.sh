@@ -148,6 +148,29 @@ ensure_command_on_path() {
   esac
 }
 
+install_headless_login_check() {
+  [ "$(uname -s)" = "Linux" ] || return 0
+  [ "$INSTALL_UI" = "0" ] || return 0
+  PROFILE="$HOME/.bashrc"
+  START="# >>> Safe Sync login health check >>>"
+  END="# <<< Safe Sync login health check <<<"
+  TMP_PROFILE=$(mktemp "${PROFILE}.safe-sync.XXXXXX")
+  if [ -f "$PROFILE" ]; then
+    sed "/^${START}$/,/^${END}$/d" "$PROFILE" > "$TMP_PROFILE"
+  fi
+  {
+    cat "$TMP_PROFILE"
+    printf '\n%s\n' "$START"
+    printf '%s\n' 'case $- in'
+    printf '%s\n' "  *i*) \"$TARGET\" login-check ;;"
+    printf '%s\n' 'esac'
+    printf '%s\n' "$END"
+  } > "${TMP_PROFILE}.new"
+  mv "${TMP_PROFILE}.new" "$PROFILE"
+  rm -f "$TMP_PROFILE"
+  LOGIN_CHECK_MESSAGE="Interactive Bash login health check: enabled."
+}
+
 
 managed_rclone_asset() {
   case "$(uname -s):$(uname -m)" in
@@ -426,6 +449,7 @@ else
   PATH_MESSAGE="Command directory was added to $PATH_PROFILE for new shell sessions. Open a new terminal to use safe-sync by name."
 fi
 install_service_files "$TARGET"
+install_headless_login_check
 if has_enabled_folders; then
   "$TARGET" restart >/dev/null
   BACKEND_MESSAGE="Backend service installed and started."
@@ -448,6 +472,9 @@ echo "Config: $CONFIG"
 echo "Runtime: $RUNTIME_CURRENT"
 echo "$PATH_MESSAGE"
 echo "$BACKEND_MESSAGE"
+if [ -n "${LOGIN_CHECK_MESSAGE:-}" ]; then
+  echo "$LOGIN_CHECK_MESSAGE"
+fi
 if [ "$INSTALL_UI" = "1" ]; then
   echo "$TRAY_MESSAGE"
   echo "$TRAY_AUTOSTART_MESSAGE"

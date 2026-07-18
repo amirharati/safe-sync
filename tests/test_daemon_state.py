@@ -29,9 +29,11 @@ from safe_sync.cli import (
     rclone_env,
     run_command,
     run_backup_with_config,
+    cmd_login_check,
     preflight,
     selected_folders,
     status_health,
+    status_payload,
     unsafe_local_path_reason,
     write_config,
 )
@@ -92,6 +94,37 @@ def test_status_health_reports_setup_required_before_the_first_folder():
 
     assert health["health"] == "setup_required"
     assert "Choose a folder" in health["reason"]
+
+
+def test_login_check_is_silent_when_healthy(monkeypatch, tmp_path, capsys):
+    config_path = tmp_path / "config.json"
+    config = normalized_config(default_config("test-machine"))
+    local_folder = tmp_path / "work"
+    local_folder.mkdir()
+    add_setup_folder(config, str(local_folder))
+    write_config(config_path, config)
+    monkeypatch.setattr("safe_sync.cli.service_status_text", lambda: "service: running")
+    monkeypatch.setattr(
+        "safe_sync.cli.api_request",
+        lambda *_args, **_kwargs: {"ok": True, "status": {"state": "watching", "updated_at": "2099-01-01T00:00:00+00:00"}},
+    )
+
+    assert cmd_login_check(SimpleNamespace(config=str(config_path))) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_login_check_gives_headless_reconnect_command(monkeypatch, tmp_path, capsys):
+    config_path = tmp_path / "config.json"
+    config = normalized_config(default_config("test-machine"))
+    write_config(config_path, config)
+    monkeypatch.setattr("safe_sync.cli.service_status_text", lambda: "service: running")
+    monkeypatch.setattr(
+        "safe_sync.cli.api_request",
+        lambda *_args, **_kwargs: {"ok": True, "status": {"state": "error", "last_error": "Dropbox authorization is invalid or revoked. Reconnect with: safe-sync connect-dropbox"}},
+    )
+
+    assert cmd_login_check(SimpleNamespace(config=str(config_path))) == 0
+    assert "safe-sync connect-dropbox --headless --reconnect" in capsys.readouterr().out
 
 
 def test_connect_dropbox_headless_skips_rclone_menu(monkeypatch, tmp_path):

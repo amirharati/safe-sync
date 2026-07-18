@@ -271,6 +271,12 @@ Persistent failures, including a revoked Dropbox authorization, remain visible
 in `safe-sync status` until a successful sync clears them. Email/webhook alert
 delivery is tracked separately for a later release.
 
+On Linux headless installs, Safe Sync also adds a small interactive-Bash check
+to `~/.bashrc`. It is silent while healthy and prints a one-line recovery hint
+when setup is incomplete, the daemon is stopped or stale, or Dropbox must be
+reconnected. It only checks the live local daemon API; it does not start a
+second daemon or contact Dropbox. `./uninstall.sh` removes this marked block.
+
 ### UI and CLI Setup
 
 Desktop installs provide guided setup in the Safe Sync control panel. It uses

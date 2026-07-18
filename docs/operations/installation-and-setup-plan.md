@@ -176,6 +176,13 @@ Expected output for that server configuration is `Linger=yes`, `enabled`, and
 `active`. macOS remains user-login based; Safe Sync does not install a
 privileged pre-login service.
 
+Linux headless installation also adds a marked, interactive-only Bash snippet
+to `~/.bashrc`. It runs `safe-sync login-check` when an SSH or terminal shell
+opens, remains silent when healthy, and prints a short recovery command for
+setup, stopped, stale, and Dropbox authorization failures. The check reads the
+live local daemon API with a short timeout; it never starts another daemon or
+contacts Dropbox. Normal uninstall removes the marked snippet.
+
 ## Runtime Layout
 
 The final paths must be stable and user-scoped:

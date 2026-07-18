@@ -28,6 +28,16 @@ Normal uninstall preserves ~/.safe-sync and never deletes Dropbox backups.
 EOF
 }
 
+remove_headless_login_check() {
+  PROFILE="$HOME/.bashrc"
+  START="# >>> Safe Sync login health check >>>"
+  END="# <<< Safe Sync login health check <<<"
+  [ -f "$PROFILE" ] || return 0
+  TMP_PROFILE=$(mktemp "${PROFILE}.safe-sync.XXXXXX")
+  sed "/^${START}$/,/^${END}$/d" "$PROFILE" > "$TMP_PROFILE"
+  mv "$TMP_PROFILE" "$PROFILE"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --purge) PURGE=1 ;;
@@ -63,6 +73,8 @@ case "$(uname -s)" in
     echo "Safe Sync service removal is not implemented for $(uname -s)." >&2
     ;;
 esac
+
+remove_headless_login_check
 
 if [ -L "$COMMAND" ]; then
   rm -f "$COMMAND"
