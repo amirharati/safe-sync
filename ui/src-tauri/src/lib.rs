@@ -427,6 +427,22 @@ fn update_items(
     let _ = logs_item.set_enabled(status.log.as_ref().is_some_and(|path| !path.is_empty()));
 }
 
+fn update_tray_indicator(app: &AppHandle<Wry>, status: &SafeSyncStatus) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let icon_bytes = if status.health == "error" {
+        include_bytes!("../icons/tray-icon-warning.png").as_slice()
+    } else {
+        include_bytes!("../icons/tray-icon.png").as_slice()
+    };
+    if let Ok(icon) = Image::from_bytes(icon_bytes) {
+        let _ = tray.set_icon(Some(icon));
+    }
+    let label = status_label(status);
+    let _ = tray.set_tooltip(Some(&label));
+}
+
 fn refresh_menu_items(
     status_item: &MenuItem<Wry>,
     toggle_item: &MenuItem<Wry>,
@@ -460,6 +476,7 @@ fn update_menu_state_from_app(app: &AppHandle<Wry>, status: &SafeSyncStatus) {
     ) {
         update_items(status_item, toggle_item, backup_item, logs_item, status);
     }
+    update_tray_indicator(app, status);
 }
 
 fn open_path(path: &str) -> Result<(), String> {
@@ -1002,7 +1019,7 @@ pub fn run() {
             )?;
             let icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
 
-            refresh_menu_items(&status, &toggle, &backup, &logs);
+            let initial_status = refresh_menu_items(&status, &toggle, &backup, &logs);
             if let Ok(mut guard) = app.state::<AppState>().status_item.lock() {
                 guard.replace(status.clone());
             }
@@ -1019,15 +1036,18 @@ pub fn run() {
             let toggle_item = toggle.clone();
             let backup_item = backup.clone();
             let logs_item = logs.clone();
+            let app_handle = app.handle().clone();
 
             thread::spawn({
                 let status_item = status.clone();
                 let toggle_item = toggle.clone();
                 let backup_item = backup.clone();
                 let logs_item = logs.clone();
+                let app_handle = app_handle.clone();
                 move || loop {
                     thread::sleep(Duration::from_secs(10));
-                    refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                    let status = refresh_menu_items(&status_item, &toggle_item, &backup_item, &logs_item);
+                    update_tray_indicator(&app_handle, &status);
                 }
             });
 
@@ -1072,6 +1092,7 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+            update_tray_indicator(&app.handle(), &initial_status);
 
             Ok(())
         })

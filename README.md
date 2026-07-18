@@ -257,6 +257,20 @@ Then provide a fresh JSON token using the same browser-machine handoff as the
 initial headless setup. Safe Sync restarts the backend automatically after a
 successful reconnect when watched folders already exist.
 
+### Headless Monitoring
+
+Headless installs have no tray icon. Check a server through SSH with:
+
+```bash
+safe-sync status
+safe-sync logs
+systemctl --user status safe-sync-daemon.service
+```
+
+Persistent failures, including a revoked Dropbox authorization, remain visible
+in `safe-sync status` until a successful sync clears them. Email/webhook alert
+delivery is tracked separately for a later release.
+
 ### UI and CLI Setup
 
 Desktop installs provide guided setup in the Safe Sync control panel. It uses

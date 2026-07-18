@@ -126,9 +126,9 @@ Current behavior:
 
 The control panel also exposes Start, Stop, and Refresh buttons through the same Tauri command bridge. These actions do not perform sync logic directly; they only call the existing CLI.
 
-Still pending for later checkpoints:
-
-- Tray icon state variants
+The tray icon switches to a high-contrast red-badged variant whenever Safe
+Sync reports `health: error`, including reconnect-required Dropbox failures.
+It returns to the normal icon when the error clears.
 
 Review point: confirm no action deletes files or bypasses backend guardrails.
 

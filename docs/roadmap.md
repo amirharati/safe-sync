@@ -34,6 +34,16 @@ profile automatically. Document that one profile must not be actively used by
 two machines at the same time. Later work may detect concurrent ownership, but
 must not rely on that detection for safety.
 
+### HEADLESS-001: Optional remote failure notifications
+
+**Priority:** after real two-machine install testing.
+
+Headless installations have no tray icon. Current diagnosis is through
+`safe-sync status`, `safe-sync logs`, and the systemd user-service journal over
+SSH. Add opt-in notification destinations such as email or a generic webhook
+for persistent error/reconnect-required states. Notifications must never expose
+Dropbox tokens, local file contents, or full transfer paths by default.
+
 ### MAC-001: Installed tray app still appears in the Dock/taskbar
 
 **Priority:** polish; defer until after real two-machine installation testing.
