@@ -2,13 +2,27 @@
 
 Safe Sync is a small wrapper around rclone for personal multi-computer file backup and selective transfer.
 
-The goal is not to build a new sync engine. The goal is to make a boring, inspectable workflow that backs up each computer to its own Dropbox folder and lets files be pulled between computers intentionally.
+The goal is not to build a new sync engine. The goal is to make a boring,
+inspectable workflow that backs up each computer to its own Dropbox folder and
+lets files be compared, staged, and received between computers intentionally.
+
+## Start Here
+
+The [complete user guide](docs/user-guide.md) covers every step from
+prerequisites and installation through desktop/headless setup, daily backups,
+cross-computer transfers, troubleshooting, updates, and uninstall. It is the
+single source rendered in the desktop Help tab and printed by
+`safe-sync help`, so those three help surfaces stay synchronized.
 
 ## Core Idea
 
 - Each computer owns one machine identity and one or more remote backup folders.
 - Automatic jobs are mostly one-way backup from each configured local folder to that computer's remote folders.
-- Cross-computer sharing is selective: discover another computer, then pull or copy a file/folder when needed.
+- Cross-computer sharing is selective: discover another computer, compare a
+  file/folder, stage it outside the live destination, then review a
+  checkpointed apply.
+- Granular linked folders detect local and peer-generation changes
+  automatically, but every cross-computer merge remains user-initiated.
 - Each computer publishes its own registry file at `.registry/computers/<machine_id>.json`; no shared registry file is edited by multiple machines.
 - Deletes in owned backup folders are allowed only with recoverable trash.
 - No tool syncs `.git/` internals.
@@ -18,11 +32,15 @@ The goal is not to build a new sync engine. The goal is to make a boring, inspec
 
 ## Docs
 
+- [Complete User Guide](docs/user-guide.md)
 - [Product Plan](docs/product/product-plan.md)
+- [Linked Folders, Safe Transfer, and Recovery Design](docs/product/linked-folder-transfer-design.md)
+- [Event Logging and Audit Design](docs/product/event-logging-and-audit-design.md)
 - [Roadmap](docs/roadmap.md)
 - [Operating Model](docs/operations/operating-model.md)
 - [Daemon Design](docs/operations/daemon-design.md)
 - [Test Plan](docs/operations/test-plan.md)
+- [Pre-Dogfood Checklist](docs/operations/pre-dogfood-checklist.md)
 - [Dogfood Report](docs/operations/dogfood-report.md)
 - [Tauri Tray Workflow](docs/operations/tauri-tray-workflow.md)
 - [Installation and Setup Plan](docs/operations/installation-and-setup-plan.md)
@@ -42,7 +60,8 @@ Initial development and testing uses:
 ```text
 bin/safe-sync                 Thin executable launcher only
 src/safe_sync/cli.py          CLI commands and rclone guardrails
-src/safe_sync/daemon.py       Polling watch daemon state and scan helpers
+src/safe_sync/daemon.py       Watch state machine and fallback scan helpers
+src/safe_sync/watcher.py      Native filesystem event collection
 src/safe_sync/path_filter.py  Watch-event ignore helper
 src/safe_sync/service.py      macOS service install/control rendering
 ui/                           Tauri tray app workspace
@@ -67,10 +86,10 @@ require the following tools before you run the installer:
 
 | Mode | Supported now | Required tools |
 | --- | --- |
-| macOS desktop | Yes | Python 3, Node/npm, Rust/cargo, Xcode Command Line Tools, `curl`, `unzip` |
-| macOS headless | Yes | Python 3, `curl`, `unzip`, and `shasum` or `sha256sum` |
-| Linux headless | Yes | Python 3, `curl`, `unzip`, and `sha256sum` |
-| Linux desktop | Yes, source install | Python 3, Node/npm, Rust/cargo, GTK/WebKit/AppIndicator build libraries, `curl`, `unzip` |
+| macOS desktop | Yes | Python 3.10-3.13, Node/npm, Rust/cargo, Xcode Command Line Tools, `curl`, `unzip` |
+| macOS headless | Yes | Python 3.10-3.13, `curl`, `unzip`, and `shasum` or `sha256sum` |
+| Linux headless | Yes | Python 3.10+, `curl`, `unzip`, and `sha256sum` |
+| Linux desktop | Yes, source install | Python 3.10+, Node/npm, Rust/cargo, GTK/WebKit/AppIndicator build libraries, `curl`, `unzip` |
 
 On a typical macOS development machine:
 
@@ -308,10 +327,10 @@ For a server with no desktop UI:
 ```
 
 The installer stages a user-scoped runtime, installs a checksum-verified
-managed rclone binary, installs the `safe-sync` command in `~/.local/bin`, and
-installs one user daemon. Desktop installation also builds and installs the
-Tauri tray app on macOS. It preserves existing Safe Sync configuration on
-repeat install or update:
+managed rclone binary and pinned native filesystem watcher, installs the
+`safe-sync` command in `~/.local/bin`, and installs one user daemon. Desktop
+installation also builds and installs the Tauri tray app. It preserves
+existing Safe Sync configuration on repeat install or update:
 
 ```bash
 ./install.sh --update
@@ -339,11 +358,17 @@ The installer does the following:
 
 1. Creates `~/.safe-sync/config.json` if it does not exist.
 2. Stages `bin/`, `src/`, and configuration templates under `~/.local/share/safe-sync`.
-3. Downloads and verifies the Safe Sync-managed rclone runtime.
+3. Downloads and verifies the Safe Sync-managed rclone and watchdog runtimes.
 4. Renders and installs the backend launchd (macOS) or systemd user (Linux) service.
 5. Starts the daemon when an existing configuration already has watched folders;
    a first install starts it after `safe-sync setup` has added a folder.
 6. On macOS desktop installs, builds the production Tauri tray app at `~/Applications/Safe Sync.app` and enables its LaunchAgent.
+
+The daemon uses native FSEvents on macOS and inotify on Linux. It coalesces
+events by watched folder, ignores the same generated/dependency/cache paths as
+the rclone policy, and retains the configured fallback backup as reconciliation
+for events missed during sleep, restart, or watcher failure. A polling fallback
+is visible in status if the native backend cannot start.
 
 Set `SAFE_SYNC_INSTALL_UI=0 ./install.sh` for a backend-only install. Set
 `SAFE_SYNC_APP_DIR=/Applications ./install.sh` to install the macOS tray app

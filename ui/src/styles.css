@@ -12,6 +12,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html {
   min-width: 0;
   overflow-x: hidden;
@@ -493,6 +497,64 @@ dd[data-value="stopped"] { color: #9a6400; }
   min-height: 48px;
 }
 
+.card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dfe5eb;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px;
+  min-width: 0;
+}
+
+.card h3,
+.card p {
+  margin: 0;
+}
+
+.job-decisions {
+  display: grid;
+  gap: 6px;
+}
+
+.job-decision {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(120px, auto);
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid #edf0f3;
+  padding-top: 6px;
+}
+
+.job-decision select {
+  min-width: 130px;
+}
+
+.backup-folder-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.backup-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border-top: 1px solid #edf0f3;
+  padding-top: 8px;
+}
+
+.backup-folder-row span {
+  display: grid;
+  gap: 2px;
+}
+
+.backup-folder-row small {
+  color: #75808c;
+  overflow-wrap: anywhere;
+}
+
 .item {
   display: grid;
   gap: 4px;
@@ -722,6 +784,76 @@ button.danger:hover:not(:disabled) {
   white-space: pre-wrap;
 }
 
+.help-guide {
+  max-width: 780px;
+  margin: 18px auto 0;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.help-guide h2,
+.help-guide h3,
+.help-guide h4 {
+  color: #17202a;
+  line-height: 1.3;
+}
+
+.help-guide h2 {
+  margin: 0 0 14px;
+  font-size: 22px;
+}
+
+.help-guide h3 {
+  margin: 26px 0 8px;
+  padding-top: 14px;
+  border-top: 1px solid #e6ebf0;
+  font-size: 17px;
+}
+
+.help-guide h4 {
+  margin: 18px 0 7px;
+  font-size: 15px;
+}
+
+.help-guide p {
+  margin: 8px 0 12px;
+}
+
+.help-guide ul,
+.help-guide ol {
+  margin: 8px 0 14px;
+  padding-left: 24px;
+}
+
+.help-guide li + li {
+  margin-top: 5px;
+}
+
+.help-guide code {
+  border-radius: 4px;
+  background: #f1f5f9;
+  padding: 1px 4px;
+  color: #263849;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.help-guide pre {
+  margin: 10px 0 16px;
+  overflow-x: auto;
+  border: 1px solid #d8dde3;
+  border-radius: 7px;
+  background: #f8fafc;
+  padding: 11px 12px;
+}
+
+.help-guide pre code {
+  background: transparent;
+  padding: 0;
+  white-space: pre;
+}
+
 :root[data-panel="quick"],
 :root[data-panel="quick"] body {
   background: transparent;
@@ -795,6 +927,7 @@ button.danger:hover:not(:disabled) {
 :root[data-panel="quick"] [data-view="settings"],
 :root[data-panel="quick"] [data-view="computers"],
 :root[data-panel="quick"] [data-view="transfer"],
+:root[data-panel="quick"] [data-view="help"],
 :root[data-panel="quick"] .refresh-note {
   display: none;
 }
@@ -823,9 +956,9 @@ button.danger:hover:not(:disabled) {
   width: 100%;
 }
 
-:root[data-panel="quick"] .setup-panel ~ .facts,
-:root[data-panel="quick"] .setup-panel ~ .actions,
-:root[data-panel="quick"] .setup-panel ~ .activity-panel {
+:root[data-panel="quick"] .setup-panel:not([hidden]) ~ .facts,
+:root[data-panel="quick"] .setup-panel:not([hidden]) ~ .actions,
+:root[data-panel="quick"] .setup-panel:not([hidden]) ~ .activity-panel {
   display: none;
 }
 

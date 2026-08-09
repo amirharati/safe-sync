@@ -74,3 +74,61 @@ Trying again in 300 seconds
 Safe Sync deliberately has no whole-transfer deadline. Large models and data files may take as long as they need while progress continues. rclone still has short connection and inactive-network timeouts, so a genuinely stalled transfer fails visibly and the daemon can retry it.
 
 If this happens during testing, wait a few minutes and retry. Do not keep hammering Dropbox in a loop.
+
+## Interrupted-Sync Simulation
+
+This experiment determines actual shutdown behavior instead of assuming that
+rclone makes every form of process termination safe. Run it only against a
+fresh temporary source tree, isolated Safe Sync config/runtime paths, and a
+unique remote below `dropbox:computer-backups/test/interrupt-*`. Never reuse a
+real backup folder.
+
+### Fixture
+
+1. Create a baseline containing small files, a large file that keeps an upload
+   active long enough to interrupt, and nested empty directories.
+2. Complete and verify one baseline backup.
+3. Change one existing file, delete another, add a new file, and replace the
+   large file. Record local hashes and remote/trash listings before each run.
+4. Capture the exact disposable daemon and child rclone PIDs. Never use a broad
+   `pkill` pattern during this experiment.
+
+### Interruption cases
+
+Run every case from a fresh verified baseline:
+
+1. Close and force-quit the tray UI while rclone is transferring. Confirm that
+   the independent daemon and rclone child continue and complete.
+2. Request a normal backend stop during the large-file upload. Record which
+   signals are delivered, how long shutdown takes, and whether the child exits.
+3. Restart the backend during the upload, including the same path exercised by
+   `./install.sh --update`. Confirm there is never more than one daemon or
+   rclone transfer lane.
+4. Send a hard kill only to the identified disposable rclone child during a
+   new upload and during replacement of an existing remote file.
+5. Send a hard kill only to the identified disposable daemon while its rclone
+   child is active. Check explicitly for an orphan child before restarting.
+6. Interrupt a run that has destination-only files waiting for the default
+   delete-after phase.
+
+### Required evidence
+
+- Local file contents and hashes are unchanged in every case.
+- No partial upload is exposed under its final remote filename.
+- Any already committed files have valid Dropbox hashes; remaining files may
+  be old or absent until reconciliation, but must not be silently corrupted.
+- An interrupted/error run does not perform pending destination deletions or
+  report a successful backup.
+- Files moved before an interruption are present either at the live path or in
+  Safe Sync's timestamped remote trash.
+- No orphan rclone process, duplicate daemon, stale lock, or concurrent retry
+  remains after stop/restart.
+- A subsequent uninterrupted backup plus remote verification converges the
+  live destination exactly to the filtered source.
+- Status and logs clearly distinguish interruption, recovery, and final
+  success.
+
+Record results separately for macOS launchd and Linux systemd. If graceful
+backend stop cannot reliably terminate and reap rclone, implement signal
+forwarding with a bounded graceful wait and forced-cleanup fallback before
+using important folders.

@@ -9,6 +9,7 @@ RUNTIME_CURRENT="$RUNTIME_DIR/current"
 SOURCE=""
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RCLONE_VERSION="v1.74.4"
+WATCHDOG_VERSION="6.0.0"
 TRAY_LABEL="com.safe-sync.tray"
 TRAY_PLIST="$HOME/Library/LaunchAgents/$TRAY_LABEL.plist"
 APP_NAME="Safe Sync.app"
@@ -61,7 +62,11 @@ fi
 
 require_python() {
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
-    echo "Python 3 is required. Install python3, then run ./install.sh again." >&2
+    echo "Python 3.10 or newer is required. Install python3, then run ./install.sh again." >&2
+    exit 1
+  }
+  "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1 || {
+    echo "Python 3.10 or newer is required; found $($PYTHON_BIN --version 2>&1)." >&2
     exit 1
   }
 }
@@ -85,7 +90,81 @@ stage_runtime() {
   mkdir -p "$RUNTIME_DIR"
   STAGE_DIR=$(mktemp -d "$RUNTIME_DIR/.stage.XXXXXX")
   cp -R "$ROOT_DIR/bin" "$ROOT_DIR/config" "$ROOT_DIR/src" "$STAGE_DIR/"
+  mkdir -p "$STAGE_DIR/docs"
+  cp "$ROOT_DIR/docs/user-guide.md" "$STAGE_DIR/docs/user-guide.md"
   SOURCE="$STAGE_DIR/bin/safe-sync"
+}
+
+watchdog_runtime_ok() {
+  VENDOR_DIR="$1"
+  [ -d "$VENDOR_DIR/watchdog" ] || return 1
+  PYTHONPATH="$VENDOR_DIR" "$PYTHON_BIN" -c "import importlib.metadata as m; raise SystemExit(0 if m.version('watchdog') == '$WATCHDOG_VERSION' else 1)" >/dev/null 2>&1
+}
+
+managed_watchdog_asset() {
+  case "$(uname -s):$(uname -m):$($PYTHON_BIN -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')" in
+    Darwin:*:cp310)
+      WATCHDOG_URL="https://files.pythonhosted.org/packages/0c/56/90994d789c61df619bfc5ce2ecdabd5eeff564e1eb47512bd01b5e019569/watchdog-6.0.0-cp310-cp310-macosx_10_9_universal2.whl"
+      WATCHDOG_SHA256="d1cdb490583ebd691c012b3d6dae011000fe42edb7a82ece80965b42abd61f26"
+      ;;
+    Darwin:*:cp311)
+      WATCHDOG_URL="https://files.pythonhosted.org/packages/e0/24/d9be5cd6642a6aa68352ded4b4b10fb0d7889cb7f45814fb92cecd35f101/watchdog-6.0.0-cp311-cp311-macosx_10_9_universal2.whl"
+      WATCHDOG_SHA256="6eb11feb5a0d452ee41f824e271ca311a09e250441c262ca2fd7ebcf2461a06c"
+      ;;
+    Darwin:*:cp312)
+      WATCHDOG_URL="https://files.pythonhosted.org/packages/39/ea/3930d07dafc9e286ed356a679aa02d777c06e9bfd1164fa7c19c288a5483/watchdog-6.0.0-cp312-cp312-macosx_10_13_universal2.whl"
+      WATCHDOG_SHA256="bdd4e6f14b8b18c334febb9c4425a878a2ac20efd1e0b231978e7b150f92a948"
+      ;;
+    Darwin:*:cp313)
+      WATCHDOG_URL="https://files.pythonhosted.org/packages/68/98/b0345cabdce2041a01293ba483333582891a3bd5769b08eceb0d406056ef/watchdog-6.0.0-cp313-cp313-macosx_10_13_universal2.whl"
+      WATCHDOG_SHA256="490ab2ef84f11129844c23fb14ecf30ef3d8a6abafd3754a6f75ca1e6654136c"
+      ;;
+    Linux:x86_64:*|Linux:amd64:*)
+      WATCHDOG_URL="https://files.pythonhosted.org/packages/b5/e8/dbf020b4d98251a9860752a094d09a65e1b436ad181faf929983f697048f/watchdog-6.0.0-py3-none-manylinux2014_x86_64.whl"
+      WATCHDOG_SHA256="20ffe5b202af80ab4266dcd3e91aae72bf2da48c0d33bdb15c66658e685e94e2"
+      ;;
+    Linux:aarch64:*|Linux:arm64:*)
+      WATCHDOG_URL="https://files.pythonhosted.org/packages/a9/c7/ca4bf3e518cb57a686b2feb4f55a1892fd9a3dd13f470fca14e00f80ea36/watchdog-6.0.0-py3-none-manylinux2014_aarch64.whl"
+      WATCHDOG_SHA256="7607498efa04a3542ae3e05e64da8202e58159aa1fa4acddf7678d34a35d4f13"
+      ;;
+    *)
+      echo "No managed watchdog build is defined for $(uname -s) $(uname -m) with $($PYTHON_BIN --version 2>&1)." >&2
+      exit 1
+      ;;
+  esac
+}
+
+install_managed_watchdog() {
+  VENDOR_TARGET="$STAGE_DIR/vendor"
+  if watchdog_runtime_ok "$RUNTIME_CURRENT/vendor"; then
+    mkdir -p "$VENDOR_TARGET"
+    cp -R "$RUNTIME_CURRENT/vendor/." "$VENDOR_TARGET/"
+    echo "managed watcher: watchdog $WATCHDOG_VERSION (reused)"
+    return
+  fi
+
+  managed_watchdog_asset
+  DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/safe-sync-watchdog.XXXXXX")
+  ARCHIVE="$DOWNLOAD_DIR/watchdog.whl"
+  if ! curl -fsSL "$WATCHDOG_URL" -o "$ARCHIVE"; then
+    rm -rf "$DOWNLOAD_DIR"
+    echo "Could not download Safe Sync's managed watcher runtime." >&2
+    exit 1
+  fi
+  ACTUAL_SHA256=$(sha256_file "$ARCHIVE")
+  if [ "$ACTUAL_SHA256" != "$WATCHDOG_SHA256" ]; then
+    rm -rf "$DOWNLOAD_DIR"
+    echo "Managed watchdog checksum verification failed." >&2
+    exit 1
+  fi
+  mkdir -p "$VENDOR_TARGET"
+  unzip -q "$ARCHIVE" -d "$VENDOR_TARGET"
+  rm -rf "$DOWNLOAD_DIR"
+  if ! watchdog_runtime_ok "$VENDOR_TARGET"; then
+    echo "Managed watchdog runtime verification failed." >&2
+    exit 1
+  fi
+  echo "managed watcher: watchdog $WATCHDOG_VERSION"
 }
 
 discard_staged_runtime() {
@@ -252,7 +331,9 @@ configure_rclone() {
   RCLONE="$1"
   "$PYTHON_BIN" - "$CONFIG" "$RCLONE" <<'PYCONFIG'
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1]).expanduser()
@@ -260,7 +341,21 @@ rclone = sys.argv[2]
 config = json.loads(path.read_text())
 if config.get("rclone_bin") != rclone:
     config["rclone_bin"] = rclone
-    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(config, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            temporary.chmod(path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 PYCONFIG
   echo "managed rclone: $RCLONE"
 }
@@ -434,6 +529,7 @@ if [ "$INSTALL_UI" = "1" ]; then
 fi
 stage_runtime
 trap discard_staged_runtime EXIT INT TERM
+install_managed_watchdog
 mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG" ]; then
   "$SOURCE" init-config

@@ -8,6 +8,21 @@ source install first, desktop and headless modes, managed rclone, explicit
 Dropbox setup, safe update/uninstall, then two-machine real-world testing
 before release packages or Windows support.
 
+The first dogfood implementation of the major cross-computer feature is
+complete and specified in
+[Linked Folders, Safe Transfer, and Recovery Design](product/linked-folder-transfer-design.md).
+It covers granular linked subfolders, automatic read-only change detection,
+three-way comparison, staged/checkpointed user-approved merge, clone/import,
+and recoverable history. The design document records the shipped review scope
+and explicitly deferred revision-provider/retention/low-latency polish.
+
+Structured observability is now the required gate before broad dogfooding and
+is specified in
+[Event Logging and Audit Design](product/event-logging-and-audit-design.md).
+It defines a single event model, configurable diagnostic detail, a bounded
+segmented circular journal, automatic per-profile cloud replication, and a
+separate future path for allowlisted durable recovery events.
+
 ## Open Issues
 
 ### REMOTE-001: Optional remote backup purge
@@ -33,6 +48,10 @@ paths, create a new local identity by default, and never activate an imported
 profile automatically. Document that one profile must not be actively used by
 two machines at the same time. Later work may detect concurrent ownership, but
 must not rely on that detection for safety.
+
+The linked-folder design's **Clone to this computer** flow covers the safer
+default of creating a new local identity. Reusing/transferring the original
+profile identity remains a separate advanced operation under this issue.
 
 ### HEADLESS-001: Optional remote failure notifications
 
@@ -166,6 +185,22 @@ Add a second-level Tauri window for day-to-day configuration and selective trans
 - Support local simulation with alternate remote paths/profiles for testing, without running multiple daemon watchers.
 
 Backlog guardrail before broad automation: add a daemon process lock so there is exactly one daemon watcher process, in addition to the existing one-backup-at-a-time lock.
+
+## Phase 8: Safe Receive and Granular Linked Folders (implemented for dogfood review)
+
+The initial direct-pull workflow is replaced by the phased design in
+[Linked Folders, Safe Transfer, and Recovery Design](product/linked-folder-transfer-design.md):
+
+- Publish per-folder backup generation records.
+- Add structured scoped two-way and three-way comparison.
+- Stage and verify incoming content on the destination filesystem.
+- Apply through durable checkpoints and an interruption-safe journal.
+- Present remote data as Computer -> Folder -> Contents.
+- Add safe whole-folder clone/import.
+- Link an entire folder or a granular subfolder such as
+  `Projects/my-cool-app` to a peer scope.
+- Detect changes automatically but require Review & Sync before every merge.
+- Add selected-version recovery before claiming full point-in-time restore.
 
 Late packaging/polish backlog:
 

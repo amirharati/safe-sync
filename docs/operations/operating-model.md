@@ -26,15 +26,22 @@ Example shape for Mac:
 
 Under the hood Safe Sync uses `rclone sync` with `--backup-dir`, so local deletes can be reflected in that machine's backup, but the old remote file is moved to trash first.
 
-## Pull
+## Safe Receive
 
-Pull/copy from another machine backup is explicit. Use `safe-sync pull` with a full rclone source path.
+Receive from another machine backup is explicit. `safe-sync pull` remains a
+compatibility command, but a real run now creates a staged receive job rather
+than writing into the live destination.
 
 ```bash
 safe-sync pull dropbox:computer-backups/test/linuxbox/projects/my_exp `~/projects`/from-linux/my_exp
 ```
 
-This uses copy semantics and does not delete local files.
+Dry-run performs a read-only comparison. A real run downloads and verifies
+inside `.safe-sync-work`, then waits for `safe-sync jobs apply`. Differing
+files require an explicit keep-local, keep-both, replace, delete, or
+leave-staged decision. Replacement/deletion first checkpoints the old local
+path, and conditional rollback never overwrites later edits. See
+[Linked Folders, Safe Transfer, and Recovery Design](../product/linked-folder-transfer-design.md).
 
 ## Trash Path
 
@@ -80,4 +87,3 @@ Ignore:
 - Runtime/build caches
 - Python bytecode
 - Compiled objects and libraries
-

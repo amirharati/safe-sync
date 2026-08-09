@@ -9,6 +9,9 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+VENDOR_ROOT = PROJECT_ROOT / "vendor"
+if VENDOR_ROOT.exists():
+    sys.path.insert(0, str(VENDOR_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from safe_sync.cli import main

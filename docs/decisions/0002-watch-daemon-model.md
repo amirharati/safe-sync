@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted and implemented
 
 ## Context
 
@@ -73,9 +73,14 @@ If rclone output includes Dropbox rate-limit messages such as `too_many_requests
 
 ## Watch Backend
 
-Preferred implementation is Python `watchdog`, because it maps to native event APIs on macOS, Linux, and Windows.
+The installed runtime owns a pinned, checksum-verified Python `watchdog`
+dependency. It maps to FSEvents on macOS and inotify on Linux. Source-tree
+development may run without that dependency, but installed macOS/Linux
+runtimes include it rather than depending on a global Python package.
 
-If `watchdog` is not installed, the daemon may fall back to timer-only mode. Timer-only mode is acceptable but should be visible in status.
+If the native backend cannot start, the daemon falls back to full-tree polling
+and reports `watcher: polling` plus the startup warning in status and logs.
+The normal installed mode reports `watcher: native`.
 
 ## Non-Goals
 
@@ -87,4 +92,3 @@ If `watchdog` is not installed, the daemon may fall back to timer-only mode. Tim
 ## Consequences
 
 This design is responsive without hammering Dropbox. It also remains robust if watcher events are missed, because the fallback timer eventually runs a backup.
-

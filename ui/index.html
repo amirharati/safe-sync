@@ -29,8 +29,12 @@
         <nav class="tabs" aria-label="Safe Sync views">
           <button type="button" class="tab is-active" data-tab="status">Status</button>
           <button type="button" class="tab" data-tab="settings">Settings</button>
-          <button type="button" class="tab" data-tab="computers">Computers</button>
-          <button type="button" class="tab" data-tab="transfer">Transfer</button>
+          <button type="button" class="tab" data-tab="computers">Backups</button>
+          <button type="button" class="tab" data-tab="transfer">Receive</button>
+          <button type="button" class="tab" data-tab="jobs">Jobs</button>
+          <button type="button" class="tab" data-tab="links">Linked Folders</button>
+          <button type="button" class="tab" data-tab="history">History</button>
+          <button type="button" class="tab" data-tab="help">Help</button>
         </nav>
 
         <section class="command-preview last-command-panel">
@@ -166,10 +170,10 @@
 
         <section class="view" data-view="computers">
           <div class="section-title">
-            <h2>Computers</h2>
+            <h2>Backup Computers</h2>
             <button type="button" class="secondary" data-action="load-computers">Refresh</button>
           </div>
-          <p class="reason section-copy">Local computers are the profiles this machine can act as. Remote computers are the ones published to Dropbox.</p>
+          <p class="reason section-copy">Each computer owns its own backup. Open a remote computer, choose a folder, then compare, safely receive selected files, or clone it.</p>
           <div class="section-title lower">
             <h2>Local Computers</h2>
           </div>
@@ -182,10 +186,10 @@
 
         <section class="view" data-view="transfer">
           <div class="section-title">
-            <h2>Transfer From Another Computer</h2>
+            <h2>Safely Receive From Another Computer</h2>
             <button type="button" class="secondary" data-action="refresh-transfer">Refresh</button>
           </div>
-          <p class="reason section-copy">Copies a chosen remote file or folder to any local destination. The source is never changed.</p>
+          <p class="reason section-copy">A real receive downloads into an excluded staging area first. Your destination does not change until you review and apply the resulting job.</p>
           <form class="transfer-form" data-transfer-form>
             <label>Remote computer <select name="source_computer"></select></label>
             <label>Remote folder to copy <select name="source_folder"></select></label>
@@ -195,12 +199,13 @@
             </label>
             <label>Optional parent subfolder <input name="destination_subfolder" placeholder="received-from-laptop" /></label>
             <div class="check-row">
-              <label><input name="dry_run" type="checkbox" checked /> Review with dry run first</label>
+              <label><input name="dry_run" type="checkbox" checked /> Compare only (uncheck to stage a receive job)</label>
+              <label><input name="clone" type="checkbox" /> Clone into a new/empty destination</label>
             </div>
             <div class="actions left">
               <button type="button" class="secondary" data-action="list-remote">Browse Source</button>
               <button type="button" class="secondary" data-action="preview-transfer">Preview Contents</button>
-              <button type="submit" class="primary" data-action="run-transfer">Run Dry Run</button>
+              <button type="submit" class="primary" data-action="run-transfer">Compare</button>
             </div>
           </form>
           <div class="actions left transfer-locations">
@@ -244,7 +249,7 @@
           </section>
           <section class="transfer-selection" data-transfer-selection hidden>
             <div class="section-title">
-              <h2>Selected To Copy</h2>
+              <h2>Selected To Receive</h2>
               <button type="button" class="secondary" data-action="clear-transfer-selection">Clear</button>
             </div>
             <ul class="preview-list" data-transfer-selection-list></ul>
@@ -257,6 +262,52 @@
             <code class="path" data-transfer-command>Choose a source and destination folder.</code>
           </section>
           <pre class="output" data-transfer-output></pre>
+        </section>
+
+        <section class="view" data-view="jobs">
+          <div class="section-title">
+            <h2>Receive Jobs</h2>
+            <button type="button" class="secondary" data-action="load-jobs">Refresh</button>
+          </div>
+          <p class="reason section-copy">Review staged files and explicit conflict choices before apply. Replacements and deletions are checkpointed; rollback never overwrites later edits.</p>
+          <div class="list" data-job-list></div>
+          <pre class="output" data-job-output>Select a job to see its comparison and journal.</pre>
+        </section>
+
+        <section class="view" data-view="links">
+          <div class="section-title">
+            <h2>Linked Folders</h2>
+            <button type="button" class="secondary" data-action="load-link-status">Check Changes</button>
+          </div>
+          <p class="reason section-copy">Links detect changes automatically but never merge automatically. Both scopes must match before a link can be activated.</p>
+          <div class="list" data-link-list></div>
+          <form class="settings-grid" data-add-link-form>
+            <label>Local backup folder <select name="local_folder"></select></label>
+            <label>Local subfolder <input name="local_subpath" placeholder="my-cool-app (optional)" /></label>
+            <label>Peer computer <select name="peer_machine"></select></label>
+            <label>Peer backup folder <select name="peer_folder"></select></label>
+            <label>Peer subfolder <input name="peer_subpath" placeholder="projects/my-cool-app (optional)" /></label>
+            <label>Link label <input name="label" placeholder="My Cool App" /></label>
+            <button type="submit" class="primary" data-action="add-link">Compare &amp; Link</button>
+          </form>
+        </section>
+
+        <section class="view" data-view="history">
+          <div class="section-title">
+            <h2>Recovery History</h2>
+            <button type="button" class="secondary" data-action="load-history">Refresh</button>
+          </div>
+          <p class="reason section-copy">Browse versions retained by Safe Sync remote trash. Recovery creates a staged receive job; it never restores directly over a local file.</p>
+          <label>Local backup folder <select data-history-folder></select></label>
+          <div class="list" data-history-list></div>
+        </section>
+
+        <section class="view" data-view="help">
+          <div class="section-title">
+            <h2>Help</h2>
+          </div>
+          <p class="reason section-copy">Complete instructions from installation through daily use, recovery, and uninstall.</p>
+          <article class="help-guide" data-help-guide></article>
         </section>
 
         <p class="message" data-message></p>

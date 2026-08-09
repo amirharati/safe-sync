@@ -124,8 +124,8 @@ removes unrelated system rclone configuration.
 
 Build-from-source prerequisites are separate from runtime dependencies:
 
-- Runtime: Safe Sync backend environment, managed rclone, service files, and
-  desktop app when requested.
+- Runtime: Safe Sync backend environment, checksum-verified managed rclone and
+  native watcher, service files, and desktop app when requested.
 - Source-build only: Python, Node, Rust, and platform UI build libraries.
 
 The source installer must report missing prerequisites before it stages a

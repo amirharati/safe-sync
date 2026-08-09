@@ -27,22 +27,19 @@ The daemon stores a simple dirty flag:
 dirty = true
 ```
 
-It does not need a full queue of changed paths for the first implementation. Rclone scans the configured folders and decides what changed. The daemon only records which folder snapshots changed so status can say what woke it up.
+It does not need a full queue of changed paths. Native events are coalesced by
+configured folder; rclone scans that folder and decides what changed. The
+configured fallback backup remains the reconciliation path for events missed
+during sleep, restart, or watcher failure.
 
 ## Ignore Policy
 
 Watcher events inside known generated folders should be ignored early:
 
-```text
-node_modules
-.venv
-venv
-dist
-build
-out
-.cache
-.git
-```
+The watcher filter mirrors the directory and file exclusions in
+`config/filter.txt`, including VCS internals, dependencies, build outputs,
+caches, and compiled intermediates. A watched root named `dist` remains valid;
+filtering is applied only to paths relative to that root.
 
 This keeps noisy build systems from waking the daemon constantly.
 
@@ -76,19 +73,22 @@ No automatic daemon should be installed until this behavior is reviewed.
 
 ## Implementation status
 
-The first working daemon uses dependency-free polling so it works on macOS, Linux, and Windows-style Python environments without installing a native watcher package.
+The installed daemon uses the app-managed `watchdog` runtime: FSEvents on
+macOS and inotify on Linux. The backend never repeatedly snapshots a broad
+tree in normal native mode. Full-tree polling remains a visible degraded mode
+when the native backend cannot start.
 
 Loop behavior:
 
-1. Snapshot every enabled configured local folder.
-2. Ignore generated paths before comparing snapshots.
-3. Mark the daemon dirty when any folder snapshot changes.
+1. Subscribe to every enabled local folder through the native event backend.
+2. Ignore generated paths before they mark a folder dirty.
+3. Coalesce relevant events by folder.
 4. Wait for the debounce window to be quiet.
 5. Run normal guarded backups for all enabled folders.
 6. Refresh this machine's registry file after successful real backups.
 7. Respect a minimum interval between runs.
 8. Enter backoff when rclone output indicates Dropbox rate limiting or registry update failure.
-9. Run a fallback backup after the fallback interval even if no change was noticed.
+9. Run a fallback reconciliation backup after the fallback interval even if no event was noticed.
 
 Service install is handled by the repo installer:
 
@@ -96,7 +96,10 @@ Service install is handled by the repo installer:
 ./install.sh
 ```
 
-It installs the single `safe-sync` command, renders the macOS LaunchAgent definition in a temporary directory, installs it, then removes the temporary files. It does not start the daemon. Runtime config stays in `~/.safe-sync`. Linux and Windows service install are TODO.
+It installs the `safe-sync` command plus the app-managed watcher, renders and
+installs the macOS LaunchAgent or Linux systemd user service, and starts the
+daemon when setup has an enabled folder. Runtime config stays in
+`~/.safe-sync`. Windows service support remains deferred.
 
 
 ## Install workflow

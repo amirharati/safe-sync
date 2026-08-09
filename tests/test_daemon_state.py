@@ -22,15 +22,18 @@ from safe_sync.cli import (
     registry_path,
     RATE_LIMIT_EXIT,
     backup_cmd,
+    atomic_write_text,
     bounded_seconds,
     copy_cmd,
     restart_backend_if_running,
     restore_last_sync_finish,
     rclone_env,
     run_command,
+    run_daemon,
     run_backup_with_config,
     cmd_login_check,
     preflight,
+    parser,
     selected_folders,
     status_health,
     status_payload,
@@ -40,6 +43,7 @@ from safe_sync.cli import (
 from safe_sync.api import DaemonApiState
 from safe_sync.path_filter import should_ignore_watch_event
 from safe_sync.service import backend_autostart_cmd, backend_autostart_status_text, service_status_text, systemd_unit
+from safe_sync.watcher import NativeWatcher
 
 
 def test_debounce_waits_for_quiet_window():
@@ -49,6 +53,90 @@ def test_debounce_waits_for_quiet_window():
     assert daemon.state.state == DaemonState.DIRTY
     assert not daemon.should_sync_after_debounce(119.9)
     assert daemon.should_sync_after_debounce(120.0)
+
+
+def test_manual_backup_bypasses_debounce_and_minimum_interval():
+    daemon = WatchDaemon(WatchSettings(debounce_seconds=20, min_interval_seconds=120))
+    daemon.mark_dirty(100.0)
+    daemon.state.last_sync_finish_monotonic = 99.0
+
+    assert not daemon.should_run_backup(101.0)
+    assert daemon.should_run_backup(101.0, manual=True)
+
+    daemon.state.state = DaemonState.BACKOFF
+    assert not daemon.should_run_backup(101.0, manual=True)
+
+
+def test_manual_backup_requests_coalesce_and_remain_consumable():
+    state = DaemonApiState()
+    state.request_backup()
+    state.request_backup()
+
+    assert state.consume_backup_request()
+    assert not state.consume_backup_request()
+
+    # A request made after the daemon consumes the current request represents
+    # a click received while that backup is running.
+    state.request_backup()
+    assert state.consume_backup_request()
+
+
+def test_daemon_runs_manual_backup_immediately_and_preserves_request_during_run(monkeypatch, tmp_path):
+    local = tmp_path / "watched"
+    local.mkdir()
+    config_path = tmp_path / "config.json"
+    config = default_config("test-machine")
+    folder = {
+        "id": "watched",
+        "label": "watched",
+        "local_path": str(local),
+        "remote_root": "dropbox:computer-backups/test-machine/watched",
+        "trash_root": "dropbox:computer-backups/.trash/test-machine/watched",
+        "enabled": True,
+    }
+    config["profiles"][0]["folders"] = [folder]
+    config["folders"] = [folder]
+    config["socket_path"] = str(tmp_path / "daemon.sock")
+    config["status_path"] = str(tmp_path / "status.json")
+    config["log_dir"] = str(tmp_path / "logs")
+    config["lock_file"] = str(tmp_path / "safe-sync.lock")
+    config_path.write_text(json.dumps(config))
+
+    class FakeWatcher:
+        def __init__(self, _folders, wake):
+            self.wake = wake
+
+        def start(self):
+            return None
+
+        def consume(self):
+            return []
+
+        def healthy(self):
+            return True
+
+        def stop(self):
+            return None
+
+    def fake_server_start(server):
+        server.api_state.request_backup()
+
+    calls = []
+
+    def fake_run_all(_config, _dry_run, api_state):
+        calls.append(True)
+        if len(calls) == 1:
+            api_state.request_backup()
+        return 0, None
+
+    monkeypatch.setattr("safe_sync.cli.NativeWatcher", FakeWatcher)
+    monkeypatch.setattr("safe_sync.cli.DaemonApiServer.start", fake_server_start)
+    monkeypatch.setattr("safe_sync.cli.ensure_local_profiles_registered", lambda _config: None)
+    monkeypatch.setattr("safe_sync.cli.run_all_backups_runtime", fake_run_all)
+
+    args = SimpleNamespace(poll_interval=None, debounce=None, dry_run=True, once=False, max_loops=2)
+    assert run_daemon(args, config_path, normalized_config(config)) == 0
+    assert len(calls) == 2
 
 
 def test_pending_change_during_sync_goes_to_cooldown():
@@ -111,6 +199,45 @@ def test_login_check_is_silent_when_healthy(monkeypatch, tmp_path, capsys):
 
     assert cmd_login_check(SimpleNamespace(config=str(config_path))) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_help_command_prints_canonical_user_guide(capsys):
+    args = parser().parse_args(["help"])
+
+    assert args.func(args) == 0
+    assert capsys.readouterr().out == (Path(__file__).parents[1] / "docs" / "user-guide.md").read_text()
+
+
+def test_standard_help_points_to_guide_without_internal_commands(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        parser().parse_args(["--help"])
+
+    output = capsys.readouterr().out
+    assert stopped.value.code == 0
+    assert "safe-sync help" in output
+    assert "==SUPPRESS==" not in output
+    assert "login-check" not in output
+
+
+def test_quick_panel_only_hides_status_while_setup_is_visible():
+    project = Path(__file__).parents[1]
+    styles = (project / "ui" / "src" / "styles.css").read_text()
+    main = (project / "ui" / "src" / "main.ts").read_text()
+
+    assert '.setup-panel:not([hidden]) ~ .facts' in styles
+    assert '.setup-panel:not([hidden]) ~ .actions' in styles
+    assert '.setup-panel:not([hidden]) ~ .activity-panel' in styles
+    assert 'if (!IS_QUICK_PANEL) void loadConfig();' in main
+
+
+def test_every_open_control_panel_button_is_wired():
+    project = Path(__file__).parents[1]
+    page = (project / "ui" / "index.html").read_text()
+    main = (project / "ui" / "src" / "main.ts").read_text()
+
+    assert page.count('data-action="open-control-panel"') == 2
+    assert 'querySelectorAll("[data-action=\'open-control-panel\']")' in main
+    assert 'querySelector("[data-action=\'open-control-panel\']")?.addEventListener' not in main
 
 
 def test_login_check_gives_headless_reconnect_command(monkeypatch, tmp_path, capsys):
@@ -289,12 +416,84 @@ def test_watch_filter_ignores_generated_paths():
     assert should_ignore_watch_event("/tmp/project/node_modules/pkg/index.js")
     assert should_ignore_watch_event("/tmp/project/.venv/lib/site.py")
     assert should_ignore_watch_event("/tmp/project/dist/app.js")
+    assert should_ignore_watch_event("/tmp/project/target/debug/app")
+    assert should_ignore_watch_event("/tmp/project/.tox/py/bin/python")
+    assert should_ignore_watch_event("/tmp/project/.next/cache/data")
+    assert should_ignore_watch_event("/tmp/project/build/output.o")
+    assert should_ignore_watch_event("/tmp/project/data/temporary.pyc")
     assert not should_ignore_watch_event("/tmp/project/data/results.csv")
     assert not should_ignore_watch_event("/tmp/project/models/model.pt")
 
 
+def test_native_watcher_coalesces_relevant_events_and_ignores_build_outputs(tmp_path):
+    class FakeObserver:
+        def __init__(self):
+            self.handlers = []
+            self.emitters = []
+            self.started = False
+            self.stopped = False
+
+        def schedule(self, handler, path, recursive):
+            self.handlers.append((handler, path, recursive))
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def join(self, timeout):
+            assert timeout == 10
+
+    root = tmp_path / "dist"
+    root.mkdir()
+    observer = FakeObserver()
+    wake_count = []
+    watcher = NativeWatcher(
+        [{"id": "dist", "local_path": str(root)}],
+        wake=lambda: wake_count.append(True),
+        observer_factory=lambda: observer,
+    )
+    watcher.start()
+    handler, scheduled_path, recursive = observer.handlers[0]
+
+    handler.on_any_event(SimpleNamespace(event_type="modified", src_path=str(root / "data.csv"), dest_path=None, is_directory=False))
+    handler.on_any_event(SimpleNamespace(event_type="created", src_path=str(root / "target" / "debug" / "app"), dest_path=None, is_directory=False))
+    handler.on_any_event(SimpleNamespace(event_type="modified", src_path=str(root / "data.csv"), dest_path=None, is_directory=False))
+
+    assert observer.started
+    assert scheduled_path == str(root.resolve())
+    assert recursive is True
+    assert watcher.healthy()
+    assert watcher.consume() == ["dist"]
+    assert len(wake_count) == 2
+    assert watcher.consume() == []
+
+    observer.emitters = [SimpleNamespace(is_alive=lambda: False)]
+    assert not watcher.healthy()
+
+    watcher.stop()
+    assert observer.stopped
+
+
+def test_atomic_write_failure_preserves_previous_file(monkeypatch, tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text('{"valid": true}\n')
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated interrupted replace")
+
+    monkeypatch.setattr("safe_sync.cli.os.replace", fail_replace)
+    with pytest.raises(OSError, match="simulated interrupted replace"):
+        atomic_write_text(target, '{"valid": false}\n')
+
+    assert json.loads(target.read_text()) == {"valid": True}
+    assert list(tmp_path.glob(".config.json.*")) == []
+
+
 def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
     config = {
+        "rclone_bin": "rclone",
         "local_path": str(tmp_path),
         "remote_root": "dropbox:computer-backups/test/machine/folder",
         "trash_root": "dropbox:computer-backups/test/.trash/machine/folder",
@@ -307,7 +506,7 @@ def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
 
 def test_copy_command_limits_a_transfer_to_selected_files_and_folders(tmp_path):
     command = copy_cmd(
-        {"filter_file": str(tmp_path / "filter.txt")},
+        {"rclone_bin": "rclone", "filter_file": str(tmp_path / "filter.txt")},
         "dropbox:source",
         str(tmp_path),
         dry_run=True,

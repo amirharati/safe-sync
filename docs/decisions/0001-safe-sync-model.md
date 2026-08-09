@@ -79,3 +79,10 @@ Tradeoffs:
 - Remote trash can grow and needs cleanup policy.
 - There may be duplicate copies between machine backups.
 
+## Follow-on Design
+
+The proposed
+[Linked Folders, Safe Transfer, and Recovery Design](../product/linked-folder-transfer-design.md)
+preserves this ownership model while adding granular folder/subfolder links,
+automatic read-only peer-change detection, and user-approved checkpointed
+merges. It does not turn peer backups into a shared writable sync root.

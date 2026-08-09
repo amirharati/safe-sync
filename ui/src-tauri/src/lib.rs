@@ -124,6 +124,16 @@ struct OpenDropboxRequest {
     remote_root: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AddLinkRequest {
+    local_folder: String,
+    peer_machine: String,
+    peer_folder: String,
+    local_subpath: String,
+    peer_subpath: String,
+    label: String,
+}
+
 fn safe_id(value: &str) -> String {
     let mut cleaned = String::with_capacity(value.len());
     let mut previous_dash = false;
@@ -735,11 +745,14 @@ fn list_local_folder(path: String) -> Result<LocalFolderPreview, String> {
 }
 
 #[tauri::command]
-async fn pull_remote(source: String, destination: String, dry_run: bool, selected_paths: Vec<String>) -> Result<CommandResult, String> {
+async fn pull_remote(source: String, destination: String, dry_run: bool, clone: bool, selected_paths: Vec<String>) -> Result<CommandResult, String> {
     if source.trim().is_empty() || destination.trim().is_empty() {
         return Err("source and destination are required".to_string());
     }
-    let mut args = vec!["pull".to_string(), source, destination];
+    let mut args = vec![if clone { "receive" } else { "pull" }.to_string(), source, destination];
+    if clone {
+        args.push("--clone".to_string());
+    }
     if dry_run {
         args.push("--dry-run".to_string());
     }
@@ -748,6 +761,107 @@ async fn pull_remote(source: String, destination: String, dry_run: bool, selecte
         args.push(selected_path);
     }
     let output = run_safe_sync_blocking(args).await?;
+    Ok(CommandResult { ok: true, output })
+}
+
+#[tauri::command]
+async fn get_jobs() -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["jobs".to_string(), "list".to_string()]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync jobs returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn job_operation(action: String, job_id: String, policies: Vec<String>) -> Result<CommandResult, String> {
+    if !matches!(action.as_str(), "apply" | "reconcile" | "rollback") || job_id.trim().is_empty() {
+        return Err("valid job action and id are required".to_string());
+    }
+    let mut args = vec!["jobs".to_string(), action, job_id];
+    for policy in policies {
+        if !policy.contains('=') {
+            return Err("job policy must be PATH=ACTION".to_string());
+        }
+        args.push("--policy".to_string());
+        args.push(policy);
+    }
+    let output = run_safe_sync_blocking(args).await?;
+    Ok(CommandResult { ok: true, output })
+}
+
+#[tauri::command]
+async fn get_links(refresh_status: bool) -> Result<Value, String> {
+    let args = if refresh_status {
+        vec!["links".to_string(), "status".to_string()]
+    } else {
+        vec!["links".to_string(), "list".to_string()]
+    };
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync links returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn add_link(request: AddLinkRequest) -> Result<Value, String> {
+    if request.local_folder.trim().is_empty()
+        || request.peer_machine.trim().is_empty()
+        || request.peer_folder.trim().is_empty()
+    {
+        return Err("local folder, peer computer, and peer folder are required".to_string());
+    }
+    let mut args = vec![
+        "links".to_string(),
+        "add".to_string(),
+        request.local_folder,
+        request.peer_machine,
+        request.peer_folder,
+    ];
+    if !request.local_subpath.trim().is_empty() {
+        args.extend(["--local-subpath".to_string(), request.local_subpath]);
+    }
+    if !request.peer_subpath.trim().is_empty() {
+        args.extend(["--peer-subpath".to_string(), request.peer_subpath]);
+    }
+    if !request.label.trim().is_empty() {
+        args.extend(["--label".to_string(), request.label]);
+    }
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync links add returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn remove_link(link_id: String) -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["links".to_string(), "remove".to_string(), link_id]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync links remove returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn review_link(link_id: String) -> Result<CommandResult, String> {
+    if link_id.trim().is_empty() {
+        return Err("linked folder id is required".to_string());
+    }
+    let output = run_safe_sync_blocking(vec!["links".to_string(), "review".to_string(), link_id]).await?;
+    Ok(CommandResult { ok: true, output })
+}
+
+#[tauri::command]
+async fn get_history(folder: String) -> Result<Value, String> {
+    if folder.trim().is_empty() {
+        return Err("choose a local backup folder".to_string());
+    }
+    let stdout = run_safe_sync_blocking(vec!["history".to_string(), folder]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync history returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn recover_history(folder: String, path: String) -> Result<CommandResult, String> {
+    if folder.trim().is_empty() || path.trim().is_empty() {
+        return Err("folder and retained version path are required".to_string());
+    }
+    let output = run_safe_sync_blocking(vec![
+        "history".to_string(),
+        folder,
+        "--receive".to_string(),
+        path,
+    ])
+    .await?;
     Ok(CommandResult { ok: true, output })
 }
 
@@ -987,7 +1101,15 @@ pub fn run() {
             get_computers,
             list_remote,
             list_local_folder,
-            pull_remote
+            pull_remote,
+            get_jobs,
+            job_operation,
+            get_links,
+            add_link,
+            remove_link,
+            review_link,
+            get_history,
+            recover_history
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

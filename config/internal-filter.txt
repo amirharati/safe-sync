@@ -1,0 +1,3 @@
+# Safe Sync internal work data
+- .safe-sync-work/**
+- **/.safe-sync-work/**

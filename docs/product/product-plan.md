@@ -17,6 +17,13 @@ Success means:
 - Build artifacts and dependency/cache folders are ignored.
 - The user can understand what the tool does by reading small scripts and docs.
 - The user can see sync health from a small tray/menu bar UI without trusting a hidden black box.
+- Corresponding whole folders or granular subfolders can detect peer changes
+  automatically while every cross-computer merge remains user-initiated.
+
+The authoritative proposal for the next cross-computer milestone is
+[Linked Folders, Safe Transfer, and Recovery Design](linked-folder-transfer-design.md).
+The required observability gate before broad dogfooding is
+[Event Logging and Audit Design](event-logging-and-audit-design.md).
 
 ## Non-Goals
 
@@ -51,13 +58,29 @@ Default behavior:
 
 ### Pull From Another Machine
 
-Copy a path from another machine's backup into a local destination.
+Compare and receive a path from another machine's backup into a local
+destination.
 
 Default behavior:
 
-- Uses `rclone copy`.
-- Does not delete local destination files.
-- Does not overwrite silently if avoidable; conflict policy should preserve both versions.
+- Stages remote data on the destination filesystem before apply.
+- Produces a real source/destination diff and rechecks it before apply.
+- Does not delete or overwrite local destination files without explicit
+  approval and a recoverable checkpoint.
+- Moves verified staged files into place rather than downloading/copying them
+  twice.
+
+### Linked Folders
+
+Manually associate a complete folder or granular subfolder with the
+corresponding backup scope from another computer.
+
+Default behavior:
+
+- Local and peer changes are detected automatically.
+- A stored common baseline distinguishes one-sided changes from conflicts.
+- The user always opens Review & Sync and approves the actual merge.
+- Each computer continues writing only its own remote backup tree.
 
 ### Shared Handoff
 
@@ -88,4 +111,3 @@ Default behavior:
 - Keep trash outside Git repositories.
 - Preserve original relative paths in trash.
 - Fail visibly rather than guess.
-

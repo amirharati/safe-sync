@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { renderUserGuide } from "./help";
 import "./styles.css";
 
 type SafeSyncStatus = {
@@ -114,6 +115,13 @@ const dropboxConnectionLabel = document.querySelector<HTMLElement>("[data-dropbo
 const connectDropboxButton = document.querySelector<HTMLButtonElement>("[data-action='connect-dropbox']");
 const completeSetupButton = document.querySelector<HTMLButtonElement>("[data-action='complete-setup']");
 const reconnectDropboxButton = document.querySelector<HTMLButtonElement>("[data-action='reconnect-dropbox']");
+const helpGuide = document.querySelector<HTMLElement>("[data-help-guide]");
+const jobList = document.querySelector<HTMLElement>("[data-job-list]");
+const jobOutput = document.querySelector<HTMLElement>("[data-job-output]");
+const linkList = document.querySelector<HTMLElement>("[data-link-list]");
+const addLinkForm = document.querySelector<HTMLFormElement>("[data-add-link-form]");
+const historyFolder = document.querySelector<HTMLSelectElement>("[data-history-folder]");
+const historyList = document.querySelector<HTMLElement>("[data-history-list]");
 
 let latestStatus: SafeSyncStatus | null = null;
 let busyAction: string | null = null;
@@ -132,6 +140,10 @@ const selectedTransferPaths = new Set<string>();
 let lastUiCommand = "";
 let dropboxConnectionKnown = false;
 let dropboxConnected = false;
+let jobsLoaded = false;
+let linksLoaded = false;
+let historyLoaded = false;
+let latestJobs: Array<Record<string, unknown>> = [];
 
 function text(value: unknown, fallback = "-"): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
@@ -277,6 +289,9 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (action === "preview-transfer") return "transfer-preview";
   if (action === "run-transfer") return "transfer";
   if (action === "refresh-transfer") return "transfer";
+  if (["load-jobs", "show-job", "apply-job", "reconcile-job", "rollback-job"].includes(action ?? "")) return "jobs";
+  if (["load-link-status", "review-link", "remove-link", "add-link"].includes(action ?? "")) return "links";
+  if (["load-history", "recover-history"].includes(action ?? "")) return "history";
   return action ?? null;
 }
 
@@ -552,17 +567,78 @@ function updateTransferCommand(): void {
   const destination = transferDestination();
   const subfolder = cleanSubfolder(selectedValue(transferForm, "destination_subfolder"));
   const dryRun = (transferForm.elements.namedItem("dry_run") as HTMLInputElement | null)?.checked ?? true;
+  const clone = (transferForm.elements.namedItem("clone") as HTMLInputElement | null)?.checked ?? false;
   const runButton = document.querySelector<HTMLButtonElement>("[data-action='run-transfer']");
-  if (runButton) runButton.textContent = dryRun ? "Run Dry Run" : "Copy To Local Folder";
+  if (runButton) runButton.textContent = dryRun ? "Compare" : "Stage Receive Job";
   if (subfolder === null) {
     transferCommand.textContent = "Destination subfolder cannot contain ..";
   } else if (!transferSource || !destination) {
     transferCommand.textContent = "Choose a source and destination folder.";
   } else {
     const selected = [...selectedTransferPaths].map((path) => ` --select ${shellQuote(path)}`).join("");
-    transferCommand.textContent = `safe-sync pull ${shellQuote(transferSourceRoot)} ${shellQuote(destination)}${dryRun ? " --dry-run" : ""}${selected}`;
+    const command = clone ? "receive" : "pull";
+    transferCommand.textContent = `safe-sync ${command} ${shellQuote(transferSourceRoot)} ${shellQuote(destination)}${clone ? " --clone" : ""}${dryRun ? " --dry-run" : ""}${selected}`;
   }
   updateTransferLocationActions();
+}
+
+function renderLinkAndHistoryOptions(): void {
+  if (historyFolder) {
+    const prior = historyFolder.value;
+    historyFolder.innerHTML = "";
+    for (const raw of latestConfig?.folders ?? []) {
+      const folder = raw as FolderView;
+      if (!folder.id) continue;
+      const option = document.createElement("option");
+      option.value = folder.id;
+      option.textContent = text(folder.label, folder.id);
+      historyFolder.append(option);
+    }
+    if (prior && [...historyFolder.options].some((option) => option.value === prior)) historyFolder.value = prior;
+  }
+  if (!addLinkForm) return;
+  const local = formField(addLinkForm, "local_folder") as HTMLSelectElement | null;
+  const peer = formField(addLinkForm, "peer_machine") as HTMLSelectElement | null;
+  const peerFolder = formField(addLinkForm, "peer_folder") as HTMLSelectElement | null;
+  if (!local || !peer || !peerFolder) return;
+  const priorLocal = local.value;
+  const priorPeer = peer.value;
+  local.innerHTML = "";
+  for (const raw of latestConfig?.folders ?? []) {
+    const folder = raw as FolderView;
+    if (!folder.id) continue;
+    const option = document.createElement("option");
+    option.value = folder.id;
+    option.textContent = text(folder.label, folder.id);
+    local.append(option);
+  }
+  if (priorLocal && [...local.options].some((option) => option.value === priorLocal)) local.value = priorLocal;
+  peer.innerHTML = "";
+  for (const raw of latestComputers) {
+    const computer = raw as ComputerView;
+    const id = text(computer.machine_id, "");
+    if (!id || id === latestConfig?.machine_id) continue;
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = text(computer.machine_label, id);
+    peer.append(option);
+  }
+  if (priorPeer && [...peer.options].some((option) => option.value === priorPeer)) peer.value = priorPeer;
+  const renderPeerFolders = (): void => {
+    peerFolder.innerHTML = "";
+    const computer = remoteComputerByMachineId(peer.value);
+    for (const raw of Array.isArray(computer?.folders) ? computer.folders : []) {
+      const folder = raw as Record<string, unknown>;
+      const id = text(folder.id, "");
+      if (!id) continue;
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = text(folder.label, id);
+      peerFolder.append(option);
+    }
+  };
+  renderPeerFolders();
+  peer.onchange = renderPeerFolders;
 }
 
 function sourceComputer(): ComputerView | null {
@@ -786,19 +862,42 @@ function renderComputersView(): void {
         return text(profile.machine_id, text(profile.id)) === machineKey;
       }) as ProfileView | undefined;
       const folders = Array.isArray(computer.folders) ? computer.folders.length : 0;
+      const folderRows = (Array.isArray(computer.folders) ? computer.folders : []).map((rawFolder) => {
+        const folder = rawFolder as Record<string, unknown>;
+        const folderId = text(folder.id, "");
+        return `<div class="backup-folder-row"><span><strong>${escapeHtml(text(folder.label, folderId))}</strong><small>${escapeHtml(text(folder.remote_path, ""))}</small></span><button type="button" class="secondary" data-action="use-remote-backup" data-machine="${escapeHtml(machineKey)}" data-folder="${escapeHtml(folderId)}">Browse / Receive</button></div>`;
+      }).join("");
       const item = document.createElement("article");
       item.className = "item";
       item.innerHTML = `
         <div class="item-heading">
-          <strong>${text(computer.machine_label, machineKey)}</strong>
+          <strong>${escapeHtml(text(computer.machine_label, machineKey))}</strong>
           <span class="pill ${linkedProfile ? "is-linked" : ""}">${linkedProfile ? "Also local" : "Remote only"}</span>
         </div>
         <span>${folders} folder(s)</span>
-        <span>${text(computer.updated_at, text(computer.generated_at))}</span>`;
+        <span>${escapeHtml(text(computer.updated_at, text(computer.generated_at)))}</span>
+        <div class="backup-folder-list">${folderRows}</div>`;
       computerList.append(item);
     }
     if (latestComputers.length === 0) computerList.textContent = "No remote computers published yet";
   }
+}
+
+function useRemoteBackup(button: HTMLElement): void {
+  if (!transferForm) return;
+  activateTab("transfer");
+  renderTransferOptions();
+  const computerSelect = formField(transferForm, "source_computer") as HTMLSelectElement | null;
+  const folderSelect = formField(transferForm, "source_folder") as HTMLSelectElement | null;
+  if (!computerSelect || !folderSelect) return;
+  computerSelect.value = button.dataset.machine ?? "";
+  computerSelect.dispatchEvent(new Event("change"));
+  const computer = remoteComputerByMachineId(computerSelect.value);
+  const selectedFolder = (Array.isArray(computer?.folders) ? computer.folders : []).find((raw) => text((raw as Record<string, unknown>).id, "") === button.dataset.folder) as Record<string, unknown> | undefined;
+  const selectedRemotePath = text(selectedFolder?.remote_path, "");
+  if (selectedRemotePath) folderSelect.value = remoteRoot(latestConfig?.remote_base ?? "dropbox:", selectedRemotePath);
+  folderSelect.dispatchEvent(new Event("change"));
+  setMessage("Remote backup opened in Receive", "ok");
 }
 
 function renderConfig(config: SafeSyncConfig): void {
@@ -863,6 +962,7 @@ function renderConfig(config: SafeSyncConfig): void {
   }
   renderComputersView();
   renderTransferOptions();
+  renderLinkAndHistoryOptions();
 }
 
 async function loadConfig(): Promise<void> {
@@ -1103,6 +1203,7 @@ async function loadComputers(): Promise<void> {
     computersLoaded = true;
     renderComputersView();
     renderTransferOptions();
+    renderLinkAndHistoryOptions();
     setMessage("Computers loaded", "ok");
     holdAction("computers");
   } catch (error) {
@@ -1195,6 +1296,7 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   event.preventDefault();
   if (!transferForm || !transferOutput) return;
   const dryRun = (transferForm.elements.namedItem("dry_run") as HTMLInputElement | null)?.checked ?? true;
+  const clone = (transferForm.elements.namedItem("clone") as HTMLInputElement | null)?.checked ?? false;
   const destination = transferDestination();
   if (!transferSource || !destination) {
     transferOutput.textContent = "Choose a remote source and any local destination folder.";
@@ -1208,15 +1310,18 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   }
   setBusy("transfer");
   try {
-    showUiCommand(["pull", transferSourceRoot, destination, ...(dryRun ? ["--dry-run"] : []), ...[...selectedTransferPaths].flatMap((path) => ["--select", path])]);
+    showUiCommand([clone ? "receive" : "pull", transferSourceRoot, destination, ...(clone ? ["--clone"] : []), ...(dryRun ? ["--dry-run"] : []), ...[...selectedTransferPaths].flatMap((path) => ["--select", path])]);
     const result = await invoke<CommandResult>("pull_remote", {
       source: transferSourceRoot,
       destination,
       dryRun,
+      clone,
       selectedPaths: [...selectedTransferPaths],
     });
-    transferOutput.textContent = `${result.output || "transfer queued"}\nThe daemon will run it after any active backup. Live progress appears above.`;
-    setMessage(dryRun ? "Dry run queued" : "Transfer queued", "ok");
+    transferOutput.textContent = dryRun
+      ? formatComparisonOutput(result.output)
+      : `${result.output || "receive job queued"}\nThe daemon stages it after any active backup. Open Jobs to review and apply; the destination remains unchanged until then.`;
+    setMessage(dryRun ? "Comparison complete" : "Receive job queued", "ok");
     holdAction("transfer");
   } catch (error) {
     transferOutput.textContent = String(error);
@@ -1226,9 +1331,249 @@ async function pullRemote(event: SubmitEvent): Promise<void> {
   }
 }
 
+function formatComparisonOutput(output: string): string {
+  try {
+    const comparison = JSON.parse(output) as Record<string, unknown>;
+    const counts = (comparison.counts ?? {}) as Record<string, unknown>;
+    const summary = Object.entries(counts)
+      .filter(([, count]) => Number(count) > 0)
+      .map(([category, count]) => `${category.replace(/_/g, " ")}: ${Number(count)}`)
+      .join(" · ");
+    const results = Array.isArray(comparison.results) ? comparison.results as Array<Record<string, unknown>> : [];
+    const changed = results.filter((item) => !["same", "same_change"].includes(text(item.category, "")));
+    const lines = changed.slice(0, 200).map((item) => `${text(item.category, "different").replace(/_/g, " ")}  ${text(item.path, "-")}`);
+    return [summary || "No differences found.", ...lines, ...(changed.length > 200 ? [`… ${changed.length - 200} more`] : [])].join("\n");
+  } catch {
+    return output || "No differences found.";
+  }
+}
+
+function jobDecisionOptions(category: string): string[] {
+  if (category === "peer_only") return ["add", "leave_staged"];
+  if (category === "local_only") return ["keep_local", "delete"];
+  if (category === "different" || category === "conflict") return ["keep_local", "keep_both", "replace", "leave_staged"];
+  return ["same"];
+}
+
+function renderJobs(): void {
+  if (!jobList) return;
+  jobList.innerHTML = "";
+  if (latestJobs.length === 0) {
+    jobList.textContent = "No receive jobs yet.";
+    return;
+  }
+  for (const job of latestJobs) {
+    const id = text(job.id, "unknown");
+    const status = text(job.status, "unknown");
+    const comparison = (job.comparison ?? {}) as Record<string, unknown>;
+    const results = Array.isArray(comparison.results) ? comparison.results as Array<Record<string, unknown>> : [];
+    const decisions = results.filter((item) => !["same", "same_change"].includes(text(item.category, "")));
+    const item = document.createElement("article");
+    item.className = "card job-card";
+    item.dataset.jobId = id;
+    const decisionRows = decisions.map((decision) => {
+      const path = text(decision.path, "");
+      const category = text(decision.category, "different");
+      const options = jobDecisionOptions(category)
+        .map((option) => `<option value="${escapeHtml(option)}">${escapeHtml(option.replace(/_/g, " "))}</option>`)
+        .join("");
+      return `<label class="job-decision"><span class="path">${escapeHtml(path)}</span><span class="pill">${escapeHtml(category)}</span><select data-job-policy data-path="${escapeHtml(path)}">${options}</select></label>`;
+    }).join("");
+    const canApply = status === "ready" || status === "needs_review" || status === "interrupted";
+    const canRollback = ["complete", "interrupted", "needs_review"].includes(status);
+    item.innerHTML = `
+      <div class="section-title"><h3>${escapeHtml(text(job.source_label, "Receive"))}</h3><span class="pill">${escapeHtml(status)}</span></div>
+      <p class="path">${escapeHtml(text(job.source, "-"))} → ${escapeHtml(text(job.destination, "-"))}</p>
+      <div class="job-decisions">${decisionRows || "<p>No conflict decisions are required.</p>"}</div>
+      <div class="actions left">
+        <button type="button" class="secondary" data-action="show-job">Details</button>
+        ${canApply ? '<button type="button" class="primary" data-action="apply-job">Apply Reviewed Choices</button>' : ""}
+        ${status === "interrupted" ? '<button type="button" class="secondary" data-action="reconcile-job">Reconcile</button>' : ""}
+        ${canRollback ? '<button type="button" class="secondary" data-action="rollback-job">Roll Back</button>' : ""}
+      </div>`;
+    jobList.append(item);
+  }
+}
+
+async function loadJobs(): Promise<void> {
+  setBusy("jobs");
+  try {
+    latestJobs = await invoke<Array<Record<string, unknown>>>("get_jobs");
+    jobsLoaded = true;
+    renderJobs();
+    setMessage("Receive jobs loaded", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function runJobAction(button: HTMLElement, action: "apply" | "reconcile" | "rollback"): Promise<void> {
+  const card = button.closest<HTMLElement>("[data-job-id]");
+  const jobId = card?.dataset.jobId ?? "";
+  if (!jobId) return;
+  const policies = action === "apply"
+    ? [...(card?.querySelectorAll<HTMLSelectElement>("[data-job-policy]") ?? [])].map((select) => `${select.dataset.path ?? ""}=${select.value}`)
+    : [];
+  setBusy("jobs");
+  try {
+    showUiCommand(["jobs", action, jobId, ...policies.flatMap((policy) => ["--policy", policy])]);
+    const result = await invoke<CommandResult>("job_operation", { action, jobId, policies });
+    if (jobOutput) jobOutput.textContent = result.output || `${action} queued`;
+    setMessage(`${action} queued`, "ok");
+    window.setTimeout(() => void loadJobs(), 800);
+  } catch (error) {
+    if (jobOutput) jobOutput.textContent = String(error);
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+function showJob(button: HTMLElement): void {
+  const id = button.closest<HTMLElement>("[data-job-id]")?.dataset.jobId;
+  const job = latestJobs.find((item) => item.id === id);
+  if (jobOutput) jobOutput.textContent = JSON.stringify(job ?? {}, null, 2);
+}
+
+function renderLinks(values: Array<Record<string, unknown>>, statusMode: boolean): void {
+  if (!linkList) return;
+  linkList.innerHTML = "";
+  if (values.length === 0) {
+    linkList.textContent = "No linked folders yet.";
+    return;
+  }
+  for (const raw of values) {
+    const link = (statusMode ? raw.link : raw) as Record<string, unknown>;
+    const local = (link.local ?? {}) as Record<string, unknown>;
+    const peer = (link.peer ?? {}) as Record<string, unknown>;
+    const comparison = (raw.comparison ?? {}) as Record<string, unknown>;
+    const counts = (comparison.counts ?? {}) as Record<string, unknown>;
+    const countSummary = Object.entries(counts).filter(([, count]) => Number(count) > 0).map(([name, count]) => `${name.replace(/_/g, " ")}: ${Number(count)}`).join(" · ");
+    const item = document.createElement("article");
+    item.className = "card";
+    item.dataset.linkId = text(link.id, "");
+    item.innerHTML = `
+      <div class="section-title"><h3>${escapeHtml(text(link.label, "Linked folder"))}</h3><span class="pill">${escapeHtml(text(statusMode ? raw.status : link.status, "not checked"))}</span></div>
+      <p class="path">Local: ${escapeHtml(text(local.folder_id, "-"))}/${escapeHtml(text(local.subpath, ""))}</p>
+      <p class="path">Peer: ${escapeHtml(text(peer.machine_id, "-"))}/${escapeHtml(text(peer.folder_id, "-"))}/${escapeHtml(text(peer.subpath, ""))}</p>
+      ${countSummary ? `<p>${escapeHtml(countSummary)}</p>` : ""}
+      <div class="actions left"><button type="button" class="primary" data-action="review-link">Review &amp; Sync</button><button type="button" class="secondary" data-action="remove-link">Remove Link</button></div>`;
+    linkList.append(item);
+  }
+}
+
+async function loadLinks(refreshStatus = false): Promise<void> {
+  setBusy("links");
+  try {
+    const values = await invoke<Array<Record<string, unknown>>>("get_links", { refreshStatus });
+    linksLoaded = true;
+    renderLinks(values, refreshStatus);
+    setMessage(refreshStatus ? "Linked-folder changes checked" : "Linked folders loaded", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function addLink(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+  if (!addLinkForm) return;
+  const request = {
+    local_folder: selectedValue(addLinkForm, "local_folder"),
+    peer_machine: selectedValue(addLinkForm, "peer_machine"),
+    peer_folder: selectedValue(addLinkForm, "peer_folder"),
+    local_subpath: inputValue(addLinkForm, "local_subpath"),
+    peer_subpath: inputValue(addLinkForm, "peer_subpath"),
+    label: inputValue(addLinkForm, "label"),
+  };
+  setBusy("links");
+  try {
+    showUiCommand(["links", "add", request.local_folder, request.peer_machine, request.peer_folder, ...(request.local_subpath ? ["--local-subpath", request.local_subpath] : []), ...(request.peer_subpath ? ["--peer-subpath", request.peer_subpath] : [])]);
+    await invoke("add_link", { request });
+    await loadLinks(false);
+    setMessage("Linked folder activated", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function removeLink(button: HTMLElement): Promise<void> {
+  const linkId = button.closest<HTMLElement>("[data-link-id]")?.dataset.linkId ?? "";
+  if (!linkId) return;
+  try {
+    showUiCommand(["links", "remove", linkId]);
+    await invoke("remove_link", { linkId });
+    await loadLinks(false);
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+async function reviewLink(button: HTMLElement): Promise<void> {
+  const linkId = button.closest<HTMLElement>("[data-link-id]")?.dataset.linkId ?? "";
+  if (!linkId) return;
+  try {
+    showUiCommand(["links", "review", linkId]);
+    const result = await invoke<CommandResult>("review_link", { linkId });
+    jobsLoaded = false;
+    setMessage(result.output || "Linked-folder review queued", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+async function loadHistory(): Promise<void> {
+  const folder = historyFolder?.value ?? "";
+  if (!folder || !historyList) return;
+  setBusy("history");
+  try {
+    showUiCommand(["history", folder]);
+    const value = await invoke<Record<string, unknown>>("get_history", { folder });
+    const entries = Array.isArray(value.entries) ? value.entries as Array<Record<string, unknown>> : [];
+    historyList.innerHTML = "";
+    for (const entry of entries) {
+      const item = document.createElement("article");
+      item.className = "card";
+      const path = text(entry.Path, text(entry.Name, ""));
+      item.dataset.historyPath = path;
+      item.innerHTML = `<h3>${escapeHtml(path || "version")}</h3><p class="path">${escapeHtml(text(entry.ModTime, "unknown time"))} · ${Number(entry.Size ?? 0)} bytes</p>${entry.IsDir === true ? "" : '<button type="button" class="secondary" data-action="recover-history">Stage Recovery</button>'}`;
+      historyList.append(item);
+    }
+    if (entries.length === 0) historyList.textContent = "No retained replacement/deletion versions found.";
+    historyLoaded = true;
+    setMessage("Recovery history loaded", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function recoverHistory(button: HTMLElement): Promise<void> {
+  const folder = historyFolder?.value ?? "";
+  const path = button.closest<HTMLElement>("[data-history-path]")?.dataset.historyPath ?? "";
+  if (!folder || !path) return;
+  setBusy("history");
+  try {
+    showUiCommand(["history", folder, "--receive", path]);
+    const result = await invoke<CommandResult>("recover_history", { folder, path });
+    setMessage(result.output || "History recovery job queued", "ok");
+    jobsLoaded = false;
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
 async function copyTransferCommand(): Promise<void> {
   const command = transferCommand?.textContent ?? "";
-  if (!command.startsWith("safe-sync pull")) {
+  if (!command.startsWith("safe-sync pull") && !command.startsWith("safe-sync receive")) {
     setMessage("Choose a source and destination before copying a command", "error");
     return;
   }
@@ -1450,16 +1795,29 @@ function activateTab(tab: string): void {
     if (!configLoaded) void loadConfig();
     if (!computersLoaded) void loadComputers();
   }
+  if (tab === "jobs" && !jobsLoaded) void loadJobs();
+  if (tab === "links") {
+    if (!configLoaded) void loadConfig();
+    if (!computersLoaded) void loadComputers();
+    if (!linksLoaded) void loadLinks(false);
+  }
+  if (tab === "history") {
+    if (!configLoaded) void loadConfig();
+    if (!historyLoaded && historyFolder?.value) void loadHistory();
+  }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   document.documentElement.dataset.ready = "true";
   document.documentElement.dataset.panel = IS_QUICK_PANEL ? "quick" : "main";
+  if (helpGuide) renderUserGuide(helpGuide);
   refreshButton?.addEventListener("click", () => void refreshStatus());
   toggleButton?.addEventListener("click", () => void toggleBackend());
   backupButton?.addEventListener("click", () => void backupNow());
   logsButton?.addEventListener("click", () => void openLogs());
-  document.querySelector("[data-action='open-control-panel']")?.addEventListener("click", () => void openControlPanel());
+  for (const button of document.querySelectorAll("[data-action='open-control-panel']")) {
+    button.addEventListener("click", () => void openControlPanel());
+  }
   document.querySelector("[data-action='close-quick']")?.addEventListener("click", () => void closeQuickPanel());
   document.querySelector("[data-action='quit-tray']")?.addEventListener("click", () => void quitTray());
   settingsForm?.addEventListener("submit", (event) => void saveSettings(event));
@@ -1485,6 +1843,10 @@ window.addEventListener("DOMContentLoaded", () => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "activate-profile") void activateProfile(target);
   });
+  computerList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "use-remote-backup") useRemoteBackup(target);
+  });
   transferForm?.addEventListener("submit", (event) => void pullRemote(event));
   transferForm?.addEventListener("input", updateTransferCommand);
   transferForm?.addEventListener("change", updateTransferCommand);
@@ -1497,6 +1859,19 @@ window.addEventListener("DOMContentLoaded", () => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "remove-transfer-entry" && target.dataset.path) toggleTransferSelection(target.dataset.path);
   });
+  jobList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "show-job") showJob(target);
+    if (target?.dataset.action === "apply-job") void runJobAction(target, "apply");
+    if (target?.dataset.action === "reconcile-job") void runJobAction(target, "reconcile");
+    if (target?.dataset.action === "rollback-job") void runJobAction(target, "rollback");
+  });
+  linkList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "remove-link") void removeLink(target);
+    if (target?.dataset.action === "review-link") void reviewLink(target);
+  });
+  addLinkForm?.addEventListener("submit", (event) => void addLink(event));
   document.querySelector("[data-action='reload-config']")?.addEventListener("click", () => void loadConfig());
   document.querySelector("[data-action='load-computers']")?.addEventListener("click", () => void loadComputers());
   document.querySelector("[data-action='list-remote']")?.addEventListener("click", () => void listRemote());
@@ -1516,9 +1891,17 @@ window.addEventListener("DOMContentLoaded", () => {
     void loadConfig();
     void loadComputers();
   });
+  document.querySelector("[data-action='load-jobs']")?.addEventListener("click", () => void loadJobs());
+  document.querySelector("[data-action='load-link-status']")?.addEventListener("click", () => void loadLinks(true));
+  document.querySelector("[data-action='load-history']")?.addEventListener("click", () => void loadHistory());
+  historyFolder?.addEventListener("change", () => void loadHistory());
+  historyList?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.dataset.action === "recover-history") void recoverHistory(target);
+  });
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
     button.addEventListener("click", () => activateTab(button.dataset.tab ?? "status"));
   }
   void refreshStatus();
-  void loadConfig();
+  if (!IS_QUICK_PANEL) void loadConfig();
 });
