@@ -34,6 +34,7 @@
           <button type="button" class="tab" data-tab="jobs">Jobs</button>
           <button type="button" class="tab" data-tab="links">Linked Folders</button>
           <button type="button" class="tab" data-tab="history">History</button>
+          <button type="button" class="tab" data-tab="activity">Activity</button>
           <button type="button" class="tab" data-tab="help">Help</button>
         </nav>
 
@@ -300,6 +301,58 @@
           <p class="reason section-copy">Browse versions retained by Safe Sync remote trash. Recovery creates a staged receive job; it never restores directly over a local file.</p>
           <label>Local backup folder <select data-history-folder></select></label>
           <div class="list" data-history-list></div>
+        </section>
+
+        <section class="view" data-view="activity">
+          <div class="section-title">
+            <h2>Audit Activity</h2>
+            <button type="button" class="secondary" data-action="load-activity">Refresh</button>
+          </div>
+          <p class="reason section-copy">Structured events connect watcher detection, backup decisions, per-file results, cloud publication, receives, and rollback. The bounded journal is diagnostic evidence, not file recovery storage.</p>
+          <dl class="facts compact audit-facts">
+            <div><dt>Health</dt><dd data-audit-health>-</dd></div>
+            <div><dt>Level</dt><dd data-audit-level>-</dd></div>
+            <div><dt>Local usage</dt><dd data-audit-usage>-</dd></div>
+            <div><dt>Cloud pending</dt><dd data-audit-pending>-</dd></div>
+            <div><dt>Last cloud copy</dt><dd data-audit-cloud-time>-</dd></div>
+            <div><dt>Known gaps</dt><dd data-audit-gaps>-</dd></div>
+          </dl>
+          <form class="activity-controls" data-log-level-form>
+            <label>Diagnostic level
+              <select name="level">
+                <option value="quiet">Quiet</option>
+                <option value="normal" selected>Normal (production)</option>
+                <option value="debug">Debug</option>
+                <option value="trace">Trace</option>
+              </select>
+            </label>
+            <button type="submit" class="secondary" data-action="set-log-level">Set Level</button>
+            <button type="button" class="secondary" data-action="debug-two-hours">Debug for 2 Hours</button>
+            <button type="button" class="secondary" data-action="sync-audit-logs">Sync Logs Now</button>
+          </form>
+          <form class="activity-filters" data-activity-filter-form>
+            <label>Time
+              <select name="since">
+                <option value="2h">Last 2 hours</option>
+                <option value="24h" selected>Last 24 hours</option>
+                <option value="7d">Last 7 days</option>
+              </select>
+            </label>
+            <label>Event type <input name="event_type" placeholder="backup.path_result" /></label>
+            <label>Folder <input name="folder" placeholder="folder id" /></label>
+            <label>Severity
+              <select name="severity">
+                <option value="">All</option>
+                <option value="error">Error</option>
+                <option value="warning">Warning</option>
+                <option value="info">Info</option>
+                <option value="debug">Debug</option>
+                <option value="trace">Trace</option>
+              </select>
+            </label>
+            <button type="submit" class="primary" data-action="filter-activity">Apply Filters</button>
+          </form>
+          <div class="audit-timeline" data-audit-events></div>
         </section>
 
         <section class="view" data-view="help">

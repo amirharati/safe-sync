@@ -650,6 +650,77 @@ dd[data-value="stopped"] { color: #9a6400; }
   justify-content: flex-end;
 }
 
+.activity-controls,
+.activity-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin: 16px 0;
+}
+
+.activity-controls label,
+.activity-filters label {
+  display: grid;
+  gap: 6px;
+  color: #536170;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.audit-timeline {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.audit-operation {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #dce3e9;
+  border-radius: 12px;
+  background: #f8fafb;
+}
+
+.audit-operation h3 {
+  margin: 0 0 2px;
+  overflow-wrap: anywhere;
+  color: #344454;
+  font-size: 13px;
+}
+
+.audit-event {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border-left: 3px solid #9aa9b8;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.audit-event[data-severity="error"] { border-left-color: #b8342c; }
+.audit-event[data-severity="warning"] { border-left-color: #b87900; }
+.audit-event[data-severity="debug"],
+.audit-event[data-severity="trace"] { border-left-color: #657789; }
+
+.audit-event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.audit-event time,
+.audit-event small {
+  color: #73808e;
+  font-size: 11px;
+}
+
+.audit-event p {
+  margin: 0;
+}
+
 .section-copy {
   margin: 0 0 4px;
 }
@@ -1117,6 +1188,11 @@ button.danger:hover:not(:disabled) {
   .transfer-form,
   .add-folder,
   .add-profile {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-controls,
+  .activity-filters {
     grid-template-columns: 1fr;
   }
 

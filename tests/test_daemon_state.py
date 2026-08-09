@@ -187,6 +187,9 @@ def test_status_health_reports_setup_required_before_the_first_folder():
 def test_login_check_is_silent_when_healthy(monkeypatch, tmp_path, capsys):
     config_path = tmp_path / "config.json"
     config = normalized_config(default_config("test-machine"))
+    config["state_root"] = str(tmp_path / "state")
+    config["log_dir"] = str(tmp_path / "logs")
+    config["status_path"] = str(tmp_path / "state" / "status.json")
     local_folder = tmp_path / "work"
     local_folder.mkdir()
     add_setup_folder(config, str(local_folder))
@@ -465,7 +468,9 @@ def test_native_watcher_coalesces_relevant_events_and_ignores_build_outputs(tmp_
     assert scheduled_path == str(root.resolve())
     assert recursive is True
     assert watcher.healthy()
-    assert watcher.consume() == ["dist"]
+    assert watcher.consume_details() == {
+        "dist": {"paths": ["data.csv"], "path_count": 1, "paths_truncated": False}
+    }
     assert len(wake_count) == 2
     assert watcher.consume() == []
 

@@ -235,6 +235,14 @@ class _DaemonApiHandler(socketserver.StreamRequestHandler):
                         response = {"ok": False, "error": "comparison timed out while waiting for the daemon work lane"}
                     else:
                         response = ticket["response"] or {"ok": False, "error": "comparison produced no response"}
+            elif command == "audit_sync":
+                ticket = self.server.api_state.request_query("audit_sync", {})
+                if ticket is None:
+                    response = {"ok": False, "error": "another remote query is already queued"}
+                elif not ticket["event"].wait(300):
+                    response = {"ok": False, "error": "audit sync timed out while waiting for the daemon work lane"}
+                else:
+                    response = ticket["response"] or {"ok": False, "error": "audit sync produced no response"}
             elif command == "ping":
                 response = {"ok": True, "pong": True}
             else:

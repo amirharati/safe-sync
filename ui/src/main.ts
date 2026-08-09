@@ -27,6 +27,7 @@ type SafeSyncConfig = {
   min_interval_seconds: number;
   fallback_interval_seconds: number;
   rate_limit_backoff_seconds: number;
+  logging: Record<string, unknown>;
   folders: Array<Record<string, unknown>>;
   profiles: Array<Record<string, unknown>>;
 };
@@ -57,6 +58,27 @@ type ComputerView = Record<string, unknown> & {
   generated_at?: string;
   updated_at?: string;
   folders?: unknown[];
+};
+
+type AuditStatus = {
+  health: string;
+  level: string;
+  used_local_bytes: number;
+  max_local_bytes: number;
+  pending_cloud_segments: number;
+  gaps: Array<Record<string, unknown>>;
+  replication: Record<string, unknown>;
+};
+
+type AuditEvent = {
+  event_id: string;
+  sequence: number;
+  occurred_at: string;
+  severity: string;
+  event_type: string;
+  component: string;
+  correlation: Record<string, unknown>;
+  data: Record<string, unknown>;
 };
 
 const IDLE_REFRESH_MS = 10_000;
@@ -122,6 +144,15 @@ const linkList = document.querySelector<HTMLElement>("[data-link-list]");
 const addLinkForm = document.querySelector<HTMLFormElement>("[data-add-link-form]");
 const historyFolder = document.querySelector<HTMLSelectElement>("[data-history-folder]");
 const historyList = document.querySelector<HTMLElement>("[data-history-list]");
+const activityFilterForm = document.querySelector<HTMLFormElement>("[data-activity-filter-form]");
+const logLevelForm = document.querySelector<HTMLFormElement>("[data-log-level-form]");
+const auditEvents = document.querySelector<HTMLElement>("[data-audit-events]");
+const auditHealth = document.querySelector<HTMLElement>("[data-audit-health]");
+const auditLevel = document.querySelector<HTMLElement>("[data-audit-level]");
+const auditUsage = document.querySelector<HTMLElement>("[data-audit-usage]");
+const auditPending = document.querySelector<HTMLElement>("[data-audit-pending]");
+const auditCloudTime = document.querySelector<HTMLElement>("[data-audit-cloud-time]");
+const auditGaps = document.querySelector<HTMLElement>("[data-audit-gaps]");
 
 let latestStatus: SafeSyncStatus | null = null;
 let busyAction: string | null = null;
@@ -143,6 +174,7 @@ let dropboxConnected = false;
 let jobsLoaded = false;
 let linksLoaded = false;
 let historyLoaded = false;
+let activityLoaded = false;
 let latestJobs: Array<Record<string, unknown>> = [];
 
 function text(value: unknown, fallback = "-"): string {
@@ -292,6 +324,7 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (["load-jobs", "show-job", "apply-job", "reconcile-job", "rollback-job"].includes(action ?? "")) return "jobs";
   if (["load-link-status", "review-link", "remove-link", "add-link"].includes(action ?? "")) return "links";
   if (["load-history", "recover-history"].includes(action ?? "")) return "history";
+  if (["load-activity", "filter-activity", "set-log-level", "debug-two-hours", "sync-audit-logs"].includes(action ?? "")) return "activity";
   return action ?? null;
 }
 
@@ -912,6 +945,11 @@ function renderConfig(config: SafeSyncConfig): void {
       const input = settingsForm.elements.namedItem(key) as HTMLInputElement | null;
       if (input && (typeof value === "number" || typeof value === "string")) input.value = String(value);
     }
+  }
+  const configuredLogLevel = text(config.logging?.temporary_level, text(config.logging?.level, "normal"));
+  const logLevelInput = logLevelForm?.elements.namedItem("level") as HTMLSelectElement | null;
+  if (logLevelInput && ["quiet", "normal", "debug", "trace"].includes(configuredLogLevel)) {
+    logLevelInput.value = configuredLogLevel;
   }
   if (profileList) {
     profileList.innerHTML = "";
@@ -1571,6 +1609,138 @@ async function recoverHistory(button: HTMLElement): Promise<void> {
   }
 }
 
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "-";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function renderAuditStatus(status: AuditStatus): void {
+  if (auditHealth) {
+    auditHealth.textContent = text(status.health);
+    auditHealth.dataset.tone = status.health === "ok" ? "ok" : "warning";
+  }
+  if (auditLevel) auditLevel.textContent = text(status.level);
+  if (auditUsage) auditUsage.textContent = `${formatBytes(Number(status.used_local_bytes))} / ${formatBytes(Number(status.max_local_bytes))}`;
+  if (auditPending) auditPending.textContent = String(Number(status.pending_cloud_segments ?? 0));
+  if (auditCloudTime) auditCloudTime.textContent = text(status.replication?.last_success_at, "Not copied yet");
+  if (auditGaps) auditGaps.textContent = String(Array.isArray(status.gaps) ? status.gaps.length : 0);
+  const level = logLevelForm?.elements.namedItem("level") as HTMLSelectElement | null;
+  if (level && ["quiet", "normal", "debug", "trace"].includes(status.level)) level.value = status.level;
+}
+
+function auditContext(event: AuditEvent): string {
+  return text(
+    event.correlation?.operation_id,
+    text(event.correlation?.job_id, text(event.correlation?.generation_id, "Other events")),
+  );
+}
+
+function renderAuditEvents(events: AuditEvent[]): void {
+  if (!auditEvents) return;
+  auditEvents.replaceChildren();
+  if (events.length === 0) {
+    auditEvents.textContent = "No events match these filters.";
+    return;
+  }
+  const grouped = new Map<string, AuditEvent[]>();
+  for (const event of events) {
+    const context = auditContext(event);
+    const existing = grouped.get(context) ?? [];
+    existing.push(event);
+    grouped.set(context, existing);
+  }
+  for (const [context, group] of grouped) {
+    const section = document.createElement("section");
+    section.className = "audit-operation";
+    const heading = document.createElement("h3");
+    heading.textContent = context === "Other events" ? context : `Operation ${context}`;
+    section.append(heading);
+    for (const event of group) {
+      const item = document.createElement("article");
+      item.className = "audit-event";
+      item.dataset.severity = event.severity;
+      const detail = text(
+        event.data?.path,
+        text(event.data?.reason, text(event.data?.status, text(event.data?.error, ""))),
+      );
+      item.innerHTML = `<div class="audit-event-head"><time>${escapeHtml(text(event.occurred_at))}</time><span class="pill">${escapeHtml(text(event.severity))}</span></div><strong>${escapeHtml(text(event.event_type))}</strong>${detail ? `<p class="path">${escapeHtml(detail)}</p>` : ""}<small>${escapeHtml(text(event.component))} · sequence ${Number(event.sequence)}</small>`;
+      section.append(item);
+    }
+    auditEvents.append(section);
+  }
+}
+
+function activityQuery(): Record<string, unknown> {
+  if (!activityFilterForm) return { since: "24h", limit: 200 };
+  return {
+    since: inputValue(activityFilterForm, "since"),
+    event_type: inputValue(activityFilterForm, "event_type"),
+    folder: inputValue(activityFilterForm, "folder"),
+    severity: inputValue(activityFilterForm, "severity"),
+    limit: 200,
+  };
+}
+
+async function loadActivity(event?: SubmitEvent): Promise<void> {
+  event?.preventDefault();
+  setBusy("activity");
+  try {
+    const [status, events] = await Promise.all([
+      invoke<AuditStatus>("get_log_status"),
+      invoke<AuditEvent[]>("get_activity", { request: activityQuery() }),
+    ]);
+    renderAuditStatus(status);
+    renderAuditEvents(events);
+    activityLoaded = true;
+    setMessage("Audit activity loaded", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function changeLogLevel(event: SubmitEvent | null, forcedLevel?: string, duration?: string): Promise<void> {
+  event?.preventDefault();
+  const levelInput = logLevelForm?.elements.namedItem("level") as HTMLSelectElement | null;
+  const level = forcedLevel ?? levelInput?.value ?? "normal";
+  setBusy("activity");
+  try {
+    const command = ["logs", "level", level];
+    if (duration) command.push("--for", duration);
+    showUiCommand(command);
+    await invoke("set_log_level", { request: { level, duration: duration ?? null } });
+    setMessage(duration ? `${level} logging enabled for ${duration}` : `Logging level set to ${level}`, "ok");
+    await loadActivity();
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function syncAuditLogs(): Promise<void> {
+  setBusy("activity");
+  try {
+    showUiCommand(["logs", "sync"]);
+    const status = await invoke<AuditStatus>("sync_audit_logs");
+    renderAuditStatus(status);
+    setMessage("Structured logs copied to this profile's cloud", "ok");
+    await loadActivity();
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
 async function copyTransferCommand(): Promise<void> {
   const command = transferCommand?.textContent ?? "";
   if (!command.startsWith("safe-sync pull") && !command.startsWith("safe-sync receive")) {
@@ -1805,6 +1975,7 @@ function activateTab(tab: string): void {
     if (!configLoaded) void loadConfig();
     if (!historyLoaded && historyFolder?.value) void loadHistory();
   }
+  if (tab === "activity" && !activityLoaded) void loadActivity();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -1899,6 +2070,11 @@ window.addEventListener("DOMContentLoaded", () => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "recover-history") void recoverHistory(target);
   });
+  activityFilterForm?.addEventListener("submit", (event) => void loadActivity(event));
+  logLevelForm?.addEventListener("submit", (event) => void changeLogLevel(event));
+  document.querySelector("[data-action='load-activity']")?.addEventListener("click", () => void loadActivity());
+  document.querySelector("[data-action='debug-two-hours']")?.addEventListener("click", () => void changeLogLevel(null, "debug", "2h"));
+  document.querySelector("[data-action='sync-audit-logs']")?.addEventListener("click", () => void syncAuditLogs());
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
     button.addEventListener("click", () => activateTab(button.dataset.tab ?? "status"));
   }

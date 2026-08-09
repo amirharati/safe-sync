@@ -23,6 +23,13 @@ from typing import Any, Callable
 
 from safe_sync.api import DaemonApiServer, DaemonApiState, api_request
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
+from safe_sync.event_journal import (
+    EventJournal,
+    JournalError,
+    default_logging_config,
+    journal_from_config,
+    settings_from_config,
+)
 from safe_sync.watcher import NativeWatcher
 from safe_sync.transfer import (
     JobConflictError,
@@ -79,6 +86,8 @@ AUTH_FAILURE_PATTERNS = (
 )
 RATE_LIMIT_EXIT = 75
 LAST_COMMAND_OUTPUT = ""
+PROCESS_RUN_ID = f"run_{uuid.uuid4().hex}"
+_EVENT_JOURNALS: dict[tuple[str, str, str, str], EventJournal] = {}
 INTERNAL_FILTER_MARKER = "# Safe Sync internal work data"
 INTERNAL_FILTER_RULES = (
     f"{INTERNAL_FILTER_MARKER}\n"
@@ -157,31 +166,68 @@ def save_status(config: dict[str, Any], **updates: Any) -> None:
     atomic_write_text(status_path, json.dumps(previous, indent=2, sort_keys=True) + "\n")
 
 
-def log_path(config: dict[str, Any]) -> Path:
+def emergency_log_path(config: dict[str, Any]) -> Path:
+    """Return the last-resort text log used only when the journal is unavailable."""
     log_dir = Path(config.get("log_dir", DEFAULT_LOG_DIR)).expanduser()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir / f"safe-sync-{dt.date.today().isoformat()}.log"
+    return log_dir / f"safe-sync-emergency-{dt.date.today().isoformat()}.log"
 
 
 def socket_path(config: dict[str, Any]) -> Path:
     return Path(config.get("socket_path", DEFAULT_SOCKET)).expanduser()
 
 
-def append_log(config: dict[str, Any], line: str) -> None:
-    path = log_path(config)
+def append_emergency_log(config: dict[str, Any], line: str) -> None:
+    """Fail open when the structured journal itself cannot accept an event."""
+    path = emergency_log_path(config)
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as fh:
             fh.write(line)
     except OSError as exc:
         print(f"warning: could not write log {path}: {exc}", file=sys.stderr)
 
 
-def recent_log_text(config: dict[str, Any], max_chars: int = 12000) -> str:
-    path = log_path(config)
-    if not path.exists():
-        return ""
-    text = path.read_text(errors="replace")
-    return text[-max_chars:]
+def event_journal(config: dict[str, Any]) -> EventJournal:
+    settings = settings_from_config(config)
+    key = (
+        str(Path(config.get("state_root", DEFAULT_STATE_DIR)).expanduser()),
+        str(config.get("profile_id") or config.get("active_profile_id") or "system"),
+        str(config.get("install_id") or "unconfigured"),
+        repr(settings),
+    )
+    journal = _EVENT_JOURNALS.get(key)
+    if journal is None:
+        journal = journal_from_config(config)
+        _EVENT_JOURNALS[key] = journal
+    return journal
+
+
+def record_event(
+    config: dict[str, Any],
+    event_type: str,
+    *,
+    component: str,
+    channel: str = "audit",
+    severity: str = "info",
+    data: dict[str, Any] | None = None,
+    correlation: dict[str, Any] | None = None,
+    effect: str | None = None,
+) -> dict[str, Any] | None:
+    """Record observability without allowing journal failure to alter user data."""
+    try:
+        return event_journal(config).emit(
+            event_type,
+            component=component,
+            channel=channel,
+            severity=severity,
+            data=data,
+            correlation=correlation,
+            run_id=PROCESS_RUN_ID,
+            effect=effect,
+        )
+    except (JournalError, OSError, ValueError) as exc:
+        append_emergency_log(config, f"[{now_iso()}] structured event journal degraded: {exc}\n")
+        return None
 
 
 def daemon_api(config: dict[str, Any], command: str, *, _timeout_seconds: float = 5.0, **payload: Any) -> dict[str, Any]:
@@ -212,10 +258,6 @@ def future_iso(seconds: int) -> str:
     return (dt.datetime.now(dt.timezone.utc).astimezone() + dt.timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
 
-def looks_rate_limited(config: dict[str, Any]) -> bool:
-    return text_looks_rate_limited(recent_log_text(config))
-
-
 def run_command(
     config: dict[str, Any],
     cmd: list[str],
@@ -224,46 +266,92 @@ def run_command(
 ) -> int:
     global LAST_COMMAND_OUTPUT
     LAST_COMMAND_OUTPUT = ""
-    log = log_path(config)
     env = rclone_env(config)
-    log.parent.mkdir(parents=True, exist_ok=True)
-    header = f"\n[{now_iso()}] $ {' '.join(cmd)}\n"
-    with log.open("a") as fh:
-        fh.write(header)
-        fh.flush()
-        if progress_callback is None:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
-            output = result.stdout or ""
-            LAST_COMMAND_OUTPUT = output
-            print(output, end="")
-            fh.write(output)
-            fh.write(f"[{now_iso()}] exit={result.returncode} dry_run={dry_run}\n")
-            return int(result.returncode)
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
+    operation_id = str(config.get("_operation_id") or "") or None
+    correlation = {
+        "operation_id": operation_id,
+        "folder_id": config.get("folder_id"),
+        "job_id": config.get("_job_id"),
+    }
+    correlation = {key: value for key, value in correlation.items() if value}
+    record_event(
+        config,
+        "command.started",
+        component="rclone",
+        channel="diagnostic",
+        severity="debug",
+        data={"argv": cmd, "dry_run": dry_run},
+        correlation=correlation,
+        effect="none" if dry_run else None,
+    )
+    if progress_callback is None:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        output = result.stdout or ""
+        LAST_COMMAND_OUTPUT = output
+        print(output, end="")
+        for output_line in output.splitlines():
+            record_event(
+                config,
+                "rclone.output",
+                component="rclone",
+                channel="diagnostic",
+                severity="debug",
+                data={"line": output_line},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
+        record_event(
+            config,
+            "command.completed",
+            component="rclone",
+            channel="diagnostic",
+            severity="info" if result.returncode == 0 else "error",
+            data={"exit_code": result.returncode, "dry_run": dry_run},
+            correlation=correlation,
+            effect="none" if dry_run else None,
         )
-        lines: list[str] = []
-        assert process.stdout is not None
-        try:
-            for line in process.stdout:
-                lines.append(line)
-                print(line, end="")
-                fh.write(line)
-                if progress_callback:
-                    progress_callback(line.rstrip("\n"))
-            returncode = process.wait()
-            output = "".join(lines)
-            LAST_COMMAND_OUTPUT = output
-            fh.write(f"[{now_iso()}] exit={returncode} dry_run={dry_run}\n")
-            return int(returncode)
-        finally:
-            if process.poll() is None:
-                process.kill()
+        return int(result.returncode)
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    lines: list[str] = []
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            lines.append(line)
+            print(line, end="")
+            record_event(
+                config,
+                "rclone.output",
+                component="rclone",
+                channel="diagnostic",
+                severity="debug",
+                data={"line": line.rstrip("\n")},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
+            progress_callback(line.rstrip("\n"))
+        returncode = process.wait()
+        LAST_COMMAND_OUTPUT = "".join(lines)
+        record_event(
+            config,
+            "command.completed",
+            component="rclone",
+            channel="diagnostic",
+            severity="info" if returncode == 0 else "error",
+            data={"exit_code": returncode, "dry_run": dry_run},
+            correlation=correlation,
+            effect="none" if dry_run else None,
+        )
+        return int(returncode)
+    finally:
+        if process.poll() is None:
+            process.kill()
 
 
 def rclone_bin(config: dict[str, Any]) -> str:
@@ -311,6 +399,11 @@ def effective_filter_fingerprint(config: dict[str, Any]) -> str:
     else:
         digest.update(f"missing:{path}".encode())
     return digest.hexdigest()
+
+
+def rclone_log_level(config: dict[str, Any]) -> str:
+    level = settings_from_config(config).level
+    return {"quiet": "ERROR", "normal": "INFO", "debug": "DEBUG", "trace": "DEBUG"}[level]
 
 
 def lock_file(config: dict[str, Any]) -> Path:
@@ -444,6 +537,11 @@ def normalized_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("fallback_interval_seconds", 1800)
     normalized.setdefault("rate_limit_backoff_seconds", 300)
     normalized.setdefault("preserve_metadata", False)
+    raw_logging = normalized.get("logging") if isinstance(normalized.get("logging"), dict) else {}
+    normalized["logging"] = {**default_logging_config(), **raw_logging}
+    # Validate eagerly so invalid bounds/levels cannot silently change runtime
+    # observability behavior.
+    settings_from_config(normalized)
 
     raw_profiles = normalized.get("profiles")
     if isinstance(raw_profiles, list) and raw_profiles:
@@ -480,6 +578,7 @@ def write_config(path: Path, config: dict[str, Any]) -> dict[str, Any]:
         "filter_file": normalized["filter_file"],
         "lock_file": normalized["lock_file"],
         "log_dir": normalized["log_dir"],
+        "logging": normalized["logging"],
         "machine": active_profile["machine_id"],
         "machine_id": active_profile["machine_id"],
         "machine_label": active_profile["machine_label"],
@@ -499,6 +598,16 @@ def write_config(path: Path, config: dict[str, Any]) -> dict[str, Any]:
         if normalized.get(key):
             persisted[key] = normalized[key]
     atomic_write_text(path, json.dumps(persisted, indent=2, sort_keys=True) + "\n")
+    record_event(
+        normalized,
+        "configuration.changed",
+        component="configuration",
+        data={
+            "active_profile_id": normalized["active_profile_id"],
+            "profile_count": len(normalized["profiles"]),
+            "folder_count": len(normalized["folders"]),
+        },
+    )
     return normalized
 
 
@@ -641,13 +750,19 @@ def preflight(config: dict[str, Any]) -> None:
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45, env=rclone_env(config))
     if result.returncode != 0:
         output = result.stdout or ""
-        append_log(config, f"[{now_iso()}] preflight failed:\n{output}\n")
+        record_event(
+            config,
+            "remote.preflight_failed",
+            component="remote",
+            severity="error",
+            data={"exit_code": result.returncode, "error": output},
+        )
         if text_looks_rate_limited(output):
             retry_after = rate_limit_retry_after_seconds(output, int(config.get("rate_limit_backoff_seconds", 300)))
             raise RateLimitedError(f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s", retry_after)
         if text_looks_auth_failure(output):
             raise SystemExit(reconnect_dropbox_message())
-        raise SystemExit("Remote preflight failed; see log")
+        raise SystemExit("Remote preflight failed; inspect safe-sync logs")
 
 
 def text_looks_auth_failure(output: str) -> bool:
@@ -671,7 +786,7 @@ def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None =
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
-        "--log-level", "INFO",
+        "--log-level", rclone_log_level(config),
     ]
     if config.get("preserve_metadata"):
         cmd.append("--metadata")
@@ -690,7 +805,7 @@ def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool, selected
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
         "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
-        "--log-level", "INFO",
+        "--log-level", rclone_log_level(config),
     ]
     for selected_path in selected_paths or []:
         normalized = selected_path.strip().strip("/")
@@ -745,6 +860,7 @@ def default_config(machine: str) -> dict[str, Any]:
         "fallback_interval_seconds": 1800,
         "rate_limit_backoff_seconds": 300,
         "preserve_metadata": False,
+        "logging": default_logging_config(),
     }
 
 
@@ -766,6 +882,7 @@ def config_view(config: dict[str, Any], config_path: Path | None = None) -> dict
         "min_interval_seconds": int(normalized["min_interval_seconds"]),
         "fallback_interval_seconds": int(normalized["fallback_interval_seconds"]),
         "rate_limit_backoff_seconds": int(normalized["rate_limit_backoff_seconds"]),
+        "logging": normalized["logging"],
         "folders": normalized["folders"],
         "profiles": [
             {
@@ -967,10 +1084,53 @@ def save_rate_limit_status(config: dict[str, Any], message: str, retry_after_sec
     )
 
 
+def new_operation_id(prefix: str) -> str:
+    return f"{safe_id(prefix)}_{uuid.uuid4().hex}"
+
+
+def record_backup_report(
+    config: dict[str, Any],
+    report_path: Path,
+    operation_id: str,
+    *,
+    dry_run: bool,
+) -> dict[str, int]:
+    changes = parse_combined_report(report_path.read_text(errors="replace") if report_path.exists() else "")
+    counts = {"added": 0, "modified": 0, "removed": 0, "error": 0}
+    correlation = {"operation_id": operation_id, "folder_id": config.get("folder_id")}
+    for change in changes:
+        operation = str(change["operation"])
+        counts[operation] = counts.get(operation, 0) + 1
+        record_event(
+            config,
+            "backup.path_result",
+            component="backup",
+            severity="error" if operation == "error" else "info",
+            data={
+                "path": change["path"],
+                "result": operation,
+                "previous_remote_preserved": bool(not dry_run and operation in {"modified", "removed"}),
+            },
+            correlation=correlation,
+            effect="none" if dry_run else None,
+        )
+    return counts
+
+
 def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
     with Lock(lock_file(config)):
+        operation_id = new_operation_id("backup")
+        correlation = {"operation_id": operation_id, "folder_id": config.get("folder_id")}
         existing_backoff_until = active_backoff_until(config)
         if existing_backoff_until:
+            record_event(
+                config,
+                "backup.delayed",
+                component="backup",
+                data={"reason": "rate_limit_backoff", "until": existing_backoff_until},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             save_status(
                 config,
                 state="backoff",
@@ -994,16 +1154,44 @@ def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
             last_warning=None,
         )
         report_path = backup_report_path(config)
+        operation_config = {**config, "_operation_id": operation_id}
+        record_event(
+            config,
+            "backup.started",
+            component="backup",
+            data={"trigger": "direct", "dry_run": dry_run},
+            correlation=correlation,
+            effect="none" if dry_run else None,
+        )
         try:
             preflight(config)
-            code = run_command(config, backup_cmd(config, dry_run, report_path), dry_run=dry_run)
+            code = run_command(operation_config, backup_cmd(config, dry_run, report_path), dry_run=dry_run)
         except RateLimitedError as exc:
+            record_event(
+                config,
+                "backup.failed",
+                component="backup",
+                severity="warning",
+                data={"reason": "rate_limited", "retry_after_seconds": exc.retry_after_seconds},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             save_rate_limit_status(config, str(exc), exc.retry_after_seconds, queued=True)
             print(str(exc))
             return RATE_LIMIT_EXIT
         except BaseException as exc:
+            record_event(
+                config,
+                "backup.failed",
+                component="backup",
+                severity="error",
+                data={"reason": type(exc).__name__, "error": str(exc)},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             save_status(config, state="error", folder_id=config.get("folder_id"), last_error=str(exc), last_finish=now_iso())
             raise
+        counts = record_backup_report(config, report_path, operation_id, dry_run=dry_run)
         if code == 0:
             if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
                 retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
@@ -1013,19 +1201,54 @@ def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
                     retry_after,
                     queued=False,
                 )
+                record_event(
+                    config,
+                    "backup.failed",
+                    component="backup",
+                    severity="warning",
+                    data={"reason": "rate_limited", "retry_after_seconds": retry_after, "counts": counts},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
                 return RATE_LIMIT_EXIT
             else:
                 if not dry_run:
-                    publication_code = publish_generation(config, report_path)
+                    publication_code = publish_generation(config, report_path, operation_id=operation_id)
                     if publication_code != 0:
                         save_status(config, state="error", folder_id=config.get("folder_id"), last_error="generation publication failed", last_finish=now_iso())
                         return publication_code
+                record_event(
+                    config,
+                    "backup.completed",
+                    component="backup",
+                    data={"exit_code": code, "counts": counts, "dry_run": dry_run},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
                 save_status(config, state="idle", folder_id=config.get("folder_id"), last_success=now_iso(), last_finish=now_iso(), last_error=None, last_warning=None)
         else:
             if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
                 retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+                record_event(
+                    config,
+                    "backup.failed",
+                    component="backup",
+                    severity="warning",
+                    data={"reason": "rate_limited", "exit_code": code, "retry_after_seconds": retry_after, "counts": counts},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
                 save_rate_limit_status(config, f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s", retry_after, queued=True)
             else:
+                record_event(
+                    config,
+                    "backup.failed",
+                    component="backup",
+                    severity="error",
+                    data={"reason": "rclone_exit", "exit_code": code, "counts": counts},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
                 save_status(config, state="error", folder_id=config.get("folder_id"), last_error=f"rclone exit {code}", last_finish=now_iso())
         return code
 
@@ -1046,6 +1269,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
             if registry_code != 0:
                 save_status(config, state="error", last_error="registry update failed", last_finish=now_iso())
                 return registry_code
+            replicate_event_journal(config)
         return last_code
     response = daemon_api(config, "backup")
     if not response.get("ok"):
@@ -1226,11 +1450,22 @@ def status_payload(config_path: Path, api_timeout_seconds: float = 5.0) -> dict[
     service_text = service_status_text()
     service_state = service_text.split(":", 1)[1].strip() if ":" in service_text else service_text
     health = status_health(config, service_state, sync_state)
+    try:
+        audit_journal = event_journal(config)
+        audit_status = audit_journal.status()
+        audit_path = str(audit_journal.root)
+    except (JournalError, OSError, ValueError) as exc:
+        audit_status = {"health": "degraded", "error": str(exc), "gaps": [], "pending_cloud_segments": None}
+        audit_path = str(state_root_path(config) / "event-journal" / safe_id(str(config["profile_id"])))
+    if health["health"] == "ok" and audit_status.get("health") == "degraded":
+        health = {**health, "health": "warning", "reason": "structured audit logging is degraded"}
     return {
         "daemon_seen_at": health["daemon_seen_at"],
         "health": health["health"],
         "health_reason": health["reason"],
-        "log": str(log_path(config)),
+        "log": audit_path,
+        "emergency_log": str(emergency_log_path(config)),
+        "audit": audit_status,
         "service_state": service_state,
         "sync_state": sync_state,
     }
@@ -1378,6 +1613,9 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
     total_folders = len(folders)
     for index, folder in enumerate(folders, start=1):
         folder_cfg = folder_config(config, folder)
+        operation_id = new_operation_id("backup")
+        operation_cfg = {**folder_cfg, "_operation_id": operation_id}
+        correlation = {"operation_id": operation_id, "folder_id": folder["id"]}
         report_path = backup_report_path(folder_cfg)
         publish_runtime_status(
             api_state,
@@ -1392,6 +1630,14 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             last_command="daemon",
             last_error=None,
             last_progress="Starting folder sync",
+        )
+        record_event(
+            folder_cfg,
+            "backup.started",
+            component="backup",
+            data={"trigger": "daemon", "dry_run": dry_run, "folder_index": index, "folder_total": total_folders},
+            correlation=correlation,
+            effect="none" if dry_run else None,
         )
         def on_progress(line: str) -> None:
             summary = summarize_progress_line(line)
@@ -1412,8 +1658,17 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 )
         try:
             preflight(folder_cfg)
-            code = run_command(folder_cfg, backup_cmd(folder_cfg, dry_run, report_path), dry_run=dry_run, progress_callback=on_progress)
+            code = run_command(operation_cfg, backup_cmd(folder_cfg, dry_run, report_path), dry_run=dry_run, progress_callback=on_progress)
         except RateLimitedError as exc:
+            record_event(
+                folder_cfg,
+                "backup.failed",
+                component="backup",
+                severity="warning",
+                data={"reason": "rate_limited", "retry_after_seconds": exc.retry_after_seconds},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             publish_runtime_status(
                 api_state,
                 config,
@@ -1429,6 +1684,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             )
             return RATE_LIMIT_EXIT, folder["id"]
         except BaseException as exc:
+            record_event(
+                folder_cfg,
+                "backup.failed",
+                component="backup",
+                severity="error",
+                data={"reason": type(exc).__name__, "error": str(exc)},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             publish_runtime_status(
                 api_state,
                 config,
@@ -1440,9 +1704,20 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             )
             raise
 
+        counts = record_backup_report(folder_cfg, report_path, operation_id, dry_run=dry_run)
+
         if code != 0:
             if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
                 retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+                record_event(
+                    folder_cfg,
+                    "backup.failed",
+                    component="backup",
+                    severity="warning",
+                    data={"reason": "rate_limited", "retry_after_seconds": retry_after, "counts": counts},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
                 publish_runtime_status(
                     api_state,
                     config,
@@ -1458,6 +1733,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 )
                 return RATE_LIMIT_EXIT, folder["id"]
             error = reconnect_dropbox_message() if text_looks_auth_failure(LAST_COMMAND_OUTPUT) else f"rclone exit {code}"
+            record_event(
+                folder_cfg,
+                "backup.failed",
+                component="backup",
+                severity="error",
+                data={"reason": "authentication" if text_looks_auth_failure(LAST_COMMAND_OUTPUT) else "rclone_exit", "exit_code": code, "counts": counts},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             publish_runtime_status(
                 api_state,
                 config,
@@ -1471,6 +1755,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
 
         if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
             retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+            record_event(
+                folder_cfg,
+                "backup.failed",
+                component="backup",
+                severity="warning",
+                data={"reason": "rate_limited", "retry_after_seconds": retry_after, "counts": counts},
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
             publish_runtime_status(
                 api_state,
                 config,
@@ -1487,7 +1780,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             return RATE_LIMIT_EXIT, folder["id"]
 
         if not dry_run:
-            publication_code = publish_generation(folder_cfg, report_path)
+            publication_code = publish_generation(folder_cfg, report_path, operation_id=operation_id)
             if publication_code != 0:
                 publish_runtime_status(
                     api_state,
@@ -1499,6 +1792,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     last_progress=f"Backup completed but change publication failed for folder {index} of {total_folders}",
                 )
                 return publication_code, folder["id"]
+
+        record_event(
+            folder_cfg,
+            "backup.completed",
+            component="backup",
+            data={"exit_code": code, "counts": counts, "dry_run": dry_run},
+            correlation=correlation,
+            effect="none" if dry_run else None,
+        )
 
         last_code = code
 
@@ -1514,6 +1816,24 @@ def run_receive_runtime(config: dict[str, Any], request: dict[str, Any], api_sta
     source = str(request["source"])
     destination = str(request["destination"])
     selected_paths = [str(path) for path in request.get("selected_paths") or []]
+    operation_id = new_operation_id("receive")
+    correlation = {
+        "operation_id": operation_id,
+        "generation_id": request.get("source_generation"),
+        "link_id": request.get("link_id"),
+    }
+    record_event(
+        config,
+        "job.stage_started",
+        component="receive",
+        data={
+            "source": source,
+            "destination": destination,
+            "selected_paths": selected_paths,
+            "mode": str(request.get("mode") or "receive"),
+        },
+        correlation=correlation,
+    )
     publish_runtime_status(
         api_state,
         config,
@@ -1554,9 +1874,25 @@ def run_receive_runtime(config: dict[str, Any], request: dict[str, Any], api_sta
             progress_callback=on_progress,
         )
     except BaseException as exc:
+        record_event(
+            config,
+            "job.stage_failed",
+            component="receive",
+            severity="error",
+            data={"error": str(exc), "reason": type(exc).__name__},
+            correlation=correlation,
+        )
         publish_runtime_status(api_state, config, state="error", last_error=str(exc), last_finish=now_iso())
         return 1
     if code != 0:
+        record_event(
+            config,
+            "job.stage_failed",
+            component="receive",
+            severity="error",
+            data={"exit_code": code, "error": str(job.get("error") or "")},
+            correlation={**correlation, "job_id": job["id"]},
+        )
         publish_runtime_status(
             api_state,
             config,
@@ -1566,6 +1902,17 @@ def run_receive_runtime(config: dict[str, Any], request: dict[str, Any], api_sta
             receive_job_id=job["id"],
         )
         return code
+    record_event(
+        config,
+        "job.staged",
+        component="receive",
+        data={
+            "status": job["status"],
+            "mode": job.get("mode"),
+            "selected_path_count": len(selected_paths),
+        },
+        correlation={**correlation, "job_id": job["id"]},
+    )
     publish_runtime_status(
         api_state,
         config,
@@ -1587,6 +1934,18 @@ def run_query_runtime(config: dict[str, Any], ticket: dict[str, Any], api_state:
     try:
         if api_state.snapshot().get("state") == "backoff":
             raise TransferError("Dropbox cooldown is active; retry comparison after backoff")
+        if query == "audit_sync":
+            result = replicate_event_journal(config)
+            api_state.complete_query(ticket, {"ok": True, "status": result})
+            publish_runtime_status(
+                api_state,
+                config,
+                state="watching",
+                audit_health=result.get("health"),
+                audit_pending_cloud_segments=result.get("pending_cloud_segments"),
+                audit_last_cloud_sync=(result.get("replication") or {}).get("last_success_at"),
+            )
+            return
         if query != "compare":
             raise TransferError(f"unknown remote query: {query}")
         publish_runtime_status(
@@ -1613,6 +1972,18 @@ def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], a
     operation = str(request["operation"])
     job_id = str(request["job_id"])
     store = JobStore(state_root_path(config))
+    started_event = {
+        "apply": "job.apply_started",
+        "reconcile": "job.reconciliation_required",
+        "rollback": "job.rollback_started",
+    }[operation]
+    record_event(
+        config,
+        started_event,
+        component="receive",
+        data={"policy_count": len(request.get("policies") or {})},
+        correlation={"job_id": job_id},
+    )
     publish_runtime_status(
         api_state,
         config,
@@ -1643,6 +2014,14 @@ def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], a
                     peer_generation=str(result.get("source_generation") or "") or None,
                 )
     except BaseException as exc:
+        record_event(
+            config,
+            "job.blocked",
+            component="receive",
+            severity="warning",
+            data={"operation": operation, "error": str(exc), "reason": type(exc).__name__},
+            correlation={"job_id": job_id},
+        )
         publish_runtime_status(
             api_state,
             config,
@@ -1655,6 +2034,22 @@ def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], a
             last_progress=f"Job {operation} needs review",
         )
         return 1
+    completed_event = {
+        "apply": "job.applied",
+        "reconcile": "job.reconciled",
+        "rollback": "job.rolled_back",
+    }[operation]
+    record_event(
+        config,
+        completed_event,
+        component="receive",
+        data={
+            "status": result.get("status"),
+            "action_count": len(result.get("actions") or []),
+            "rollback_conflicts": result.get("rollback_conflicts") or [],
+        },
+        correlation={"job_id": job_id, "generation_id": result.get("source_generation"), "link_id": result.get("link_id")},
+    )
     publish_runtime_status(
         api_state,
         config,
@@ -1813,15 +2208,118 @@ def cmd_restart(args: argparse.Namespace) -> int:
     return service_cmd("restart")
 
 
+def parse_duration(value: str) -> dt.timedelta:
+    match = re.fullmatch(r"\s*(\d+)\s*([smhdw])\s*", value.lower())
+    if not match:
+        raise SystemExit("duration must use s, m, h, d, or w, for example 30m or 2h")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    seconds = amount * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+    return dt.timedelta(seconds=seconds)
+
+
+def event_summary(event: dict[str, Any]) -> str:
+    correlation = event.get("correlation") or {}
+    context = [
+        f"folder={correlation['folder_id']}" if correlation.get("folder_id") else "",
+        f"job={correlation['job_id']}" if correlation.get("job_id") else "",
+        f"generation={correlation['generation_id']}" if correlation.get("generation_id") else "",
+    ]
+    data = event.get("data") or {}
+    detail = ""
+    if data.get("path"):
+        detail = f" path={data['path']}"
+    elif data.get("reason"):
+        detail = f" reason={data['reason']}"
+    elif data.get("status"):
+        detail = f" status={data['status']}"
+    suffix = f" {' '.join(item for item in context if item)}" if any(context) else ""
+    return f"{event['occurred_at']} {str(event['severity']).upper():7} {event['event_type']}{suffix}{detail}"
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config).expanduser())
-    path = log_path(config)
-    if not path.exists():
-        print(f"No log file yet: {path}")
+    config_path = Path(args.config).expanduser()
+    config = normalized_config(load_config(config_path))
+    journal = event_journal(config)
+    command = getattr(args, "logs_cmd", None) or "show"
+    if command in {"status", "cloud-status"}:
+        status = journal.status()
+        status["local_path"] = str(journal.root)
+        status["remote_path"] = audit_remote_root(config)
+        print(json.dumps(status if command == "status" else status["replication"] | {
+            "health": status["health"],
+            "pending_cloud_segments": status["pending_cloud_segments"],
+            "gaps": status["gaps"],
+            "remote_path": status["remote_path"],
+        }, indent=2, sort_keys=True))
         return 0
-    lines = path.read_text(errors="replace").splitlines()
-    for line in lines[-args.lines:]:
-        print(line)
+    if command == "sync":
+        try:
+            response = daemon_api(config, "audit_sync", _timeout_seconds=305)
+            if not response.get("ok"):
+                raise SystemExit(str(response.get("error") or "audit sync failed"))
+            status = dict(response.get("status") or {})
+        except OSError:
+            with Lock(lock_file(config)):
+                status = replicate_event_journal(config)
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return 1 if (status.get("replication") or {}).get("last_error") else 0
+    if command == "level":
+        old_settings = settings_from_config(config)
+        logging_config = dict(config["logging"])
+        level = str(args.level).lower()
+        if level not in {"quiet", "normal", "debug", "trace"}:
+            raise SystemExit("level must be quiet, normal, debug, or trace")
+        if args.for_duration:
+            duration = parse_duration(args.for_duration)
+            logging_config["temporary_level"] = level
+            logging_config["temporary_until"] = (
+                dt.datetime.now(dt.timezone.utc) + duration
+            ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        else:
+            logging_config["level"] = level
+            logging_config.pop("temporary_level", None)
+            logging_config.pop("temporary_until", None)
+        config["logging"] = logging_config
+        updated = write_config(config_path, config)
+        record_event(
+            updated,
+            "logging.level_changed",
+            component="logging",
+            data={
+                "old_level": old_settings.level,
+                "new_level": settings_from_config(updated).level,
+                "temporary_until": logging_config.get("temporary_until"),
+                "actor": "cli",
+            },
+        )
+        print(json.dumps(updated["logging"], indent=2, sort_keys=True))
+        return 0
+    since = None
+    since_value = getattr(args, "since", None)
+    if since_value:
+        since = dt.datetime.now(dt.timezone.utc) - parse_duration(since_value)
+    events = journal.events(
+        limit=getattr(args, "limit", None) or getattr(args, "lines", 80),
+        event_type=getattr(args, "event_type", None),
+        folder_id=getattr(args, "folder", None),
+        severity=getattr(args, "severity", None),
+        since=since,
+    )
+    if command == "export":
+        output = Path(args.output).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(output, "".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
+        print(output)
+        return 0
+    if getattr(args, "json", False):
+        print(json.dumps(events, indent=2, sort_keys=True))
+    elif getattr(args, "jsonl", False):
+        for event in events:
+            print(json.dumps(event, sort_keys=True))
+    else:
+        for event in events:
+            print(event_summary(event))
     return 0
 
 
@@ -1838,15 +2336,38 @@ def folder_snapshots(config: dict[str, Any]) -> dict[str, dict[str, tuple[str, i
 def update_registry(config: dict[str, Any]) -> int:
     doc = json.dumps(registry_doc(config), indent=2, sort_keys=True) + "\n"
     result = rclone_capture(config, ["rcat", registry_path(config)], input_text=doc)
+    correlation = {"profile_id": config.get("profile_id")}
     if result.returncode != 0:
-        append_log(config, f"[{now_iso()}] registry update failed:\n{result.stdout or ''}\n")
+        record_event(
+            config,
+            "registry.publication_failed",
+            component="registry",
+            severity="error",
+            data={"exit_code": result.returncode, "error": result.stdout or ""},
+            correlation=correlation,
+        )
+    else:
+        record_event(
+            config,
+            "registry.published",
+            component="registry",
+            data={"folder_count": len(config.get("folders") or [])},
+            correlation=correlation,
+        )
     return int(result.returncode)
 
 
 def list_registry_files(config: dict[str, Any]) -> set[str] | None:
     result = rclone_capture(config, ["lsf", registry_dir(config), "--files-only"])
     if result.returncode != 0:
-        append_log(config, f"[{now_iso()}] registry list failed:\n{result.stdout or ''}\n")
+        record_event(
+            config,
+            "registry.read_failed",
+            component="registry",
+            severity="error",
+            data={"exit_code": result.returncode, "error": result.stdout or ""},
+            correlation={"profile_id": config.get("profile_id")},
+        )
         return None
     return {name.strip() for name in (result.stdout or "").splitlines() if name.strip()}
 
@@ -1913,6 +2434,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         previous_snapshots = folder_snapshots(config)
     startup_now = time.monotonic()
     next_link_check = startup_now
+    next_audit_flush = startup_now + settings_from_config(config).cloud_flush_interval_seconds
     daemon.mark_dirty(startup_now)
     ensure_local_profiles_registered(config)
     reconciled_jobs = reconcile_interrupted_jobs(config)
@@ -1931,9 +2453,26 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         note="startup reconcile queued",
         reconciled_jobs=reconciled_jobs,
     )
-    append_log(config, f"[{now_iso()}] daemon started watcher={watcher_mode} folders={','.join(folder['id'] for folder in folders)} dry_run={args.dry_run}\n")
-    if watcher_warning:
-        append_log(config, f"[{now_iso()}] warning: {watcher_warning}\n")
+    record_event(
+        config,
+        "runtime.started",
+        component="runtime",
+        data={"watcher": watcher_mode, "folder_count": len(folders), "dry_run": args.dry_run},
+        effect="none" if args.dry_run else None,
+    )
+    record_event(
+        config,
+        "watcher.started" if watcher_mode == "native" else "watcher.degraded",
+        component="watcher",
+        severity="info" if watcher_mode == "native" else "warning",
+        data={"mode": watcher_mode, "folder_ids": [folder["id"] for folder in folders], "reason": watcher_warning},
+    )
+    record_event(
+        config,
+        "reconciliation.completed",
+        component="watcher",
+        data={"reason": "daemon_startup", "reconciled_jobs": reconciled_jobs},
+    )
     api_server.start()
 
     try:
@@ -1951,7 +2490,12 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     last_error=None,
                     note="config changed; restarting daemon",
                 )
-                append_log(config, f"[{now_iso()}] config changed on disk; exiting daemon for reload\n")
+                record_event(
+                    config,
+                    "runtime.stopping",
+                    component="runtime",
+                    data={"reason": "configuration_changed"},
+                )
                 return 0
             if watcher_mode == "native" and not watcher.healthy():
                 watcher.stop()
@@ -1959,10 +2503,22 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 watcher_warning = "native watcher stopped; using full-tree polling"
                 previous_snapshots = folder_snapshots(config)
                 publish_runtime_status(api_state, config, watcher=watcher_mode, last_warning=watcher_warning)
-                append_log(config, f"[{now_iso()}] warning: {watcher_warning}\n")
+                record_event(
+                    config,
+                    "watcher.degraded",
+                    component="watcher",
+                    severity="warning",
+                    data={"mode": watcher_mode, "reason": watcher_warning},
+                )
             if api_state.consume_backup_request():
                 manual_backup_pending = True
                 publish_runtime_status(api_state, config, state="dirty", last_error=None, queued_backup=True, note="manual backup queued")
+                record_event(
+                    config,
+                    "backup.queued",
+                    component="scheduler",
+                    data={"trigger": "manual", "folder_ids": [folder["id"] for folder in enabled_folders(config)]},
+                )
 
             job_operation = api_state.consume_job_operation()
             if job_operation is not None:
@@ -1996,6 +2552,18 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 try:
                     link_notifications = detect_link_generations(config)
                     if link_notifications:
+                        for notification in link_notifications:
+                            record_event(
+                                config,
+                                "link.change_detected",
+                                component="links",
+                                data={"label": notification.get("label")},
+                                correlation={
+                                    "job_id": None,
+                                    "generation_id": notification.get("generation_id"),
+                                    "link_id": notification.get("link_id"),
+                                },
+                            )
                         publish_runtime_status(
                             api_state,
                             config,
@@ -2004,18 +2572,62 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                             _activity_event=f"Linked-folder changes detected: {', '.join(item['label'] for item in link_notifications)}",
                         )
                 except BaseException as exc:
-                    append_log(config, f"[{now_iso()}] linked-folder generation check failed: {exc}\n")
+                    record_event(
+                        config,
+                        "link.detection_failed",
+                        component="links",
+                        severity="warning",
+                        data={"error": str(exc)},
+                    )
                 next_link_check = now + 60.0
 
+            if now >= next_audit_flush and api_state.snapshot().get("state") not in {"syncing", "transferring", "staging", "applying", "backoff"}:
+                audit_status = replicate_event_journal(config)
+                publish_runtime_status(
+                    api_state,
+                    config,
+                    audit_health=audit_status.get("health"),
+                    audit_pending_cloud_segments=audit_status.get("pending_cloud_segments"),
+                    audit_last_cloud_sync=(audit_status.get("replication") or {}).get("last_success_at"),
+                    audit_gaps=len(audit_status.get("gaps") or []),
+                )
+                next_audit_flush = now + settings_from_config(config).cloud_flush_interval_seconds
+
             if watcher_mode == "native":
-                changed = watcher.consume()
+                if hasattr(watcher, "consume_details"):
+                    change_details = watcher.consume_details()
+                    changed = sorted(change_details)
+                else:  # Compatibility for injected/older watcher adapters.
+                    changed = watcher.consume()
+                    change_details = {
+                        folder_id: {"paths": [], "path_count": None, "paths_truncated": False}
+                        for folder_id in changed
+                    }
             else:
                 current_snapshots = folder_snapshots(config)
                 changed = [folder_id for folder_id, snapshot in current_snapshots.items() if snapshot != previous_snapshots.get(folder_id)]
                 previous_snapshots = current_snapshots
+                change_details = {
+                    folder_id: {"paths": [], "path_count": None, "paths_truncated": False}
+                    for folder_id in changed
+                }
             if changed:
                 daemon.mark_dirty(now)
                 local_link_changes = detect_local_link_changes(config, changed)
+                for folder_id in changed:
+                    details = change_details.get(folder_id, {})
+                    record_event(
+                        config,
+                        "watcher.change_detected",
+                        component="watcher",
+                        data={
+                            "mode": watcher_mode,
+                            "paths": details.get("paths", []),
+                            "path_count": details.get("path_count"),
+                            "paths_truncated": bool(details.get("paths_truncated", False)),
+                        },
+                        correlation={"folder_id": folder_id},
+                    )
                 publish_runtime_status(
                     api_state,
                     config,
@@ -2063,6 +2675,12 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
 
             if should_run:
                 manual_backup_pending = False
+                record_event(
+                    config,
+                    "backup.queued",
+                    component="scheduler",
+                    data={"trigger": "manual" if manual_run else "automatic", "ready": True},
+                )
                 daemon.note_sync_started(now)
                 publish_runtime_status(
                     api_state,
@@ -2103,11 +2721,13 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
 
             if args.max_loops and loops >= args.max_loops:
                 publish_runtime_status(api_state, config, state="watching", note="max loops reached")
+                record_event(config, "runtime.stopping", component="runtime", data={"reason": "max_loops"})
                 return 0
             api_state.wait(settings.poll_interval_seconds)
     finally:
         watcher.stop()
         api_server.stop()
+        record_event(config, "runtime.stopped", component="runtime", data={"watcher": watcher_mode})
 
 
 
@@ -2220,6 +2840,8 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         profile_id = safe_id(args.id)
         if not any(profile["id"] == profile_id for profile in config["profiles"]):
             raise SystemExit(f"Profile not found: {profile_id}")
+        # Flush the old profile through its own remote before changing routing.
+        replicate_event_journal(config)
         config["active_profile_id"] = profile_id
         updated = write_config(config_path, config)
         update_registry(updated)
@@ -2289,6 +2911,102 @@ def rclone_capture(config: dict[str, Any], cmd: list[str], input_text: str | Non
     )
 
 
+def audit_remote_root(config: dict[str, Any]) -> str:
+    cfg = normalized_config(config)
+    return remote_join(
+        str(cfg["remote_base"]),
+        f".audit/{safe_id(str(cfg['profile_id']))}/{safe_id(str(cfg['machine_id']))}/{safe_id(str(cfg['install_id']))}",
+    )
+
+
+def replicate_event_journal(config: dict[str, Any], *, seal: bool = True) -> dict[str, Any]:
+    """Publish verified sealed journal segments to this profile's owned remote."""
+    cfg = normalized_config(config)
+    journal = event_journal(cfg)
+    if not journal.settings.cloud_enabled:
+        return journal.status()
+    previous = journal.status()
+    if seal:
+        journal.seal_active()
+    segments = journal.segment_records()
+    remote_root = audit_remote_root(cfg)
+    remote_segments = remote_join(remote_root, "segments")
+    uploaded_hashes: set[str] = set()
+    remote_names: dict[str, str] = {}
+    try:
+        for segment in segments:
+            name = (
+                f"{segment['epoch']}-{int(segment['start_sequence']):012d}-"
+                f"{int(segment['end_sequence']):012d}-{segment['sha256']}.jsonl"
+            )
+            remote_names[str(segment["sha256"])] = name
+            if segment.get("replicated", False):
+                uploaded_hashes.add(str(segment["sha256"]))
+                continue
+            remote_object = remote_join(remote_segments, name)
+            segment_text = journal.segment_text(segment)
+            result = rclone_capture(
+                cfg,
+                ["rcat", remote_object],
+                input_text=segment_text,
+            )
+            if result.returncode != 0:
+                raise JournalError(f"segment upload failed ({result.returncode}): {result.stdout or ''}")
+            verified = rclone_capture(cfg, ["cat", remote_object])
+            remote_hash = hashlib.sha256((verified.stdout or "").encode("utf-8")).hexdigest()
+            if verified.returncode != 0 or remote_hash != str(segment["sha256"]):
+                raise JournalError(f"segment verification failed ({verified.returncode}): {remote_object}")
+            uploaded_hashes.add(str(segment["sha256"]))
+
+        manifest = journal.cloud_manifest()
+        for segment in manifest["segments"]:
+            segment["object"] = remote_names[str(segment["sha256"])]
+        manifest_body = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        manifest_hash = hashlib.sha256(manifest_body.encode()).hexdigest()
+        temporary_manifest = remote_join(remote_root, f"manifest.{uuid.uuid4().hex}.tmp")
+        staged = rclone_capture(cfg, ["rcat", temporary_manifest], input_text=manifest_body)
+        if staged.returncode != 0:
+            raise JournalError(f"manifest upload failed ({staged.returncode}): {staged.stdout or ''}")
+        published = rclone_capture(cfg, ["moveto", temporary_manifest, remote_join(remote_root, "manifest.json")])
+        if published.returncode != 0:
+            raise JournalError(f"manifest publication failed ({published.returncode}): {published.stdout or ''}")
+        journal.mark_replicated(uploaded_hashes, manifest_hash=manifest_hash)
+
+        # Cleanup is deliberately after manifest publication. A cleanup error
+        # leaves harmless stale immutable objects rather than invalidating the
+        # newly verified manifest.
+        listing = rclone_capture(cfg, ["lsjson", remote_segments])
+        if listing.returncode == 0:
+            try:
+                entries = json.loads(listing.stdout or "[]")
+            except json.JSONDecodeError:
+                entries = []
+            referenced = set(remote_names.values())
+            for entry in entries if isinstance(entries, list) else []:
+                name = str(entry.get("Name") or entry.get("Path") or "") if isinstance(entry, dict) else ""
+                if name and name not in referenced and "/" not in name and "\\" not in name:
+                    rclone_capture(cfg, ["deletefile", remote_join(remote_segments, name)])
+        if previous.get("replication", {}).get("last_error"):
+            record_event(
+                cfg,
+                "logging.cloud_recovered",
+                component="logging",
+                data={"replicated_segments": len(uploaded_hashes)},
+            )
+        return journal.status()
+    except (JournalError, OSError, ValueError) as exc:
+        journal.mark_replication_error(str(exc))
+        if not previous.get("replication", {}).get("last_error"):
+            record_event(
+                cfg,
+                "logging.cloud_degraded",
+                component="logging",
+                severity="warning",
+                data={"error": str(exc)},
+            )
+        return journal.status()
+
+
 def state_root_path(config: dict[str, Any]) -> Path:
     return Path(normalized_config(config)["state_root"]).expanduser()
 
@@ -2300,7 +3018,7 @@ def backup_report_path(config: dict[str, Any]) -> Path:
     return root / f"{folder_id}-{uuid.uuid4().hex}.combined"
 
 
-def publish_generation(config: dict[str, Any], report_path: Path) -> int:
+def publish_generation(config: dict[str, Any], report_path: Path, *, operation_id: str | None = None) -> int:
     """Publish an immutable owner generation, then its latest pointer."""
     cfg = normalized_config(config)
     folder_id = str(config.get("folder_id") or "")
@@ -2325,20 +3043,53 @@ def publish_generation(config: dict[str, Any], report_path: Path) -> int:
         changes=changes,
         parent_generation=parent_generation,
     )
+    correlation = {
+        "operation_id": operation_id,
+        "folder_id": folder_id,
+        "generation_id": record["generation_id"],
+    }
+    record_event(
+        cfg,
+        "generation.publication_started",
+        component="generation",
+        data={"change_count": len(changes), "parent_generation": parent_generation},
+        correlation=correlation,
+    )
     body = json.dumps(record, indent=2, sort_keys=True) + "\n"
     immutable_path = remote_join(remote_dir, f"generations/{record['generation_id']}.json")
     immutable = rclone_capture(cfg, ["rcat", immutable_path], input_text=body)
     if immutable.returncode != 0:
-        append_log(cfg, f"[{now_iso()}] generation upload failed: {immutable.stdout or ''}\n")
+        record_event(
+            cfg,
+            "generation.publication_failed",
+            component="generation",
+            severity="error",
+            data={"stage": "immutable", "exit_code": immutable.returncode, "error": immutable.stdout or ""},
+            correlation=correlation,
+        )
         return int(immutable.returncode)
     latest = rclone_capture(cfg, ["rcat", latest_path], input_text=body)
     if latest.returncode != 0:
-        append_log(cfg, f"[{now_iso()}] generation latest update failed: {latest.stdout or ''}\n")
+        record_event(
+            cfg,
+            "generation.publication_failed",
+            component="generation",
+            severity="error",
+            data={"stage": "latest", "exit_code": latest.returncode, "error": latest.stdout or ""},
+            correlation=correlation,
+        )
         return int(latest.returncode)
 
     local_dir = state_root_path(cfg) / "generations" / str(cfg["machine_id"]) / folder_id
     atomic_write_text(local_dir / "generations" / f"{record['generation_id']}.json", body)
     atomic_write_text(local_dir / "latest.json", body)
+    record_event(
+        cfg,
+        "generation.published",
+        component="generation",
+        data={"change_count": len(changes), "parent_generation": parent_generation},
+        correlation=correlation,
+    )
     return 0
 
 
@@ -2500,7 +3251,7 @@ def create_receive_job(
         entry = source_inventory.get(normalized)
         copy_selections.append(f"{normalized}/" if entry and entry.get("type") == "directory" else normalized)
     code = run_command(
-        config,
+        {**config, "_job_id": job["id"]},
         copy_cmd(config, source, stage, False, copy_selections),
         progress_callback=progress_callback,
     )
@@ -2525,18 +3276,46 @@ def run_receive_direct(
     source_generation: str | None = None,
     link_id: str | None = None,
 ) -> int:
+    operation_id = new_operation_id("receive")
+    correlation = {"operation_id": operation_id, "generation_id": source_generation, "link_id": link_id}
+    record_event(
+        config,
+        "job.stage_started",
+        component="receive",
+        data={"source": source, "destination": destination, "selected_paths": selected_paths, "mode": mode},
+        correlation=correlation,
+    )
     with Lock(lock_file(config)):
-        code, job = create_receive_job(
-            config,
-            source=source,
-            destination=destination,
-            selected_paths=selected_paths,
-            source_label=source_label,
-            mode=mode,
-            baseline_inventory=baseline_inventory,
-            source_generation=source_generation,
-            link_id=link_id,
-        )
+        try:
+            code, job = create_receive_job(
+                config,
+                source=source,
+                destination=destination,
+                selected_paths=selected_paths,
+                source_label=source_label,
+                mode=mode,
+                baseline_inventory=baseline_inventory,
+                source_generation=source_generation,
+                link_id=link_id,
+            )
+        except BaseException as exc:
+            record_event(
+                config,
+                "job.stage_failed",
+                component="receive",
+                severity="error",
+                data={"error": str(exc), "reason": type(exc).__name__},
+                correlation=correlation,
+            )
+            raise
+    record_event(
+        config,
+        "job.staged" if code == 0 else "job.stage_failed",
+        component="receive",
+        severity="info" if code == 0 else "error",
+        data={"status": job.get("status"), "exit_code": code, "mode": mode},
+        correlation={**correlation, "job_id": job["id"]},
+    )
     print(json.dumps(job, indent=2, sort_keys=True))
     return code
 
@@ -2598,15 +3377,50 @@ def cmd_jobs(args: argparse.Namespace) -> int:
                 policies=policies,
             )
         except OSError:
+            started_event = {
+                "apply": "job.apply_started",
+                "reconcile": "job.reconciliation_required",
+                "rollback": "job.rollback_started",
+            }[args.jobs_cmd]
+            record_event(
+                config,
+                started_event,
+                component="receive",
+                data={"policy_count": len(policies)},
+                correlation={"job_id": args.job_id},
+            )
             with Lock(lock_file(config)):
-                if args.jobs_cmd == "apply":
-                    job = store.load(args.job_id)
-                    revalidate_remote_job_source(config, job)
-                    value = store.commit_clone(args.job_id) if job.get("mode") == "clone" else store.apply(args.job_id, policies)
-                elif args.jobs_cmd == "reconcile":
-                    value = store.reconcile(args.job_id)
-                else:
-                    value = store.rollback(args.job_id)
+                try:
+                    if args.jobs_cmd == "apply":
+                        job = store.load(args.job_id)
+                        revalidate_remote_job_source(config, job)
+                        value = store.commit_clone(args.job_id) if job.get("mode") == "clone" else store.apply(args.job_id, policies)
+                    elif args.jobs_cmd == "reconcile":
+                        value = store.reconcile(args.job_id)
+                    else:
+                        value = store.rollback(args.job_id)
+                except BaseException as exc:
+                    record_event(
+                        config,
+                        "job.blocked",
+                        component="receive",
+                        severity="warning",
+                        data={"operation": args.jobs_cmd, "error": str(exc), "reason": type(exc).__name__},
+                        correlation={"job_id": args.job_id},
+                    )
+                    raise
+            completed_event = {
+                "apply": "job.applied",
+                "reconcile": "job.reconciled",
+                "rollback": "job.rolled_back",
+            }[args.jobs_cmd]
+            record_event(
+                config,
+                completed_event,
+                component="receive",
+                data={"status": value.get("status"), "action_count": len(value.get("actions") or [])},
+                correlation={"job_id": args.job_id, "generation_id": value.get("source_generation"), "link_id": value.get("link_id")},
+            )
         else:
             if not response.get("ok"):
                 raise SystemExit(str(response.get("error") or "daemon job operation failed"))
@@ -3068,9 +3882,34 @@ def parser() -> argparse.ArgumentParser:
     registry_path_cmd = registry_sub.add_parser("path")
     registry_path_cmd.set_defaults(func=cmd_registry)
 
-    logs = sub.add_parser("logs", help="Print recent Safe Sync logs")
-    logs.add_argument("--lines", type=int, default=80, help="Number of recent lines (default: 80)")
-    logs.set_defaults(func=cmd_logs)
+    logs = sub.add_parser("logs", help="Query structured audit and diagnostic events")
+    logs.add_argument("--lines", type=int, default=80, help="Compatibility shortcut for recent events")
+    logs.set_defaults(func=cmd_logs, logs_cmd=None)
+    logs_sub = logs.add_subparsers(dest="logs_cmd")
+    logs_sub.add_parser("status", help="Show local journal capacity and health").set_defaults(func=cmd_logs)
+    logs_sub.add_parser("cloud-status", help="Show cloud replication health").set_defaults(func=cmd_logs)
+    logs_sub.add_parser("sync", help="Seal and replicate pending events now").set_defaults(func=cmd_logs)
+    logs_level = logs_sub.add_parser("level", help="Set persistent or temporary diagnostic verbosity")
+    logs_level.add_argument("level", choices=("quiet", "normal", "debug", "trace"))
+    logs_level.add_argument("--for", dest="for_duration", help="Temporary duration such as 30m or 2h")
+    logs_level.set_defaults(func=cmd_logs)
+    logs_show = logs_sub.add_parser("show", help="Query recent structured events")
+    logs_show.add_argument("--since", help="Only events within a duration such as 2h or 7d")
+    logs_show.add_argument("--event", dest="event_type", help="Exact event type")
+    logs_show.add_argument("--folder", help="Configured folder id")
+    logs_show.add_argument("--severity", choices=("error", "warning", "info", "debug", "trace"))
+    logs_show.add_argument("--limit", type=int, default=200)
+    logs_show.add_argument("--json", action="store_true", help="Print one JSON array")
+    logs_show.add_argument("--jsonl", action="store_true", help="Print newline-delimited JSON")
+    logs_show.set_defaults(func=cmd_logs)
+    logs_export = logs_sub.add_parser("export", help="Export filtered events as JSONL")
+    logs_export.add_argument("--since", help="Only events within a duration such as 24h")
+    logs_export.add_argument("--event", dest="event_type", help="Exact event type")
+    logs_export.add_argument("--folder", help="Configured folder id")
+    logs_export.add_argument("--severity", choices=("error", "warning", "info", "debug", "trace"))
+    logs_export.add_argument("--limit", type=int)
+    logs_export.add_argument("--output", required=True)
+    logs_export.set_defaults(func=cmd_logs)
 
     doctor = sub.add_parser("doctor", help="Check configuration and Dropbox connectivity")
     doctor.set_defaults(func=cmd_doctor)

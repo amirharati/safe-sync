@@ -26,6 +26,15 @@
   "install_id": "replace-with-generated-uuid",
   "lock_file": "~/.local/state/safe-sync/safe-sync.lock",
   "log_dir": "~/.local/log/safe-sync",
+  "logging": {
+    "cloud_enabled": true,
+    "cloud_flush_interval_seconds": 60,
+    "level": "normal",
+    "max_cloud_bytes": 67108864,
+    "max_local_bytes": 67108864,
+    "path_detail": "relative",
+    "segment_bytes": 1048576
+  },
   "machine": "macbook",
   "machine_id": "macbook",
   "machine_label": "MacBook",
@@ -35,5 +44,6 @@
   "rate_limit_backoff_seconds": 300,
   "rclone_max_duration_seconds": 120,
   "remote_base": "dropbox:computer-backups/test",
+  "state_root": "~/.local/state/safe-sync",
   "status_path": "~/.local/state/safe-sync/status.json"
 }

@@ -111,19 +111,23 @@ part of the owner's pre-install review.
 The required behavior is specified in
 [`docs/product/event-logging-and-audit-design.md`](../product/event-logging-and-audit-design.md).
 
-- [ ] Replace independently written mutable/text histories with one structured
+- [x] Replace independently written mutable/text histories with one structured
   event pipeline and stable correlation IDs.
-- [ ] Record always-on audit events while allowing `quiet`, `normal`, `debug`,
+- [x] Record always-on audit events while allowing `quiet`, `normal`, `debug`,
   and `trace` diagnostic levels, including a time-limited Debug mode.
-- [ ] Enforce a crash-safe byte-bounded segmented circular ring with an atomic
+- [x] Enforce a crash-safe byte-bounded segmented circular ring with an atomic
   cursor, oldest-first wrap, integrity checks, and visible sequence gaps.
-- [ ] Replicate verified sealed segments automatically to the owning profile's
+- [x] Replicate verified sealed segments automatically to the owning profile's
   remote base without competing with backups or routing across profiles.
-- [ ] Expose correlated watcher, backup, per-path, generation, receive, and
+- [x] Expose correlated watcher, backup, per-path, generation, receive, and
   rollback history consistently through CLI and control panel.
 - [ ] Pass local wrap/crash/corruption tests plus offline, rate-limit,
   interrupted-upload, profile-routing, redaction, and cloud-gap tests on
   disposable macOS and Linux fixtures.
+
+Implementation-level automated coverage is in place. Keep the final item open
+until the destructive/interrupted scenarios have been exercised on disposable
+macOS and Linux fixtures against the intended cloud provider.
 
 ## Deferred until dogfood evidence
 

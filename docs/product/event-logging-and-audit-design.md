@@ -2,8 +2,11 @@
 
 ## Status
 
-Proposed on 2026-08-09 as a required implementation and review gate before
-broad real-world dogfooding. No product code implements this design yet.
+Proposed and implemented on 2026-08-09 as a required review gate before broad
+real-world dogfooding. The local structured ring, core event instrumentation,
+per-profile cloud replication, CLI queries, Activity UI, and canonical help
+are implemented. Disposable macOS/Linux and real-provider validation remains
+part of the dogfood gate.
 
 This document is the authoritative design for Safe Sync event recording,
 diagnostic verbosity, bounded local retention, per-profile cloud replication,
@@ -24,9 +27,9 @@ Dogfooding is useful only if Safe Sync can later answer, in order:
 - Did cloud log replication succeed, lag, or lose events because the bounded
   local journal wrapped while offline?
 
-Today these answers are split among a mutable status file, daily text logs,
-rclone output, backup reports, generations, and receive-job journals. The new
-design creates one structured event model and one recording path for
+Previously these answers were split among a mutable status file, daily text
+logs, rclone output, backup reports, generations, and receive-job journals.
+The implementation uses one structured event model and one recording path for
 observability so those surfaces cannot tell unrelated stories.
 
 ## Decisions at a Glance
@@ -341,9 +344,10 @@ Initial defaults per profile:
 }
 ```
 
-This creates 64 one-MiB logical slots and a 64-MiB bound per profile, plus one
-temporary active segment and small manifests. Configuration validation requires
-at least four segments and enforces safe upper bounds. `max_*_bytes` is a byte
+This creates 63 sealed one-MiB logical slots plus one active one-MiB segment,
+keeping journal data within the 64-MiB bound per profile apart from small
+cursor/manifest metadata. Configuration validation requires at least four
+total segment budgets and enforces safe upper bounds. `max_*_bytes` is a byte
 budget, not a promised number of days; debug and trace consume it faster.
 
 ### Write and wrap protocol
@@ -498,10 +502,10 @@ The control panel Activity view provides:
 - Export and Open Local Log Folder actions.
 
 The existing status file remains a replaceable projection for fast tray reads.
-The daily free-form text log becomes a compatibility export during migration
-and is removed only after all required rclone/error information is represented
-by structured events. There must not be two independently written production
-logs after migration.
+The independent daily free-form writer has been removed. The configured
+`log_dir` is now used only for a last-resort emergency text message if the
+structured journal itself cannot accept an event; it is not a parallel source
+of production history.
 
 ## Future Durable Events for Recovery
 
@@ -550,6 +554,11 @@ rclone lines, and UI diagnostics never do.
 
 ## Implementation Phases
 
+Phases 0 through 5 are implemented in the current dogfood build. The phase
+descriptions below remain as the implementation record; the required
+cross-platform/provider verification is tracked separately in the pre-dogfood
+checklist.
+
 ### Phase 0: Schema and fixtures
 
 - Define the versioned envelope, event catalog, payload validators, redaction
@@ -561,7 +570,8 @@ rclone lines, and UI diagnostics never do.
 - Implement locked sequence allocation, active-tail recovery, segment sealing,
   atomic cursor updates, ring wrap, querying, corruption/gap reporting, and
   deterministic tests.
-- Keep existing logging active until equivalence is proven.
+- Keep existing logging active until equivalence is proven. (Completed during
+  development; the independent text writer is now removed.)
 
 ### Phase 2: Core instrumentation
 
@@ -588,7 +598,7 @@ rclone lines, and UI diagnostics never do.
 ### Phase 5: Migration and dogfood gate
 
 - Run structured and legacy logging together only during a bounded comparison
-  period.
+  period. (Completed during development.)
 - Prove every required dogfood question is answerable from structured events.
 - Remove the independent daily text writer after equivalence and update tests,
   installer, updater, uninstaller, and support bundle behavior.

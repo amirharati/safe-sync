@@ -21,21 +21,39 @@ except ImportError:  # pragma: no cover - exercised through dependency injection
 class ChangeQueue:
     """Coalesce native events by configured folder."""
 
-    def __init__(self, wake: Callable[[], None] | None = None) -> None:
+    def __init__(self, wake: Callable[[], None] | None = None, max_paths_per_folder: int = 256) -> None:
         self._lock = threading.Lock()
-        self._changed: set[str] = set()
+        self._changed: dict[str, set[str]] = {}
+        self._overflow: set[str] = set()
         self._wake = wake
+        self._max_paths_per_folder = max_paths_per_folder
 
-    def mark(self, folder_id: str) -> None:
+    def mark(self, folder_id: str, relative_path: str = "") -> None:
         with self._lock:
-            self._changed.add(folder_id)
+            paths = self._changed.setdefault(folder_id, set())
+            if len(paths) < self._max_paths_per_folder:
+                if relative_path:
+                    paths.add(relative_path)
+            else:
+                self._overflow.add(folder_id)
         if self._wake is not None:
             self._wake()
 
     def consume(self) -> list[str]:
+        return sorted(self.consume_details())
+
+    def consume_details(self) -> dict[str, dict[str, object]]:
         with self._lock:
-            changed = sorted(self._changed)
-            self._changed.clear()
+            changed = {
+                folder_id: {
+                    "paths": sorted(paths),
+                    "path_count": len(paths),
+                    "paths_truncated": folder_id in self._overflow,
+                }
+                for folder_id, paths in self._changed.items()
+            }
+            self._changed = {}
+            self._overflow.clear()
         return changed
 
 
@@ -46,30 +64,33 @@ class _FolderEventHandler(FileSystemEventHandler):  # type: ignore[misc]
         self.root = root.resolve()
         self.queue = queue
 
-    def _is_relevant(self, raw_path: str | bytes | None, *, event_type: str, is_directory: bool) -> bool:
+    def _relevant_path(self, raw_path: str | bytes | None, *, event_type: str, is_directory: bool) -> str | None:
         if not raw_path:
-            return False
+            return None
         try:
             relative = Path(raw_path).resolve().relative_to(self.root)
         except (OSError, TypeError, ValueError):
-            return False
+            return None
         if relative == Path("."):
             # Native backends emit a redundant watched-root metadata update
             # when any direct child changes. The precise child event carries
             # the useful path and lets ignored directories remain ignored.
-            return not (event_type == "modified" and is_directory)
-        return not should_ignore_watch_event(relative)
+            return "" if not (event_type == "modified" and is_directory) else None
+        return None if should_ignore_watch_event(relative) else relative.as_posix()
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         event_type = str(getattr(event, "event_type", ""))
         if event_type in {"opened", "closed_no_write"}:
             return
         paths = [getattr(event, "src_path", None), getattr(event, "dest_path", None)]
-        if any(
-            self._is_relevant(path, event_type=event_type, is_directory=bool(getattr(event, "is_directory", False)))
-            for path in paths
-        ):
-            self.queue.mark(self.folder_id)
+        for path in paths:
+            relative = self._relevant_path(
+                path,
+                event_type=event_type,
+                is_directory=bool(getattr(event, "is_directory", False)),
+            )
+            if relative is not None:
+                self.queue.mark(self.folder_id, relative)
 
 
 class NativeWatcher:
@@ -118,6 +139,9 @@ class NativeWatcher:
 
     def consume(self) -> list[str]:
         return self.queue.consume()
+
+    def consume_details(self) -> dict[str, dict[str, object]]:
+        return self.queue.consume_details()
 
     def healthy(self) -> bool:
         if self._observer is None:

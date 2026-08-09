@@ -331,14 +331,66 @@ which is an optional administrator-level system setting.
 - Do not point two computer identities at the same owned remote folder.
 - Do not watch a Dropbox-synced local directory or an entire home directory.
 
-## 12. Troubleshooting
+## 12. Activity and Audit Logging
+
+The Activity tab uses Safe Sync's structured event journal. It correlates
+watcher detections, queued work, backup starts, per-file results, generation
+publication, receive jobs, apply, reconciliation, rollback, and failures.
+
+Audit events are always recorded. The selected diagnostic level controls
+additional implementation detail:
+
+- `quiet`: audit events and diagnostic errors.
+- `normal`: audit events, warnings, lifecycle summaries, and useful rclone
+  summaries. This is the production default.
+- `debug`: watcher/coalescing decisions, queue reasoning, rclone debug lines,
+  and cloud replication decisions.
+- `trace`: high-frequency internal transitions for short supervised tests.
+
+Change the persistent level or temporarily enable Debug:
+
+```bash
+safe-sync logs level normal
+safe-sync logs level debug --for 2h
+```
+
+Query, filter, export, and inspect cloud replication:
+
+```bash
+safe-sync logs status
+safe-sync logs show --since 2h
+safe-sync logs show --event backup.path_result --folder projects
+safe-sync logs show --severity error --json
+safe-sync logs export --since 24h --output safe-sync-audit.jsonl
+safe-sync logs cloud-status
+safe-sync logs sync
+```
+
+Each profile has a crash-safe 64 MiB local circular journal by default. It
+uses fixed segments and replaces the oldest segment after reaching the bound.
+If offline activity wraps before reaching Dropbox, Safe Sync records the exact
+missing sequence range and shows degraded audit health rather than claiming a
+complete history.
+
+Sealed segments copy automatically to the owning profile's remote base below
+`.audit/<profile>/<machine>/<install>/`. They never copy to whichever profile
+happens to become active later. Backup traffic has priority over log copying.
+
+This journal records what happened; it does not contain file contents and is
+not a recovery database. Remote trash, backup generations, and receive-job
+checkpoints remain the recovery mechanisms. A future durable recovery-event
+store will be separate from this bounded diagnostic journal.
+
+## 13. Troubleshooting
 
 Start with:
 
 ```bash
 safe-sync status
 safe-sync doctor
-safe-sync logs --lines 200
+safe-sync logs show --since 2h
+safe-sync logs show --severity error
+safe-sync logs cloud-status
 ```
 
 If setup is required, connect Dropbox and run setup with at least one folder.
@@ -372,24 +424,28 @@ safe-sync links add --help
 safe-sync folders add --help
 ```
 
-## 13. Files and Locations
+## 14. Files and Locations
 
 - Configuration: `~/.safe-sync/config.json`
 - Dropbox authorization: `~/.safe-sync/rclone.conf`
 - Installed runtime: `~/.local/share/safe-sync/current/`
 - Command: `~/.local/bin/safe-sync`
 - Runtime status and socket: `~/.local/state/safe-sync/`
+- Structured per-profile event journals:
+  `~/.local/state/safe-sync/event-journal/`
 - Receive-job index and local generation records:
   `~/.local/state/safe-sync/jobs/` and `generations/`
 - Destination-adjacent staging and checkpoints: `.safe-sync-work/` beside the
   selected destination (retained during dogfood for recovery review)
-- Logs: `~/.local/log/safe-sync/`
+- Emergency journal-failure log (normally absent):
+  `~/.local/log/safe-sync/safe-sync-emergency-YYYY-MM-DD.log`
+- Cloud event replicas: `<profile remote base>/.audit/`
 - macOS desktop app: `~/Applications/Safe Sync.app`
 
 Use `safe-sync config show` to inspect the effective configuration without
 manually editing the JSON file.
 
-## 14. Uninstall
+## 15. Uninstall
 
 Run the uninstaller from the cloned repository:
 
@@ -409,7 +465,7 @@ explicitly confirmed purge:
 
 Neither form deletes Dropbox backups or Safe Sync's remote trash.
 
-## 15. Command Summary
+## 16. Command Summary
 
 - `safe-sync help` prints this complete guide.
 - `safe-sync setup` creates or validates setup and folders.
@@ -417,7 +473,8 @@ Neither form deletes Dropbox backups or Safe Sync's remote trash.
 - `safe-sync status` reports service, watcher, queue, and sync health.
 - `safe-sync backup` queues a backup; its options support direct dry runs.
 - `safe-sync start`, `stop`, and `restart` control the backend.
-- `safe-sync logs` prints recent logs.
+- `safe-sync logs` queries, filters, exports, configures, and replicates the
+  structured audit journal.
 - `safe-sync doctor` runs configuration and remote health checks.
 - `safe-sync folders` manages watched folders.
 - `safe-sync profiles` manages local computer identities.

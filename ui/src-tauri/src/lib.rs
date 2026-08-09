@@ -44,6 +44,7 @@ struct SafeSyncConfigView {
     min_interval_seconds: u64,
     fallback_interval_seconds: u64,
     rate_limit_backoff_seconds: u64,
+    logging: Value,
     folders: Vec<Value>,
     profiles: Vec<Value>,
 }
@@ -132,6 +133,21 @@ struct AddLinkRequest {
     local_subpath: String,
     peer_subpath: String,
     label: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityQuery {
+    since: Option<String>,
+    event_type: Option<String>,
+    folder: Option<String>,
+    severity: Option<String>,
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogLevelRequest {
+    level: String,
+    duration: Option<String>,
 }
 
 fn safe_id(value: &str) -> String {
@@ -851,6 +867,56 @@ async fn get_history(folder: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn get_log_status() -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["logs".to_string(), "status".to_string()]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync logs status returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn get_activity(request: ActivityQuery) -> Result<Value, String> {
+    let mut args = vec![
+        "logs".to_string(),
+        "show".to_string(),
+        "--json".to_string(),
+        "--limit".to_string(),
+        request.limit.unwrap_or(200).clamp(1, 1000).to_string(),
+    ];
+    if let Some(value) = request.since.filter(|value| !value.trim().is_empty()) {
+        args.extend(["--since".to_string(), value]);
+    }
+    if let Some(value) = request.event_type.filter(|value| !value.trim().is_empty()) {
+        args.extend(["--event".to_string(), value]);
+    }
+    if let Some(value) = request.folder.filter(|value| !value.trim().is_empty()) {
+        args.extend(["--folder".to_string(), value]);
+    }
+    if let Some(value) = request.severity.filter(|value| !value.trim().is_empty()) {
+        args.extend(["--severity".to_string(), value]);
+    }
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync logs show returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn set_log_level(request: LogLevelRequest) -> Result<Value, String> {
+    if !matches!(request.level.as_str(), "quiet" | "normal" | "debug" | "trace") {
+        return Err("log level must be quiet, normal, debug, or trace".to_string());
+    }
+    let mut args = vec!["logs".to_string(), "level".to_string(), request.level];
+    if let Some(duration) = request.duration.filter(|value| !value.trim().is_empty()) {
+        args.extend(["--for".to_string(), duration]);
+    }
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync logs level returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn sync_audit_logs() -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["logs".to_string(), "sync".to_string()]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync logs sync returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
 async fn recover_history(folder: String, path: String) -> Result<CommandResult, String> {
     if folder.trim().is_empty() || path.trim().is_empty() {
         return Err("folder and retained version path are required".to_string());
@@ -1109,7 +1175,11 @@ pub fn run() {
             remove_link,
             review_link,
             get_history,
-            recover_history
+            recover_history,
+            get_log_status,
+            get_activity,
+            set_log_level,
+            sync_audit_logs
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
