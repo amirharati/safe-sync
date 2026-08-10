@@ -8,7 +8,10 @@ import pytest
 
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
+    INTERNAL_FILTER_RULES,
     Lock,
+    TEMPLATE_FILTER,
+    TEMPLATE_INTERNAL_FILTER,
     add_setup_folder,
     cmd_daemon,
     cmd_connect_dropbox,
@@ -426,6 +429,17 @@ def test_watch_filter_ignores_generated_paths():
     assert should_ignore_watch_event("/tmp/project/data/temporary.pyc")
     assert not should_ignore_watch_event("/tmp/project/data/results.csv")
     assert not should_ignore_watch_event("/tmp/project/models/model.pt")
+
+
+def test_rclone_filters_exclude_root_and_nested_git_directories():
+    user_rules = TEMPLATE_FILTER.read_text().splitlines()
+    internal_rules = TEMPLATE_INTERNAL_FILTER.read_text().splitlines()
+
+    assert "- .git/**" in user_rules
+    assert "- **/.git/**" in user_rules
+    assert "- .git/**" in internal_rules
+    assert "- **/.git/**" in internal_rules
+    assert INTERNAL_FILTER_RULES == TEMPLATE_INTERNAL_FILTER.read_text()
 
 
 def test_native_watcher_coalesces_relevant_events_and_ignores_build_outputs(tmp_path):

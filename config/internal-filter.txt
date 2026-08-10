@@ -1,3 +1,7 @@
 # Safe Sync internal work data
 - .safe-sync-work/**
 - **/.safe-sync-work/**
+
+# VCS internals are never backup payloads
+- .git/**
+- **/.git/**

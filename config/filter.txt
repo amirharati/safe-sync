@@ -5,6 +5,7 @@
 # experiment outputs, and logs.
 
 # VCS internals
+- .git/**
 - **/.git/**
 
 # OS/editor noise

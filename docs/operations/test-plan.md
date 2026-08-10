@@ -24,6 +24,50 @@ Trash for this test should go under:
 dropbox:computer-backups/.trash/test/macbook/<timestamp>
 ```
 
+## Staged Dogfood Progression
+
+Do not combine all workflows in one test period. Complete and review each
+stage's structured logs before moving to the next stage.
+
+### Stage 1: Basic one-profile watch and backup (current)
+
+Use only the current computer/profile. Enable temporary Debug logging for two
+hours and exercise ordinary disposable local activity:
+
+- Create, edit, rename, and delete files inside watched folders.
+- Create, rename, and remove nested directories, including empty directories.
+- Optionally add or remove a disposable watched-folder configuration; verify
+  that removing it stops management without deleting local or remote data.
+- Allow automatic watcher-triggered backups and optionally use Backup Now.
+- Do not restore, receive remote data, transfer, compare, link, clone, merge,
+  import, or adopt another profile during this stage.
+
+At the end of the window, review the Activity journal and verify watcher
+detection, debouncing, queued work, per-path results, generation publication,
+remote-trash handling, cloud log replication, and final local/remote state.
+Do not advance until unexplained missing, duplicate, or contradictory events
+have been resolved.
+
+### Stage 2: Recovery on one profile/computer
+
+Remain on the same computer/profile. Exercise selected-version history and the
+safe receive job used for recovery: stage, inspect, apply with explicit policy,
+verify checkpoints, and perform a conditional rollback. Do not introduce a
+peer machine, second profile, linked folder, cross-computer transfer, or merge.
+Review recovery/job logs and prove that live local files are never replaced
+before approval and that rollback never overwrites a later edit.
+
+### Stage 3: Cross-computer and advanced workflows
+
+Only after Stages 1 and 2 pass, introduce a second disposable machine/profile
+as needed. Exercise selective receive, exact local/remote diff, conflict
+policies, linked-folder three-way merge, clone/import/export semantics, and
+granular subfolder synchronization. Review every staged/apply/rollback path
+and the correlated logs before expanding beyond disposable data.
+
+The interruption matrix below remains a separate destructive test using its
+own isolated fixture and remote prefix.
+
 ## Seed Files
 
 The test tree includes files that should be backed up:
@@ -38,6 +82,7 @@ models/model.pt
 It also includes files that should be ignored by the filter:
 
 ```text
+.git/HEAD
 node_modules/pkg/index.js
 .venv/lib/site.py
 dist/bundle.js
@@ -57,7 +102,8 @@ rclone sync ~/safe-sync-test dropbox:computer-backups/test/macbook/safe-sync-tes
 Expected:
 
 - Includes `README.md`, `src/app.py`, `data/results.csv`, `models/model.pt`.
-- Excludes `node_modules/`, `.venv/`, and `dist/`.
+- Excludes a `.git/` at the selected root, plus nested `node_modules/`,
+  `.venv/`, and `dist/` directories.
 - Does not touch broad or important work folders.
 
 Real test backup should only happen after dry-run output is reviewed.

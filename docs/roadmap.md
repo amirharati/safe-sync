@@ -25,6 +25,59 @@ separate future path for allowlisted durable recovery events.
 
 ## Open Issues
 
+### LOG-001: Protect audit history from diagnostic floods
+
+**Priority:** fix before another long Debug/Trace dogfood run.
+
+**Observed during one-profile dogfood on 2026-08-09:** a large repository with
+many `.git/objects` produced hundreds of thousands of rclone Debug lines during
+one multi-hour backup. Cloud journal replication correctly stayed out of the
+active backup lane, but the shared 64 MiB local ring filled and overwrote
+unreplicated segments. Gap reporting worked, but important audit history can
+be displaced by high-volume diagnostics, which is the wrong retention
+priority.
+
+Give always-on audit events protected capacity independent of noisy diagnostic
+events. Bound, sample, or aggregate raw rclone/watcher diagnostics per
+operation; replicate sealed segments between folders; and keep accurate live
+cloud-backlog/gap status during long operations. Add a test that exceeds the
+diagnostic budget while a remote operation remains active and proves lifecycle,
+failure, and per-path audit evidence is retained even when diagnostic detail is
+dropped.
+
+### STATUS-001: Clear expired backoff warnings after retry resumes
+
+**Priority:** fix after the current Stage 1 dogfood review and before Stage 2
+recovery dogfooding; do not interrupt the active backup to deploy it.
+
+**Observed during one-profile dogfood on 2026-08-09:** the Status view showed
+`Dropbox rate limited ... cooling down for 300s` while the daemon was actively
+copying folder 5 of 5. The stored backoff had expired hours earlier and its
+remaining time was zero, but `last_warning`, `failed_folder`, and backoff
+metadata survived into the successful retry cycle.
+
+When a retry begins or demonstrably resumes work, clear active warning/failure
+projection fields while retaining the historical warning in the event journal.
+The UI must never simultaneously claim an active cooldown and show a live
+sync unless a new throttle actually applies. Cover backoff entry, expiry,
+retry start, active progress, success, and repeated throttling.
+
+### UI-001: Distinguish configured folders from current sync folder
+
+**Priority:** fix after the current basic one-profile logging dogfood review.
+
+The Status view's singular `Folder` row currently displays only the daemon's
+current or most recently processed folder. While idle it can therefore show
+one folder even when the active profile has several enabled folders, making a
+healthy configuration look incomplete.
+
+Show `Configured folders` as an explicit count, and relabel the runtime value
+as `Current folder` while work is active and `Last folder` while idle. During
+multi-folder backup, retain the useful `name (index/total)` progress. Keep the
+quick panel and full control panel consistent, and add UI regression coverage
+for idle, active, and stopped backend states. This issue is presentation-only;
+the confirmed active configuration contains all three enabled folders.
+
 ### REMOTE-001: Optional remote backup purge
 
 **Priority:** after real two-machine install testing.

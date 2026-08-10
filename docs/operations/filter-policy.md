@@ -17,6 +17,7 @@ This filter policy is intentionally conservative. It excludes files that are rei
 ## Exclude
 
 ```text
+.git/**
 **/.git/**
 **/node_modules/**
 **/.venv/**
@@ -41,4 +42,3 @@ This filter policy is intentionally conservative. It excludes files that are rei
 **/*.dll
 **/*.class
 ```
-

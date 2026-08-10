@@ -88,12 +88,7 @@ RATE_LIMIT_EXIT = 75
 LAST_COMMAND_OUTPUT = ""
 PROCESS_RUN_ID = f"run_{uuid.uuid4().hex}"
 _EVENT_JOURNALS: dict[tuple[str, str, str, str], EventJournal] = {}
-INTERNAL_FILTER_MARKER = "# Safe Sync internal work data"
-INTERNAL_FILTER_RULES = (
-    f"{INTERNAL_FILTER_MARKER}\n"
-    "- .safe-sync-work/**\n"
-    "- **/.safe-sync-work/**\n"
-)
+INTERNAL_FILTER_RULES = TEMPLATE_INTERNAL_FILTER.read_text()
 
 
 class RateLimitedError(RuntimeError):
