@@ -64,19 +64,23 @@ retry start, active progress, success, and repeated throttling.
 
 ### UI-001: Distinguish configured folders from current sync folder
 
-**Priority:** fix after the current basic one-profile logging dogfood review.
+**Priority:** fix after the current basic one-profile logging dogfood review,
+when the owner returns from travel.
 
 The Status view's singular `Folder` row currently displays only the daemon's
 current or most recently processed folder. While idle it can therefore show
 one folder even when the active profile has several enabled folders, making a
 healthy configuration look incomplete.
 
+The latest clean-restart observation has five configured folders while Status
+shows only `Folder: tools`, confirming the ambiguity remains.
+
 Show `Configured folders` as an explicit count, and relabel the runtime value
 as `Current folder` while work is active and `Last folder` while idle. During
 multi-folder backup, retain the useful `name (index/total)` progress. Keep the
 quick panel and full control panel consistent, and add UI regression coverage
 for idle, active, and stopped backend states. This issue is presentation-only;
-the confirmed active configuration contains all three enabled folders.
+the confirmed active configuration contains all five enabled folders.
 
 ### REMOTE-001: Optional remote backup purge
 
