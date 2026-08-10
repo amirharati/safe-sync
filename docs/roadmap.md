@@ -25,6 +25,47 @@ separate future path for allowlisted durable recovery events.
 
 ## Open Issues
 
+### GEN-001: Retry generation publication without aborting the backup set
+
+**Priority:** critical; fix before resuming Stage 1 dogfooding or trusting a
+multi-folder backup.
+
+**Observed during the clean one-profile restart on 2026-08-10:** the `dist`
+payload sync exited successfully with zero remaining changes. Safe Sync then
+attempted to publish its immutable generation record, but Dropbox's
+`upload_session/append_v2` call timed out waiting for HTTP/2 response headers.
+Rclone returned exit code 5. Safe Sync converted that post-backup metadata
+failure into a fatal folder-set result and stopped at folder 1 of 5.
+
+The daemon did not immediately retry the pending generation, did not continue
+with the other configured folders, and did not queue another backup. It
+returned to `watching` while health remained `generation publication failed`.
+At inspection time the clean remote contained `dist`, `test_sync`, and a
+partial `tools`; `temp` and `workbench_agent2-history-safe` were absent.
+
+This is not evidence of local corruption: the local source is untouched and
+the `dist` payload reached Dropbox. It is nevertheless a backup-completeness
+failure. A transient metadata request can strand later folders and can leave a
+successfully updated remote payload without the generation evidence required
+for linked-folder detection and an auditable generation chain.
+
+Required behavior:
+
+- Persist a pending generation publication after payload sync succeeds and
+  retry it independently with bounded adaptive backoff.
+- Make publication idempotent across timeout ambiguity and daemon restart;
+  retry the same generation safely without breaking its parent chain.
+- Do not prevent unrelated configured folders from receiving their backup
+  attempt solely because one folder's post-backup metadata publication failed.
+- Report payload state and metadata state separately: for example,
+  `payload complete; generation pending`, rather than implying either full
+  success or an active file-transfer failure.
+- Clear the active error only after the pending generation is verified remote;
+  retain each failure and retry in the structured journal.
+- Cover immutable-record and `latest.json` failures, timeout-after-remote-write
+  ambiguity, repeated throttling, process interruption, restart reconciliation,
+  and continuation through the remaining folders.
+
 ### LOG-001: Protect audit history from diagnostic floods
 
 **Priority:** fix before another long Debug/Trace dogfood run.
