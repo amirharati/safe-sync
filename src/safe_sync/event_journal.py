@@ -758,8 +758,13 @@ class EventJournal:
                 "newest_sequence": int(cursor["next_sequence"]) - 1,
                 "pending_cloud_segments": len(pending),
                 "gaps": list(cursor["gaps"]),
+                "history_complete": not bool(cursor["gaps"]),
+                "history_gap_count": len(cursor["gaps"]),
                 "replication": dict(cursor["replication"]),
-                "health": "degraded" if cursor["gaps"] or cursor["replication"].get("last_error") else "ok",
+                # Current health answers whether logging is working now.
+                # Permanent wrap/corruption gaps describe retained-history
+                # completeness separately and must not create a warning forever.
+                "health": "degraded" if cursor["replication"].get("last_error") else "ok",
             }
 
     def cloud_manifest(self) -> dict[str, Any]:

@@ -310,16 +310,19 @@
         <section class="view" data-view="activity">
           <div class="section-title">
             <h2>Audit Activity</h2>
-            <button type="button" class="secondary" data-action="load-activity">Refresh</button>
+            <div class="actions left">
+              <button type="button" class="secondary" data-action="show-recent-warnings">Recent Warnings</button>
+              <button type="button" class="secondary" data-action="load-activity">Refresh</button>
+            </div>
           </div>
-          <p class="reason section-copy">Structured events connect watcher detection, backup decisions, per-file results, cloud publication, receives, and rollback. The bounded journal is diagnostic evidence, not file recovery storage.</p>
+          <p class="reason section-copy">Structured events connect watcher detection, backup decisions, per-file results, cloud publication, receives, and rollback. Use Recent Warnings for the last 24 hours. Current health reports whether logging works now; historical gaps remain visible separately. The bounded journal is diagnostic evidence, not file recovery storage.</p>
           <dl class="facts compact audit-facts">
             <div><dt>Health</dt><dd data-audit-health>-</dd></div>
             <div><dt>Level</dt><dd data-audit-level>-</dd></div>
             <div><dt>Local usage</dt><dd data-audit-usage>-</dd></div>
             <div><dt>Cloud pending</dt><dd data-audit-pending>-</dd></div>
             <div><dt>Last cloud copy</dt><dd data-audit-cloud-time>-</dd></div>
-            <div><dt>Known gaps</dt><dd data-audit-gaps>-</dd></div>
+            <div><dt>Historical gaps</dt><dd data-audit-gaps>-</dd></div>
           </dl>
           <form class="activity-controls" data-log-level-form>
             <label>Diagnostic level

@@ -67,6 +67,8 @@ type AuditStatus = {
   max_local_bytes: number;
   pending_cloud_segments: number;
   gaps: Array<Record<string, unknown>>;
+  history_complete?: boolean;
+  history_gap_count?: number;
   replication: Record<string, unknown>;
 };
 
@@ -346,7 +348,7 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (["load-jobs", "show-job", "apply-job", "reconcile-job", "rollback-job"].includes(action ?? "")) return "jobs";
   if (["load-link-status", "review-link", "remove-link", "add-link"].includes(action ?? "")) return "links";
   if (["load-history", "recover-history"].includes(action ?? "")) return "history";
-  if (["load-activity", "filter-activity", "set-log-level", "debug-two-hours", "sync-audit-logs"].includes(action ?? "")) return "activity";
+  if (["load-activity", "filter-activity", "show-recent-warnings", "set-log-level", "debug-two-hours", "sync-audit-logs"].includes(action ?? "")) return "activity";
   return action ?? null;
 }
 
@@ -1654,7 +1656,10 @@ function renderAuditStatus(status: AuditStatus): void {
   if (auditUsage) auditUsage.textContent = `${formatBytes(Number(status.used_local_bytes))} / ${formatBytes(Number(status.max_local_bytes))}`;
   if (auditPending) auditPending.textContent = String(Number(status.pending_cloud_segments ?? 0));
   if (auditCloudTime) auditCloudTime.textContent = text(status.replication?.last_success_at, "Not copied yet");
-  if (auditGaps) auditGaps.textContent = String(Array.isArray(status.gaps) ? status.gaps.length : 0);
+  if (auditGaps) {
+    const gapCount = Number(status.history_gap_count ?? (Array.isArray(status.gaps) ? status.gaps.length : 0));
+    auditGaps.textContent = gapCount > 0 ? `${gapCount} (history incomplete)` : "None";
+  }
   const level = logLevelForm?.elements.namedItem("level") as HTMLSelectElement | null;
   if (level && ["quiet", "normal", "debug", "trace"].includes(status.level)) level.value = status.level;
 }
@@ -1729,6 +1734,20 @@ async function loadActivity(event?: SubmitEvent): Promise<void> {
   } finally {
     setBusy(null);
   }
+}
+
+async function showRecentWarnings(): Promise<void> {
+  if (activityFilterForm) {
+    const since = activityFilterForm.elements.namedItem("since") as HTMLSelectElement | null;
+    const severity = activityFilterForm.elements.namedItem("severity") as HTMLSelectElement | null;
+    const eventType = activityFilterForm.elements.namedItem("event_type") as HTMLInputElement | null;
+    const folder = activityFilterForm.elements.namedItem("folder") as HTMLInputElement | null;
+    if (since) since.value = "24h";
+    if (severity) severity.value = "warning";
+    if (eventType) eventType.value = "";
+    if (folder) folder.value = "";
+  }
+  await loadActivity();
 }
 
 async function changeLogLevel(event: SubmitEvent | null, forcedLevel?: string, duration?: string): Promise<void> {
@@ -2097,6 +2116,7 @@ window.addEventListener("DOMContentLoaded", () => {
   activityFilterForm?.addEventListener("submit", (event) => void loadActivity(event));
   logLevelForm?.addEventListener("submit", (event) => void changeLogLevel(event));
   document.querySelector("[data-action='load-activity']")?.addEventListener("click", () => void loadActivity());
+  document.querySelector("[data-action='show-recent-warnings']")?.addEventListener("click", () => void showRecentWarnings());
   document.querySelector("[data-action='debug-two-hours']")?.addEventListener("click", () => void changeLogLevel(null, "debug", "2h"));
   document.querySelector("[data-action='sync-audit-logs']")?.addEventListener("click", () => void syncAuditLogs());
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {

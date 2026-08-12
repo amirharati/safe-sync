@@ -154,6 +154,20 @@ def test_query_filters_folder_event_and_limit(tmp_path: Path) -> None:
     assert result[0]["sequence"] == 4
 
 
+def test_historical_gaps_do_not_report_current_logging_failure(tmp_path: Path) -> None:
+    value = journal(tmp_path, max_bytes=3072, segment_bytes=1024)
+    for index in range(100):
+        value.emit("diagnostic.sample", component="test", channel="diagnostic", data={"index": index, "detail": "x" * 160})
+    value.seal_active()
+
+    status = value.status()
+
+    assert status["gaps"]
+    assert status["history_complete"] is False
+    assert status["history_gap_count"] == len(status["gaps"])
+    assert status["health"] == "ok"
+
+
 def test_settings_validate_capacity_and_temporary_level() -> None:
     with pytest.raises(JournalError):
         settings_from_config({"logging": {"level": "verbose"}})

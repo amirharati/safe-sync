@@ -1432,7 +1432,7 @@ def status_health(config: dict[str, Any], service_state: str, sync_state: dict[s
     elif last_error:
         health = "error"
         reason = str(last_error)
-    elif last_warning:
+    elif last_warning and sync_status not in {"syncing", "transferring", "publishing"}:
         health = "warning"
         reason = str(last_warning)
     elif not enabled_folders(config):

@@ -118,6 +118,9 @@ dropped.
 **Priority:** fix after the current Stage 1 dogfood review and before Stage 2
 recovery dogfooding; do not interrupt the active backup to deploy it.
 
+**Status:** implemented on 2026-08-12; pending installation after the active
+clean baseline completes.
+
 **Observed during one-profile dogfood on 2026-08-09:** the Status view showed
 `Dropbox rate limited ... cooling down for 300s` while the daemon was actively
 copying folder 5 of 5. The stored backoff had expired hours earlier and its
@@ -129,6 +132,12 @@ projection fields while retaining the historical warning in the event journal.
 The UI must never simultaneously claim an active cooldown and show a live
 sync unless a new throttle actually applies. Cover backoff entry, expiry,
 retry start, active progress, success, and repeated throttling.
+
+The completed status-health pass also separates current audit health from
+historical completeness. Permanent circular-journal gaps remain visible as
+`Historical gaps` in Activity but no longer force the app headline to Warning.
+Activity provides a `Recent Warnings` view for the last 24 hours, while stale
+warning text cannot override an actively healthy sync/transfer/publication.
 
 ### UI-001: Distinguish configured folders from current sync folder
 

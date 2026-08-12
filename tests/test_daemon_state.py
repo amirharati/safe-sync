@@ -334,6 +334,21 @@ def test_status_health_reports_rate_limit_as_warning():
     assert "rate limited" in health["reason"]
 
 
+def test_active_sync_is_not_overridden_by_a_stale_warning():
+    health = status_health(
+        {"poll_interval_seconds": 5, "folders": [{"id": "work", "local_path": "/tmp/work"}]},
+        "running",
+        {
+            "state": "syncing",
+            "last_warning": "old cooldown warning",
+            "updated_at": "2099-01-01T00:00:00+00:00",
+        },
+    )
+
+    assert health["health"] == "ok"
+    assert health["reason"] == "daemon status is fresh"
+
+
 def test_status_health_reports_setup_required_before_the_first_folder():
     health = status_health(default_config("test-machine"), "running", {"state": "unknown"})
 
@@ -436,6 +451,17 @@ def test_status_ui_separates_configured_folders_from_runtime_folder():
     assert 'return "Pending folder"' in main
     assert 'return "Current folder"' in main
     assert 'return "Last folder"' in main
+
+
+def test_activity_keeps_historical_warnings_out_of_main_status():
+    project = Path(__file__).parents[1]
+    page = (project / "ui/index.html").read_text()
+    main = (project / "ui/src/main.ts").read_text()
+
+    assert "Historical gaps" in page
+    assert 'data-action="show-recent-warnings"' in page
+    assert 'severity.value = "warning"' in main
+    assert '`${gapCount} (history incomplete)`' in main
 
 
 def test_login_check_gives_headless_reconnect_command(monkeypatch, tmp_path, capsys):
