@@ -27,16 +27,13 @@ separate future path for allowlisted durable recovery events.
 
 ### Immediate next-fix order
 
-1. `PERF-001` is the first implementation gate: make the worst-case
-   many-small-file Dropbox path safe, measurable, retryable, and practically
-   fast. Its implementation includes the literal provider-throttle classifier
-   and depends on the `LOG-001` diagnostic cap/protected audit capacity so the
-   performance test remains observable.
-2. Close the live `PROGRESS-001` failed-file denominator edge case and implement
-   the `PROGRESS-002` exact whole-profile summary in the same status pass.
-3. Reinstall, clean only the disposable active-machine namespace, and repeat
-   Stage 1 with an explicit tiny-file-heavy acceptance fixture before advancing
-   to recovery or multi-machine workflows.
+1. Install the experimental `PERF-001` verified synchronous batch/concurrency
+   pass and measure its resumed `tools` throughput against the captured baseline.
+2. Live-check the `PROGRESS-001` frozen failed-file denominator and
+   `PROGRESS-002` durable whole-profile summary through transfer and cooldown.
+3. After the resumed throughput comparison, repeat Stage 1 from a clean
+   disposable namespace with an explicit tiny-file-heavy acceptance fixture
+   before advancing to recovery or multi-machine workflows.
 
 ### GEN-001: Retry generation publication without aborting the backup set
 
@@ -111,6 +108,15 @@ Implemented behavior:
 ### LOG-001: Protect audit history from diagnostic floods
 
 **Priority:** fix before another long Debug/Trace dogfood run.
+
+**Status:** first containment pass implemented in source on 2026-08-12; pending
+live verification. Debug now keeps rclone at INFO while retaining Safe Sync's
+own detailed events. Raw rclone DEBUG is reserved for Trace, and every rclone
+operation caps repetitive raw lines at 2,000 while retaining errors, warnings,
+provider failures, phase changes, and aggregate stats, followed by an explicit
+suppression summary. A later hardening pass must still give audit events
+physically protected capacity independent of diagnostics and add the full
+budget-exhaustion retention test below.
 
 **Observed during one-profile dogfood on 2026-08-09:** a large repository with
 many `.git/objects` produced hundreds of thousands of rclone Debug lines during
@@ -224,10 +230,22 @@ denominator. Preserve the comparison-phase total independently from rclone's
 mutable post-error stats, and show failed/retry-pending files separately so a
 provider error cannot make total work appear to shrink.
 
+**Source update on 2026-08-12:** implemented a stateful progress tracker that
+freezes the comparison-phase file and byte plan, recomputes percentages against
+that plan, and counts unique failed paths separately. Regression coverage
+replays the observed 5,767-to-5,764 denominator shrink. Pending installed live
+verification during the resumed `tools` run.
+
 ### PROGRESS-002: Show exact whole-profile backup-cycle progress
 
 **Priority:** implement in the next UI/status pass after the current clean
 Stage 1 run; do not interrupt the active backup to deploy it.
+
+**Status:** implemented in source on 2026-08-12; pending installed live
+verification. Status now labels the per-file row `Current folder progress` and
+adds an `Overall backup` row derived from the durable pending queue, displaying
+completed, active, and waiting folder counts. Successful cycle completion also
+persists an empty pending set and the complete configured-folder ID set.
 
 The current stable file percentage is intentionally scoped to the active
 folder, but the Status view does not say that clearly enough. Add a separate
@@ -248,6 +266,16 @@ folder-completion summary proves insufficient during dogfooding.
 **Priority:** critical and first to implement before the next clean Stage 1
 run. Continue observing the active run, but do not interrupt it merely to deploy
 an unmeasured flag change.
+
+**Status:** experimental direct-mirror tuning implemented in source on
+2026-08-12; pending installed measurement. Backup commands now explicitly use
+Dropbox's integrity-checked synchronous batch mode with batch size 32, a five-
+second batch dwell, and 32 transfers. Async batching remains prohibited. The
+literal `too_many_write_operations` response is classified directly as a
+provider cooldown, and regression coverage verifies the command and retry
+classification. The first comparison will resume the existing partial remote
+to isolate throughput; clean-fixture hash verification remains required before
+closing this issue.
 
 The clean `tools` run demonstrates a pathological but realistic developer-tree
 case. The exact filter policy admits 10,082 files / 2.367 GB, including 6,410

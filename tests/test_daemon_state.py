@@ -9,6 +9,7 @@ import pytest
 import safe_sync.cli as cli
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
+    BackupProgressTracker,
     INTERNAL_FILTER_RULES,
     Lock,
     TEMPLATE_FILTER,
@@ -32,6 +33,7 @@ from safe_sync.cli import (
     restart_backend_if_running,
     restore_last_sync_finish,
     rclone_env,
+    rclone_log_level,
     run_command,
     run_daemon,
     run_backup_with_config,
@@ -180,6 +182,10 @@ def test_custom_retry_delay_and_changes_during_backoff_are_preserved():
 def test_short_rclone_retry_notice_is_not_a_provider_cooldown():
     output = "Too many requests; low level retry 1/10: Trying again in 5 seconds"
     assert cli.rate_limit_retry_after_seconds(output, 300) == 300
+
+
+def test_dropbox_write_operation_limit_is_a_provider_cooldown():
+    assert cli.text_looks_rate_limited("Error in call to API function upload_session/finish_batch: too_many_write_operations")
 
 
 def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_path, monkeypatch):
@@ -447,8 +453,13 @@ def test_status_ui_separates_configured_folders_from_runtime_folder():
 
     assert "Configured folders" in page
     assert 'data-configured-folders' in page
+    assert "Overall backup" in page
+    assert 'data-overall-progress' in page
+    assert "Current folder progress" in page
     assert 'data-current-folder-heading' in page
     assert '`${configuredCount}: ${names.join(", ")}`' in main
+    assert '`${completed.toLocaleString()}/${total.toLocaleString()} folders complete`' in main
+    assert '`${failed.toLocaleString()} failed this attempt`' in main
     assert 'return "Pending folder"' in main
     assert 'return "Current folder"' in main
     assert 'return "Last folder"' in main
@@ -752,6 +763,11 @@ def test_backup_progress_uses_stable_check_first_totals(tmp_path):
     }
 
     assert "--check-first" in backup_cmd(config, dry_run=False)
+    command = backup_cmd(config, dry_run=False)
+    assert command[command.index("--dropbox-batch-mode") + 1] == "sync"
+    assert command[command.index("--dropbox-batch-size") + 1] == "32"
+    assert command[command.index("--dropbox-batch-timeout") + 1] == "5s"
+    assert command[command.index("--transfers") + 1] == "32"
     assert parse_backup_progress_line(
         "Dropbox root 'backup': Running all checks before starting transfers"
     ) == {"sync_phase": "scanning"}
@@ -783,6 +799,32 @@ def test_backup_progress_uses_stable_check_first_totals(tmp_path):
         "transfer_speed": "9.860 KiB/s",
         "eta": "0s",
     }
+
+
+def test_backup_progress_freezes_planned_totals_when_failures_shrink_rclone_denominator():
+    tracker = BackupProgressTracker()
+
+    assert tracker.update("Transferred: 0 / 5,767, 0%") == {}
+    assert tracker.update("Transferred: 0 B / 1.239 GiB, 0%, 0 B/s, ETA -") == {}
+    started = tracker.update("Dropbox root 'backup': Checks finished, now starting transfers")
+    assert started["total_transfer_files"] == 5767
+    assert started["planned_transfer_files"] == 5767
+    assert started["total_bytes_display"] == "1.239 GiB"
+    assert started["failed_transfer_files"] == 0
+
+    assert tracker.update("2026/08/12 10:00:00 ERROR : one.txt: Failed to copy: too_many_write_operations")["failed_transfer_files"] == 1
+    after_failure = tracker.update("Transferred: 860 / 5,764, 15%")
+    assert after_failure["transferred_files"] == 860
+    assert after_failure["total_transfer_files"] == 5767
+    assert after_failure["progress_percent"] == 15
+
+
+def test_debug_keeps_rclone_info_while_trace_enables_raw_debug():
+    config = default_config("test-machine")
+    config["logging"]["level"] = "debug"
+    assert rclone_log_level(config) == "INFO"
+    config["logging"]["level"] = "trace"
+    assert rclone_log_level(config) == "DEBUG"
 
 
 def test_status_ui_labels_backup_progress_phases():

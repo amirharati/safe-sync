@@ -93,6 +93,7 @@ const reasonLabel = document.querySelector<HTMLElement>("[data-status-reason]");
 const serviceLabel = document.querySelector<HTMLElement>("[data-service-state]");
 const syncLabel = document.querySelector<HTMLElement>("[data-sync-state]");
 const configuredFoldersLabel = document.querySelector<HTMLElement>("[data-configured-folders]");
+const overallProgressLabel = document.querySelector<HTMLElement>("[data-overall-progress]");
 const currentFolderHeading = document.querySelector<HTMLElement>("[data-current-folder-heading]");
 const currentFolderLabel = document.querySelector<HTMLElement>("[data-current-folder]");
 const currentProgressLabel = document.querySelector<HTMLElement>("[data-current-progress]");
@@ -282,6 +283,28 @@ function configuredFoldersSummary(status: SafeSyncStatus): string {
   return "None";
 }
 
+function overallBackupSummary(status: SafeSyncStatus): string {
+  const rawFolders = status.sync_state?.folders;
+  const folders = Array.isArray(rawFolders) ? rawFolders : [];
+  const total = Number(status.sync_state?.configured_folder_count ?? folders.length);
+  if (total <= 0) return "No folders configured";
+
+  const rawPending = status.sync_state?.pending_folders;
+  const rawCompleted = status.sync_state?.completed_folders;
+  const pending = Array.isArray(rawPending) ? Math.min(total, new Set(rawPending.map(String)).size) : null;
+  const explicitlyCompleted = Array.isArray(rawCompleted) ? Math.min(total, new Set(rawCompleted.map(String)).size) : null;
+  if (pending === null && explicitlyCompleted === null) return "Backup cycle not started";
+
+  const completed = pending === null ? explicitlyCompleted ?? 0 : Math.max(0, total - pending);
+  const state = syncState(status);
+  const active = pending !== null && pending > 0 && ["syncing", "publishing"].includes(state) ? 1 : 0;
+  const waiting = pending === null ? Math.max(0, total - completed - active) : Math.max(0, pending - active);
+  const parts = [`${completed.toLocaleString()}/${total.toLocaleString()} folders complete`];
+  if (active > 0) parts.push(`${active} active`);
+  if (waiting > 0) parts.push(`${waiting.toLocaleString()} waiting`);
+  return parts.join(" · ");
+}
+
 function currentFolderHeadingText(status: SafeSyncStatus): string {
   const state = syncState(status);
   if (state === "backoff" || state === "retry_pending") return "Pending folder";
@@ -306,10 +329,12 @@ function progressSummary(status: SafeSyncStatus): string {
     const total = Number(status.sync_state?.total_transfer_files ?? 0);
     const bytesDone = text(status.sync_state?.transferred_bytes_display, "");
     const bytesTotal = text(status.sync_state?.total_bytes_display, "");
+    const failed = Number(status.sync_state?.failed_transfer_files ?? 0);
     const eta = text(status.sync_state?.eta, "");
     if (total <= 0) return "Transferring — preparing stable totals";
     const parts = [`Transferring — ${percent}%`, `${transferred.toLocaleString()}/${total.toLocaleString()} files`];
     if (bytesDone && bytesTotal) parts.push(`${bytesDone}/${bytesTotal}`);
+    if (failed > 0) parts.push(`${failed.toLocaleString()} failed this attempt`);
     if (eta) parts.push(`ETA ${eta}`);
     return parts.join(" · ");
   }
@@ -434,6 +459,7 @@ function renderStatus(status: SafeSyncStatus): void {
   }
   if (syncLabel) syncLabel.textContent = syncState(status);
   if (configuredFoldersLabel) configuredFoldersLabel.textContent = configuredFoldersSummary(status);
+  if (overallProgressLabel) overallProgressLabel.textContent = overallBackupSummary(status);
   if (currentFolderHeading) currentFolderHeading.textContent = currentFolderHeadingText(status);
   if (currentFolderLabel) currentFolderLabel.textContent = currentFolderSummary(status);
   if (currentProgressLabel) currentProgressLabel.textContent = progressSummary(status);

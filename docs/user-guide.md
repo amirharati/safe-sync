@@ -140,7 +140,9 @@ sleep or restart.
 
 In the desktop app:
 
-- Status shows backend health, sync state, progress, recent files, and errors.
+- Status shows backend health, sync state, every configured folder, exact
+  whole-profile folder completion, current-folder progress, recent files, and
+  errors.
 - Backup Now queues an immediate safe backup.
 - Start Backend and Stop Backend control the background service.
 - Open Logs opens the current log location.
@@ -149,9 +151,16 @@ In the desktop app:
 Backup progress has three honest phases. `Scanning and comparing` discovers
 the complete change set and intentionally has no percentage. `Transferring`
 then shows a stable file percentage, file/byte totals, and an approximate ETA.
-`Finalizing` publishes the backup's change record. The folder position, such
-as `3/5`, describes which configured folder is active; it is separate from the
-percentage within that folder.
+`Finalizing` publishes the backup's change record. `Overall backup` is derived
+from the durable queue and reports completed, active, and waiting folders even
+across a restart or provider cooldown. The separately labeled `Current folder
+progress` shows the stable file percentage within the named active folder. It
+also keeps the comparison-phase total fixed if a provider failure makes
+rclone's retry denominator shrink, and reports failed files for that attempt.
+
+Dropbox uploads use verified synchronous batching with a larger small-file
+batch and transfer pool. Files remain directly mirrored and individually
+inspectable in Dropbox; Safe Sync does not use rclone's asynchronous batch mode.
 
 From a terminal:
 
@@ -350,9 +359,11 @@ additional implementation detail:
 - `quiet`: audit events and diagnostic errors.
 - `normal`: audit events, warnings, lifecycle summaries, and useful rclone
   summaries. This is the production default.
-- `debug`: watcher/coalescing decisions, queue reasoning, rclone debug lines,
-  and cloud replication decisions.
-- `trace`: high-frequency internal transitions for short supervised tests.
+- `debug`: watcher/coalescing decisions, queue reasoning, rclone lifecycle and
+  file-result summaries, and cloud replication decisions.
+- `trace`: raw rclone debug detail and high-frequency internal transitions for
+  short supervised tests. Repetitive raw output is capped per operation while
+  errors and aggregate progress remain visible.
 
 Change the persistent level or temporarily enable Debug:
 

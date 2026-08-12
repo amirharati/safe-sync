@@ -74,7 +74,15 @@ TEMPLATE_FILTER = PROJECT_ROOT / "config" / "filter.txt"
 TEMPLATE_INTERNAL_FILTER = PROJECT_ROOT / "config" / "internal-filter.txt"
 USER_GUIDE = PROJECT_ROOT / "docs" / "user-guide.md"
 
-RATE_LIMIT_PATTERNS = ("too_many_requests", "too many requests", "rate limit", "rate_limit", "retry-after")
+RATE_LIMIT_PATTERNS = (
+    "too_many_requests",
+    "too many requests",
+    "too_many_write_operations",
+    "too many write operations",
+    "rate limit",
+    "rate_limit",
+    "retry-after",
+)
 TEMPORARY_REMOTE_PATTERNS = (
     "i/o timeout",
     "io timeout",
@@ -101,6 +109,10 @@ LAST_COMMAND_OUTPUT = ""
 PROCESS_RUN_ID = f"run_{uuid.uuid4().hex}"
 _EVENT_JOURNALS: dict[tuple[str, str, str, str], EventJournal] = {}
 INTERNAL_FILTER_RULES = TEMPLATE_INTERNAL_FILTER.read_text()
+MAX_RCLONE_DIAGNOSTIC_LINES = 2_000
+DROPBOX_BATCH_SIZE = 32
+DROPBOX_TRANSFERS = 32
+DROPBOX_BATCH_TIMEOUT = "5s"
 
 
 class RateLimitedError(RuntimeError):
@@ -315,18 +327,44 @@ def run_command(
     if progress_callback is None:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         output = result.stdout or ""
-        LAST_COMMAND_OUTPUT = output
-        print(output, end="")
-        for output_line in output.splitlines():
+        retained: list[str] = []
+        suppressed_line_count = 0
+        for output_line_number, output_line in enumerate(output.splitlines(keepends=True), start=1):
+            cleaned = output_line.rstrip("\n")
+            if output_line_number <= MAX_RCLONE_DIAGNOSTIC_LINES or rclone_line_must_retain(cleaned):
+                retained.append(output_line)
+                print(output_line, end="")
+                record_event(
+                    config,
+                    "rclone.output",
+                    component="rclone",
+                    channel="diagnostic",
+                    severity="debug",
+                    data={"line": cleaned},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
+            else:
+                suppressed_line_count += 1
+        LAST_COMMAND_OUTPUT = "".join(retained)
+        if suppressed_line_count:
             record_event(
                 config,
-                "rclone.output",
+                "rclone.output_suppressed",
                 component="rclone",
                 channel="diagnostic",
-                severity="debug",
-                data={"line": output_line},
+                severity="info",
+                data={
+                    "captured_lines": len(retained),
+                    "suppressed_lines": suppressed_line_count,
+                    "limit": MAX_RCLONE_DIAGNOSTIC_LINES,
+                },
                 correlation=correlation,
                 effect="none" if dry_run else None,
+            )
+            print(
+                f"Safe Sync suppressed {suppressed_line_count:,} repetitive rclone diagnostic lines "
+                f"after retaining {len(retained):,}.\n"
             )
         record_event(
             config,
@@ -348,24 +386,51 @@ def run_command(
         env=env,
     )
     lines: list[str] = []
+    output_line_count = 0
+    suppressed_line_count = 0
     assert process.stdout is not None
     try:
         for line in process.stdout:
-            lines.append(line)
-            print(line, end="")
+            cleaned = line.rstrip("\n")
+            progress_callback(cleaned)
+            output_line_count += 1
+            must_retain = rclone_line_must_retain(cleaned)
+            if output_line_count <= MAX_RCLONE_DIAGNOSTIC_LINES or must_retain:
+                lines.append(line)
+                print(line, end="")
+                record_event(
+                    config,
+                    "rclone.output",
+                    component="rclone",
+                    channel="diagnostic",
+                    severity="debug",
+                    data={"line": cleaned},
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
+            else:
+                suppressed_line_count += 1
+        returncode = process.wait()
+        LAST_COMMAND_OUTPUT = "".join(lines)
+        if suppressed_line_count:
             record_event(
                 config,
-                "rclone.output",
+                "rclone.output_suppressed",
                 component="rclone",
                 channel="diagnostic",
-                severity="debug",
-                data={"line": line.rstrip("\n")},
+                severity="info",
+                data={
+                    "captured_lines": output_line_count - suppressed_line_count,
+                    "suppressed_lines": suppressed_line_count,
+                    "limit": MAX_RCLONE_DIAGNOSTIC_LINES,
+                },
                 correlation=correlation,
                 effect="none" if dry_run else None,
             )
-            progress_callback(line.rstrip("\n"))
-        returncode = process.wait()
-        LAST_COMMAND_OUTPUT = "".join(lines)
+            print(
+                f"Safe Sync suppressed {suppressed_line_count:,} repetitive rclone diagnostic lines "
+                f"after retaining {output_line_count - suppressed_line_count:,}.\n"
+            )
         record_event(
             config,
             "command.completed",
@@ -431,7 +496,28 @@ def effective_filter_fingerprint(config: dict[str, Any]) -> str:
 
 def rclone_log_level(config: dict[str, Any]) -> str:
     level = settings_from_config(config).level
-    return {"quiet": "ERROR", "normal": "INFO", "debug": "DEBUG", "trace": "DEBUG"}[level]
+    # Safe Sync Debug records its own detailed lifecycle and audit events. Raw
+    # rclone DEBUG output is intentionally reserved for the short-lived Trace
+    # mode because a small-file tree can otherwise fill the bounded journal.
+    return {"quiet": "ERROR", "normal": "INFO", "debug": "INFO", "trace": "DEBUG"}[level]
+
+
+def rclone_line_must_retain(line: str) -> bool:
+    """Retain errors and aggregate progress after the raw diagnostic cap."""
+    lowered = line.lower()
+    return (
+        "error :" in lowered
+        or "warning :" in lowered
+        or "notice :" in lowered
+        or text_looks_rate_limited(lowered)
+        or text_looks_temporary_remote_failure(lowered)
+        or text_looks_auth_failure(lowered)
+        or "transferred:" in lowered
+        or "checks:" in lowered
+        or "elapsed time:" in lowered
+        or "running all checks before starting transfers" in lowered
+        or "checks finished, now starting transfers" in lowered
+    )
 
 
 def lock_file(config: dict[str, Any]) -> Path:
@@ -817,6 +903,14 @@ def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None =
         # are stable. This lets the UI show an honest completion percentage
         # instead of a denominator that grows while the tree is discovered.
         "--check-first",
+        # Dropbox commits uploads in synchronous batches with full integrity
+        # checking. A larger batch and transfer pool amortize API round trips
+        # for the worst-case many-small-file workload without changing the
+        # direct-mirror format or using the unsafe async batch mode.
+        "--dropbox-batch-mode", "sync",
+        "--dropbox-batch-size", str(DROPBOX_BATCH_SIZE),
+        "--dropbox-batch-timeout", DROPBOX_BATCH_TIMEOUT,
+        "--transfers", str(DROPBOX_TRANSFERS),
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
         # Keep high-level retries at one because rclone's combined report is
@@ -1711,6 +1805,101 @@ def parse_backup_progress_line(line: str) -> dict[str, Any]:
     return updates
 
 
+def rclone_size_bytes(display: str) -> float | None:
+    match = re.fullmatch(r"([\d.]+)\s*([KMGTPE]?i?B)", display.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    units = {
+        "b": 1,
+        "kb": 1_000,
+        "mb": 1_000**2,
+        "gb": 1_000**3,
+        "tb": 1_000**4,
+        "pb": 1_000**5,
+        "eb": 1_000**6,
+        "kib": 1_024,
+        "mib": 1_024**2,
+        "gib": 1_024**3,
+        "tib": 1_024**4,
+        "pib": 1_024**5,
+        "eib": 1_024**6,
+    }
+    return float(match.group(1)) * units[match.group(2).lower()]
+
+
+class BackupProgressTracker:
+    """Freeze --check-first totals and retain failed-file visibility."""
+
+    _TRANSFER_KEYS = {
+        "progress_percent",
+        "transferred_files",
+        "total_transfer_files",
+        "transferred_bytes_display",
+        "total_bytes_display",
+        "transfer_bytes_percent",
+        "transfer_speed",
+        "eta",
+    }
+
+    def __init__(self) -> None:
+        self.phase = "scanning"
+        self.planned_files: int | None = None
+        self.planned_bytes_display: str | None = None
+        self.planned_bytes: float | None = None
+        self.failed_paths: set[str] = set()
+
+    def update(self, line: str) -> dict[str, Any]:
+        updates = parse_backup_progress_line(line)
+        reported_phase = updates.get("sync_phase")
+
+        reported_files = updates.get("total_transfer_files")
+        if self.phase == "scanning" and isinstance(reported_files, int):
+            self.planned_files = max(self.planned_files or 0, reported_files)
+
+        reported_bytes_display = updates.get("total_bytes_display")
+        if self.phase == "scanning" and isinstance(reported_bytes_display, str):
+            reported_bytes = rclone_size_bytes(reported_bytes_display)
+            if reported_bytes is not None and (self.planned_bytes is None or reported_bytes >= self.planned_bytes):
+                self.planned_bytes = reported_bytes
+                self.planned_bytes_display = reported_bytes_display
+
+        failed = re.search(r"ERROR\s+:\s+(.+?):\s+Failed to copy", line, re.IGNORECASE)
+        if failed:
+            self.failed_paths.add(failed.group(1).strip())
+
+        if reported_phase == "transferring":
+            self.phase = "transferring"
+        elif reported_phase == "scanning":
+            self.phase = "scanning"
+
+        if self.phase == "scanning":
+            for key in self._TRANSFER_KEYS:
+                updates.pop(key, None)
+        else:
+            completed_files = updates.get("transferred_files")
+            if self.planned_files is None and isinstance(reported_files, int):
+                self.planned_files = reported_files
+            if self.planned_files is not None:
+                updates["total_transfer_files"] = self.planned_files
+                updates["planned_transfer_files"] = self.planned_files
+                if isinstance(completed_files, int) and self.planned_files > 0:
+                    updates["progress_percent"] = min(100, round(completed_files * 100 / self.planned_files))
+
+            completed_bytes_display = updates.get("transferred_bytes_display")
+            if self.planned_bytes is None and isinstance(reported_bytes_display, str):
+                self.planned_bytes = rclone_size_bytes(reported_bytes_display)
+                self.planned_bytes_display = reported_bytes_display
+            if self.planned_bytes_display is not None:
+                updates["total_bytes_display"] = self.planned_bytes_display
+                completed_bytes = rclone_size_bytes(completed_bytes_display) if isinstance(completed_bytes_display, str) else None
+                if completed_bytes is not None and self.planned_bytes:
+                    updates["transfer_bytes_percent"] = min(100, round(completed_bytes * 100 / self.planned_bytes))
+
+        if failed or reported_phase == "transferring":
+            updates["failed_transfer_files"] = len(self.failed_paths)
+        return updates
+
+
 def current_file_from_progress(progress: str | None) -> str | None:
     if not progress:
         return None
@@ -1858,6 +2047,8 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             progress_percent=None,
             transferred_files=None,
             total_transfer_files=None,
+            planned_transfer_files=None,
+            failed_transfer_files=0,
             transferred_bytes_display=None,
             total_bytes_display=None,
             transfer_bytes_percent=None,
@@ -1919,9 +2110,11 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             effect="none" if dry_run else None,
         )
 
+        progress_tracker = BackupProgressTracker()
+
         def on_progress(line: str) -> None:
             summary = summarize_progress_line(line)
-            structured = parse_backup_progress_line(line)
+            structured = progress_tracker.update(line)
             if summary or structured:
                 current_file = current_file_from_progress(summary)
                 publish_runtime_status(
@@ -2183,6 +2376,14 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
         )
         return RATE_LIMIT_EXIT, failed_folder
 
+    publish_runtime_status(
+        api_state,
+        config,
+        configured_folder_count=total_folders,
+        pending_folders=[],
+        completed_folders=[str(folder["id"]) for folder in folders],
+        queued_backup=False,
+    )
     if not dry_run:
         registry_code = update_registry(config)
         if registry_code != 0:
