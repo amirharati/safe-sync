@@ -122,8 +122,9 @@ recovery dogfooding; do not interrupt the active backup to deploy it.
 
 **Status:** implemented and installed on 2026-08-12. The new clean run reports
 an actual active Dropbox backoff after folder 1 without retaining any prior-run
-warning; verify the corresponding clear-on-resume behavior when the retry
-begins.
+warning. Live verification passed the corresponding transition: when retry
+began, health returned to `ok`, `last_warning` became null, and folder 2 entered
+the scan phase with cleared progress fields.
 
 **Observed during one-profile dogfood on 2026-08-09:** the Status view showed
 `Dropbox rate limited ... cooling down for 300s` while the daemon was actively
@@ -175,6 +176,8 @@ the confirmed active configuration contains all five enabled folders.
 **Status:** implemented and installed on 2026-08-12; automated regression
 coverage passes. Clean live verification observed the explicit comparison
 completion marker, then a fixed 13/13 transfer and finalization for folder 1.
+Folder 2 subsequently entered scanning with no percentage or inherited totals,
+then finalized at a fixed 3/3.
 
 The former Status projection showed whichever raw rclone line arrived last.
 Its discovered-so-far totals changed during traversal, a bare `Transferring:`
