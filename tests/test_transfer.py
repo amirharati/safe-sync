@@ -479,11 +479,16 @@ def test_generation_publication_writes_immutable_before_latest(tmp_path, monkeyp
         "status_path": str(tmp_path / "state" / "status.json"),
     }
     calls = []
+    remote_objects = {}
 
     def fake_capture(_config, command, input_text=None):
         calls.append((command, input_text))
         if command[0] == "cat":
+            if command[1] in remote_objects:
+                return cli.subprocess.CompletedProcess(command, 0, remote_objects[command[1]])
             return cli.subprocess.CompletedProcess(command, 1, "not found")
+        if command[0] == "rcat":
+            remote_objects[command[1]] = input_text
         return cli.subprocess.CompletedProcess(command, 0, "")
 
     monkeypatch.setattr(cli, "rclone_capture", fake_capture)
@@ -494,6 +499,140 @@ def test_generation_publication_writes_immutable_before_latest(tmp_path, monkeyp
     latest = json.loads((tmp_path / "state/generations/machine-a/folder-a/latest.json").read_text())
     assert latest["install_id"] == "install-a"
     assert [change["path"] for change in latest["changes"]] == ["changed.txt", "new.txt"]
+
+
+def test_generation_publication_reuses_pending_id_after_failed_upload(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    report = tmp_path / "report.txt"
+    report.write_text("+ new.txt\n")
+    config = {
+        "machine_id": "machine-a",
+        "machine": "machine-a",
+        "install_id": "install-a",
+        "profile_id": "profile-a",
+        "folder_id": "folder-a",
+        "remote_base": "remote:backups",
+        "filter_file": str(filter_path),
+        "state_root": str(tmp_path / "state"),
+        "status_path": str(tmp_path / "state" / "status.json"),
+    }
+    remote_objects = {}
+    immutable_attempts = []
+    fail_first_immutable = True
+
+    def fake_capture(_config, command, input_text=None):
+        nonlocal fail_first_immutable
+        if command[0] == "cat":
+            if command[1] in remote_objects:
+                return cli.subprocess.CompletedProcess(command, 0, remote_objects[command[1]])
+            return cli.subprocess.CompletedProcess(command, 1, "not found")
+        if command[0] == "rcat":
+            if "/generations/" in command[1]:
+                immutable_attempts.append(command[1])
+                if fail_first_immutable:
+                    fail_first_immutable = False
+                    return cli.subprocess.CompletedProcess(command, 5, "connection reset by peer")
+            remote_objects[command[1]] = input_text
+        return cli.subprocess.CompletedProcess(command, 0, "")
+
+    monkeypatch.setattr(cli, "rclone_capture", fake_capture)
+    assert cli.publish_generation(config, report) == 5
+    pending = cli.pending_generation_path(config)
+    first_id = json.loads(pending.read_text())["generation_id"]
+
+    assert cli.publish_generation(config) == 0
+    assert not pending.exists()
+    assert len(immutable_attempts) == 2
+    assert immutable_attempts[0] == immutable_attempts[1]
+    assert first_id in immutable_attempts[1]
+
+
+def test_generation_publication_accepts_ambiguous_verified_upload(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = {
+        "machine_id": "machine-a",
+        "machine": "machine-a",
+        "install_id": "install-a",
+        "profile_id": "profile-a",
+        "folder_id": "folder-a",
+        "remote_base": "remote:backups",
+        "filter_file": str(filter_path),
+        "state_root": str(tmp_path / "state"),
+        "status_path": str(tmp_path / "state" / "status.json"),
+    }
+    remote_objects = {}
+
+    def fake_capture(_config, command, input_text=None):
+        if command[0] == "cat":
+            if command[1] in remote_objects:
+                return cli.subprocess.CompletedProcess(command, 0, remote_objects[command[1]])
+            return cli.subprocess.CompletedProcess(command, 1, "not found")
+        if command[0] == "rcat":
+            remote_objects[command[1]] = input_text
+            return cli.subprocess.CompletedProcess(command, 5, "timeout awaiting response headers")
+        return cli.subprocess.CompletedProcess(command, 0, "")
+
+    monkeypatch.setattr(cli, "rclone_capture", fake_capture)
+    changes = [{"path": "new.txt", "operation": "added"}]
+    assert cli.publish_generation(config, changes=changes) == 0
+    assert not cli.pending_generation_path(config).exists()
+
+
+def test_generation_publication_skips_no_change_cycle(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = {
+        "machine_id": "machine-a",
+        "machine": "machine-a",
+        "install_id": "install-a",
+        "profile_id": "profile-a",
+        "folder_id": "folder-a",
+        "remote_base": "remote:backups",
+        "filter_file": str(filter_path),
+        "state_root": str(tmp_path / "state"),
+        "status_path": str(tmp_path / "state" / "status.json"),
+    }
+    monkeypatch.setattr(cli, "rclone_capture", lambda *_args, **_kwargs: pytest.fail("remote should not be called"))
+    assert cli.publish_generation(config, changes=[]) == 0
+
+
+def test_generation_publication_does_not_break_chain_when_parent_lookup_times_out(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = {
+        "machine_id": "machine-a",
+        "machine": "machine-a",
+        "install_id": "install-a",
+        "profile_id": "profile-a",
+        "folder_id": "folder-a",
+        "remote_base": "remote:backups",
+        "filter_file": str(filter_path),
+        "state_root": str(tmp_path / "state"),
+        "status_path": str(tmp_path / "state" / "status.json"),
+    }
+    calls = []
+
+    def fake_capture(_config, command, input_text=None):
+        calls.append((command, input_text))
+        return cli.subprocess.CompletedProcess(command, 5, "timeout awaiting response headers")
+
+    monkeypatch.setattr(cli, "rclone_capture", fake_capture)
+    assert cli.publish_generation(config, changes=[{"path": "new.txt", "operation": "added"}]) == 5
+    assert [command[0] for command, _body in calls] == ["cat"]
+    assert not cli.pending_generation_path(config).exists()
+
+
+def test_change_accumulation_preserves_net_effect_across_attempts():
+    changes = cli.merge_backup_changes([], [{"path": "a.txt", "operation": "added"}])
+    changes = cli.merge_backup_changes(changes, [{"path": "a.txt", "operation": "modified"}])
+    assert changes == [{"path": "a.txt", "operation": "added"}]
+    changes = cli.merge_backup_changes(changes, [{"path": "a.txt", "operation": "removed"}])
+    assert changes == []
+    changes = cli.merge_backup_changes([], [{"path": "b.txt", "operation": "removed"}])
+    changes = cli.merge_backup_changes(changes, [{"path": "b.txt", "operation": "added"}])
+    assert changes == [{"path": "b.txt", "operation": "modified"}]
 
 
 def test_generation_detection_notifies_only_for_linked_scope(tmp_path, monkeypatch):

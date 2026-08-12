@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import safe_sync.cli as cli
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.cli import (
     INTERNAL_FILTER_RULES,
@@ -163,6 +164,159 @@ def test_rate_limit_enters_backoff():
 
     assert daemon.state.state == DaemonState.BACKOFF
     assert daemon.state.backoff_until_monotonic == 420.0
+
+
+def test_custom_retry_delay_and_changes_during_backoff_are_preserved():
+    daemon = WatchDaemon(WatchSettings(rate_limit_backoff_seconds=300))
+    daemon.note_sync_started(100.0)
+    daemon.note_sync_finished(110.0, rate_limited=True, backoff_seconds=30)
+    daemon.mark_dirty(115.0)
+
+    assert daemon.state.backoff_until_monotonic == 140.0
+    assert daemon.state.pending
+
+
+def test_short_rclone_retry_notice_is_not_a_provider_cooldown():
+    output = "Too many requests; low level retry 1/10: Trying again in 5 seconds"
+    assert cli.rate_limit_retry_after_seconds(output, 300) == 300
+
+
+def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = cli.default_config("test-machine")
+    folders = []
+    for folder_id in ("first", "flaky", "last"):
+        local = tmp_path / folder_id
+        local.mkdir()
+        folders.append(
+            {
+                "id": folder_id,
+                "label": folder_id,
+                "local_path": str(local),
+                "remote_path": f"test-machine/{folder_id}",
+                "trash_path": f".trash/test-machine/{folder_id}",
+                "remote_root": f"dropbox:computer-backups/test/test-machine/{folder_id}",
+                "trash_root": f"dropbox:computer-backups/test/.trash/test-machine/{folder_id}",
+                "filter_file": str(filter_path),
+                "enabled": True,
+            }
+        )
+    config["profiles"][0]["folders"] = folders
+    config["folders"] = folders
+    config["filter_file"] = str(filter_path)
+    config["profiles"][0]["filter_file"] = str(filter_path)
+    config["state_root"] = str(tmp_path / "state")
+    config["status_path"] = str(tmp_path / "state/status.json")
+    config["log_dir"] = str(tmp_path / "logs")
+    config = cli.normalized_config(config)
+
+    calls = []
+    flaky_attempt = 0
+    published = []
+
+    def fake_run(command_config, command, **_kwargs):
+        nonlocal flaky_attempt
+        folder_id = command_config["folder_id"]
+        calls.append(folder_id)
+        report = Path(command[command.index("--combined") + 1])
+        if folder_id == "flaky" and flaky_attempt == 0:
+            flaky_attempt += 1
+            report.write_text("+ copied-before-timeout.txt\n! unfinished.txt\n")
+            cli.LAST_COMMAND_OUTPUT = "timeout awaiting response headers"
+            return 5
+        report.write_text(f"+ {folder_id}.txt\n" if folder_id != "flaky" else "= copied-before-timeout.txt\n")
+        cli.LAST_COMMAND_OUTPUT = ""
+        return 0
+
+    def fake_publish(folder_config, _report=None, *, operation_id=None, changes=None):
+        published.append((folder_config["folder_id"], list(changes or []), operation_id))
+        return 0
+
+    monkeypatch.setattr(cli, "preflight", lambda _config: None)
+    monkeypatch.setattr(cli, "run_command", fake_run)
+    monkeypatch.setattr(cli, "publish_generation", fake_publish)
+    monkeypatch.setattr(cli, "update_registry", lambda _config: 0)
+    monkeypatch.setattr(cli, "record_event", lambda *_args, **_kwargs: None)
+    api_state = DaemonApiState()
+
+    assert cli.run_all_backups_runtime(config, False, api_state) == (RATE_LIMIT_EXIT, "flaky")
+    assert calls == ["first", "flaky", "last"]
+    queue = json.loads(cli.backup_queue_path(config).read_text())
+    assert [item["folder_id"] for item in queue["items"]] == ["flaky"]
+    assert queue["items"][0]["changes"] == [{"path": "copied-before-timeout.txt", "operation": "added"}]
+
+    assert cli.run_all_backups_runtime(config, False, api_state) == (0, None)
+    assert calls == ["first", "flaky", "last", "flaky"]
+    assert not cli.backup_queue_path(config).exists()
+    flaky_publication = next(changes for folder_id, changes, _operation in published if folder_id == "flaky")
+    assert flaky_publication == [{"path": "copied-before-timeout.txt", "operation": "added"}]
+
+
+def test_runtime_generation_failure_continues_and_retries_without_payload(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = cli.default_config("test-machine")
+    folders = []
+    for folder_id in ("metadata-flaky", "later"):
+        local = tmp_path / folder_id
+        local.mkdir()
+        folders.append(
+            {
+                "id": folder_id,
+                "label": folder_id,
+                "local_path": str(local),
+                "remote_path": f"test-machine/{folder_id}",
+                "trash_path": f".trash/test-machine/{folder_id}",
+                "remote_root": f"dropbox:computer-backups/test/test-machine/{folder_id}",
+                "trash_root": f"dropbox:computer-backups/test/.trash/test-machine/{folder_id}",
+                "filter_file": str(filter_path),
+                "enabled": True,
+            }
+        )
+    config["profiles"][0]["folders"] = folders
+    config["profiles"][0]["filter_file"] = str(filter_path)
+    config["state_root"] = str(tmp_path / "state")
+    config["status_path"] = str(tmp_path / "state/status.json")
+    config = cli.normalized_config(config)
+    payload_calls = []
+    publication_calls = []
+    first_publication_failed = False
+
+    def fake_run(command_config, command, **_kwargs):
+        payload_calls.append(command_config["folder_id"])
+        report = Path(command[command.index("--combined") + 1])
+        report.write_text(f"+ {command_config['folder_id']}.txt\n")
+        cli.LAST_COMMAND_OUTPUT = ""
+        return 0
+
+    def fake_publish(folder_config, _report=None, *, operation_id=None, changes=None):
+        nonlocal first_publication_failed
+        publication_calls.append((folder_config["folder_id"], list(changes or []), operation_id))
+        if folder_config["folder_id"] == "metadata-flaky" and not first_publication_failed:
+            first_publication_failed = True
+            return 5
+        return 0
+
+    monkeypatch.setattr(cli, "preflight", lambda _config: None)
+    monkeypatch.setattr(cli, "run_command", fake_run)
+    monkeypatch.setattr(cli, "publish_generation", fake_publish)
+    monkeypatch.setattr(cli, "update_registry", lambda _config: 0)
+    monkeypatch.setattr(cli, "record_event", lambda *_args, **_kwargs: None)
+    api_state = DaemonApiState()
+
+    assert cli.run_all_backups_runtime(config, False, api_state) == (RATE_LIMIT_EXIT, "metadata-flaky")
+    assert payload_calls == ["metadata-flaky", "later"]
+    queue = json.loads(cli.backup_queue_path(config).read_text())
+    assert [(item["folder_id"], item["stage"]) for item in queue["items"]] == [("metadata-flaky", "generation")]
+
+    assert cli.run_all_backups_runtime(config, False, api_state) == (0, None)
+    assert payload_calls == ["metadata-flaky", "later"]
+    assert [folder_id for folder_id, _changes, _operation in publication_calls] == [
+        "metadata-flaky",
+        "later",
+        "metadata-flaky",
+    ]
 
 
 def test_status_health_reports_rate_limit_as_warning():

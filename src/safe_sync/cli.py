@@ -75,6 +75,18 @@ TEMPLATE_INTERNAL_FILTER = PROJECT_ROOT / "config" / "internal-filter.txt"
 USER_GUIDE = PROJECT_ROOT / "docs" / "user-guide.md"
 
 RATE_LIMIT_PATTERNS = ("too_many_requests", "too many requests", "rate limit", "rate_limit", "retry-after")
+TEMPORARY_REMOTE_PATTERNS = (
+    "i/o timeout",
+    "io timeout",
+    "timeout awaiting response headers",
+    "context deadline exceeded",
+    "connection reset by peer",
+    "temporary error",
+    "temporarily unavailable",
+    "tls handshake timeout",
+    "server closed idle connection",
+)
+REMOTE_NOT_FOUND_PATTERNS = ("not found", "path/not_found", "object not found", "directory not found")
 AUTH_FAILURE_PATTERNS = (
     "invalid_access_token",
     "expired_access_token",
@@ -95,6 +107,10 @@ class RateLimitedError(RuntimeError):
     def __init__(self, message: str, retry_after_seconds: int) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
+
+
+class TemporaryRemoteError(RuntimeError):
+    """A remote failure that is safe to retry without user intervention."""
 
 
 def now_iso() -> str:
@@ -236,17 +252,34 @@ def text_looks_rate_limited(text: str) -> bool:
 
 
 def rate_limit_retry_after_seconds(text: str, default: int = 300) -> int:
-    patterns = (
-        r"retry-after[:= ]+(\d+)",
-        r"trying again in (\d+) seconds",
-        r"try again in (\d+) seconds",
-    )
     lower = text.lower()
-    for pattern in patterns:
-        match = re.search(pattern, lower)
-        if match:
-            return max(1, int(match.group(1)))
+    explicit = re.search(r"retry-after[:= ]+(\d+)", lower)
+    if explicit:
+        return max(1, int(explicit.group(1)))
+    # Provider messages sometimes express Retry-After in prose. Ignore short
+    # values here: those are normally rclone's own low-level retry interval,
+    # not a provider-wide cooldown.
+    prose = re.search(r"(?:trying|try) again in (\d+) seconds", lower)
+    if prose and int(prose.group(1)) >= 30:
+        return int(prose.group(1))
     return default
+
+
+def text_looks_temporary_remote_failure(text: str, exit_code: int | None = None) -> bool:
+    if exit_code == 5:
+        return True
+    lower = text.lower()
+    return any(pattern in lower for pattern in TEMPORARY_REMOTE_PATTERNS)
+
+
+def text_looks_remote_not_found(text: str) -> bool:
+    lower = text.lower()
+    return any(pattern in lower for pattern in REMOTE_NOT_FOUND_PATTERNS)
+
+
+def temporary_retry_seconds(attempt: int) -> int:
+    """Return deterministic bounded backoff for an app-level retry."""
+    return min(900, 30 * (2 ** max(0, min(attempt - 1, 5))))
 
 
 def future_iso(seconds: int) -> str:
@@ -741,7 +774,7 @@ class Lock:
 
 def preflight(config: dict[str, Any]) -> None:
     remote = config["remote_root"].split(":", 1)[0] + ":"
-    cmd = [rclone_bin(config), "about", remote, "--timeout", "20s", "--contimeout", "10s", "--retries", "1", "--low-level-retries", "1"]
+    cmd = [rclone_bin(config), "about", remote, "--timeout", "20s", "--contimeout", "10s", "--retries", "1", "--low-level-retries", "10"]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45, env=rclone_env(config))
     if result.returncode != 0:
         output = result.stdout or ""
@@ -757,6 +790,8 @@ def preflight(config: dict[str, Any]) -> None:
             raise RateLimitedError(f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s", retry_after)
         if text_looks_auth_failure(output):
             raise SystemExit(reconnect_dropbox_message())
+        if text_looks_temporary_remote_failure(output, result.returncode):
+            raise TemporaryRemoteError("Temporary Dropbox connection failure during preflight")
         raise SystemExit("Remote preflight failed; inspect safe-sync logs")
 
 
@@ -780,7 +815,10 @@ def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None =
         "--create-empty-src-dirs",
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
-        "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
+        # Keep high-level retries at one because rclone's combined report is
+        # per attempt. Low-level request retries are safe and prevent a single
+        # transient API timeout from aborting a large tree traversal.
+        "--retries", "1", "--low-level-retries", "10", "--retries-sleep", "5s",
         "--log-level", rclone_log_level(config),
     ]
     if config.get("preserve_metadata"):
@@ -799,7 +837,7 @@ def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool, selected
         "--create-empty-src-dirs",
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
-        "--retries", "1", "--low-level-retries", "1", "--retries-sleep", "5s",
+        "--retries", "1", "--low-level-retries", "10", "--retries-sleep", "5s",
         "--log-level", rclone_log_level(config),
     ]
     for selected_path in selected_paths or []:
@@ -1602,21 +1640,124 @@ def current_file_from_progress(progress: str | None) -> str | None:
     return None
 
 
+def backup_queue_path(config: dict[str, Any]) -> Path:
+    cfg = normalized_config(config)
+    name = f"{safe_id(str(cfg['profile_id']))}-{safe_id(str(cfg['machine_id']))}.json"
+    return state_root_path(cfg) / "backup-queue" / name
+
+
+def _new_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> dict[str, Any]:
+    cfg = normalized_config(config)
+    created = now_iso()
+    return {
+        "schema_version": 1,
+        "cycle_id": new_operation_id("cycle"),
+        "profile_id": cfg["profile_id"],
+        "machine_id": cfg["machine_id"],
+        "created_at": created,
+        "updated_at": created,
+        "items": [
+            {"folder_id": folder["id"], "stage": "payload", "attempts": 0, "changes": []}
+            for folder in folders
+        ],
+    }
+
+
+def load_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+    path = backup_queue_path(config)
+    if not path.exists():
+        return _new_backup_queue(config, folders), False
+    try:
+        queue = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise TransferError(f"backup retry state is invalid: {path}: {exc}") from exc
+    cfg = normalized_config(config)
+    if queue.get("profile_id") != cfg["profile_id"] or queue.get("machine_id") != cfg["machine_id"]:
+        raise TransferError(f"backup retry state belongs to another profile: {path}")
+    enabled = {str(folder["id"]) for folder in folders}
+    items = [item for item in queue.get("items") or [] if str(item.get("folder_id")) in enabled]
+    for item in items:
+        item.setdefault("stage", "payload")
+        item.setdefault("attempts", 0)
+        item.setdefault("changes", [])
+        folder_cfg = folder_config(config, next(folder for folder in folders if folder["id"] == item["folder_id"]))
+        if pending_generation_path(folder_cfg).exists():
+            item["stage"] = "generation"
+    queue["items"] = items
+    return queue, True
+
+
+def save_backup_queue(config: dict[str, Any], queue: dict[str, Any]) -> None:
+    path = backup_queue_path(config)
+    queue["updated_at"] = now_iso()
+    if queue.get("items"):
+        atomic_write_text(path, json.dumps(queue, indent=2, sort_keys=True) + "\n")
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def merge_backup_changes(
+    existing: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Accumulate successful path results across failed rclone attempts."""
+    merged: dict[str, dict[str, str]] = {
+        str(change["path"]): {"path": str(change["path"]), "operation": str(change["operation"])}
+        for change in existing
+        if change.get("path") and change.get("operation") != "error"
+    }
+    for change in incoming:
+        path = str(change.get("path") or "")
+        operation = str(change.get("operation") or "")
+        if not path or operation == "error":
+            continue
+        previous = (merged.get(path) or {}).get("operation")
+        if previous == "added" and operation == "modified":
+            operation = "added"
+        elif previous == "added" and operation == "removed":
+            merged.pop(path, None)
+            continue
+        elif previous == "removed" and operation in {"added", "modified"}:
+            operation = "modified"
+        merged[path] = {"path": path, "operation": operation}
+    return [merged[path] for path in sorted(merged)]
+
+
 def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: DaemonApiState) -> tuple[int, str | None]:
-    last_code = 0
     folders = enabled_folders(config)
     total_folders = len(folders)
-    for index, folder in enumerate(folders, start=1):
+    folder_by_id = {str(folder["id"]): folder for folder in folders}
+    queue, resumed = load_backup_queue(config, folders) if not dry_run else (_new_backup_queue(config, folders), False)
+    if not dry_run:
+        save_backup_queue(config, queue)
+    retry_delay = 0
+    retry_reason: str | None = None
+    provider_limited = False
+    completed_this_run: list[str] = []
+
+    for item in list(queue["items"]):
+        folder_id = str(item["folder_id"])
+        folder = folder_by_id.get(folder_id)
+        if folder is None:
+            queue["items"].remove(item)
+            if not dry_run:
+                save_backup_queue(config, queue)
+            continue
+        index = next(position for position, candidate in enumerate(folders, start=1) if candidate["id"] == folder_id)
         folder_cfg = folder_config(config, folder)
         operation_id = new_operation_id("backup")
         operation_cfg = {**folder_cfg, "_operation_id": operation_id}
-        correlation = {"operation_id": operation_id, "folder_id": folder["id"]}
+        correlation = {"operation_id": operation_id, "folder_id": folder_id, "cycle_id": queue["cycle_id"]}
         report_path = backup_report_path(folder_cfg)
+        pending_ids = [str(pending["folder_id"]) for pending in queue["items"]]
         publish_runtime_status(
             api_state,
             config,
-            state="syncing",
-            folder_id=folder["id"],
+            state="publishing" if item["stage"] == "generation" else "syncing",
+            folder_id=folder_id,
             current_folder_index=index,
             current_folder_total=total_folders,
             current_folder_label=folder.get("label", folder["id"]),
@@ -1624,16 +1765,63 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             last_start=now_iso(),
             last_command="daemon",
             last_error=None,
-            last_progress="Starting folder sync",
+            last_warning=None,
+            queued_backup=False,
+            configured_folder_count=total_folders,
+            pending_folders=pending_ids,
+            completed_folders=completed_this_run,
+            retry_cycle=bool(resumed),
+            last_progress="Resuming change publication" if item["stage"] == "generation" else "Starting folder sync",
         )
+
+        if item["stage"] == "generation":
+            publication_code = publish_generation(
+                folder_cfg,
+                operation_id=operation_id,
+                changes=None if pending_generation_path(folder_cfg).exists() else list(item.get("changes") or []),
+            )
+            if publication_code == 0:
+                record_event(
+                    folder_cfg,
+                    "backup.completed",
+                    component="backup",
+                    data={"exit_code": 0, "resumed_stage": "generation", "dry_run": False},
+                    correlation=correlation,
+                )
+                queue["items"].remove(item)
+                completed_this_run.append(folder_id)
+                save_backup_queue(config, queue)
+                continue
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            retry_delay = max(retry_delay, temporary_retry_seconds(int(item["attempts"])))
+            retry_reason = f"Change publication for {folder_id} is pending after a temporary remote failure"
+            save_backup_queue(config, queue)
+            record_event(
+                folder_cfg,
+                "backup.retry_scheduled",
+                component="backup",
+                severity="warning",
+                data={"stage": "generation", "attempt": item["attempts"], "retry_after_seconds": retry_delay},
+                correlation=correlation,
+            )
+            continue
+
         record_event(
             folder_cfg,
             "backup.started",
             component="backup",
-            data={"trigger": "daemon", "dry_run": dry_run, "folder_index": index, "folder_total": total_folders},
+            data={
+                "trigger": "daemon",
+                "dry_run": dry_run,
+                "folder_index": index,
+                "folder_total": total_folders,
+                "retry_cycle": bool(resumed),
+                "attempt": int(item.get("attempts", 0)) + 1,
+            },
             correlation=correlation,
             effect="none" if dry_run else None,
         )
+
         def on_progress(line: str) -> None:
             summary = summarize_progress_line(line)
             if summary:
@@ -1642,7 +1830,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     api_state,
                     config,
                     state="syncing",
-                    folder_id=folder["id"],
+                    folder_id=folder_id,
                     current_folder_index=index,
                     current_folder_total=total_folders,
                     current_folder_label=folder.get("label", folder["id"]),
@@ -1655,6 +1843,12 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             preflight(folder_cfg)
             code = run_command(operation_cfg, backup_cmd(folder_cfg, dry_run, report_path), dry_run=dry_run, progress_callback=on_progress)
         except RateLimitedError as exc:
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            retry_delay = max(retry_delay, exc.retry_after_seconds)
+            retry_reason = str(exc)
+            provider_limited = True
+            if not dry_run:
+                save_backup_queue(config, queue)
             record_event(
                 folder_cfg,
                 "backup.failed",
@@ -1668,7 +1862,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 api_state,
                 config,
                 state="backoff",
-                failed_folder=folder["id"],
+                failed_folder=folder_id,
                 last_warning=str(exc),
                 last_error=None,
                 queued_backup=True,
@@ -1677,7 +1871,22 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 last_finish=now_iso(),
                 last_progress=f"Paused before folder {index} of {total_folders}",
             )
-            return RATE_LIMIT_EXIT, folder["id"]
+            break
+        except TemporaryRemoteError as exc:
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            retry_delay = max(retry_delay, temporary_retry_seconds(int(item["attempts"])))
+            retry_reason = str(exc)
+            if not dry_run:
+                save_backup_queue(config, queue)
+            record_event(
+                folder_cfg,
+                "backup.retry_scheduled",
+                component="backup",
+                severity="warning",
+                data={"stage": "preflight", "attempt": item["attempts"], "retry_after_seconds": retry_delay},
+                correlation=correlation,
+            )
+            continue
         except BaseException as exc:
             record_event(
                 folder_cfg,
@@ -1692,7 +1901,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 api_state,
                 config,
                 state="error",
-                failed_folder=folder["id"],
+                failed_folder=folder_id,
                 last_error=str(exc),
                 last_finish=now_iso(),
                 last_progress=f"Failed on folder {index} of {total_folders}",
@@ -1700,10 +1909,20 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             raise
 
         counts = record_backup_report(folder_cfg, report_path, operation_id, dry_run=dry_run)
+        attempt_changes = parse_combined_report(report_path.read_text(errors="replace") if report_path.exists() else "")
+        item["changes"] = merge_backup_changes(list(item.get("changes") or []), attempt_changes)
+        if not dry_run:
+            save_backup_queue(config, queue)
 
         if code != 0:
             if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
                 retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
+                item["attempts"] = int(item.get("attempts", 0)) + 1
+                retry_delay = max(retry_delay, retry_after)
+                retry_reason = f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s"
+                provider_limited = True
+                if not dry_run:
+                    save_backup_queue(config, queue)
                 record_event(
                     folder_cfg,
                     "backup.failed",
@@ -1717,7 +1936,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     api_state,
                     config,
                     state="backoff",
-                    failed_folder=folder["id"],
+                    failed_folder=folder_id,
                     last_warning=f"Dropbox rate limited Safe Sync; cooling down for {retry_after}s",
                     last_error=None,
                     queued_backup=True,
@@ -1726,7 +1945,43 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     last_finish=now_iso(),
                     last_progress=f"Dropbox throttled folder {index} of {total_folders}",
                 )
-                return RATE_LIMIT_EXIT, folder["id"]
+                break
+            if text_looks_temporary_remote_failure(LAST_COMMAND_OUTPUT, code):
+                item["attempts"] = int(item.get("attempts", 0)) + 1
+                delay = temporary_retry_seconds(int(item["attempts"]))
+                retry_delay = max(retry_delay, delay)
+                retry_reason = f"Temporary Dropbox failure on {folder_id}; retrying in {delay}s"
+                if not dry_run:
+                    save_backup_queue(config, queue)
+                record_event(
+                    folder_cfg,
+                    "backup.retry_scheduled",
+                    component="backup",
+                    severity="warning",
+                    data={
+                        "stage": "payload",
+                        "reason": "temporary_remote",
+                        "exit_code": code,
+                        "attempt": item["attempts"],
+                        "retry_after_seconds": delay,
+                        "counts": counts,
+                    },
+                    correlation=correlation,
+                    effect="none" if dry_run else None,
+                )
+                publish_runtime_status(
+                    api_state,
+                    config,
+                    state="retry_pending",
+                    failed_folder=folder_id,
+                    last_warning=retry_reason,
+                    last_error=None,
+                    queued_backup=True,
+                    backoff_seconds=delay,
+                    last_finish=now_iso(),
+                    last_progress=f"Temporary failure on folder {index} of {total_folders}; later folders will continue",
+                )
+                continue
             error = reconnect_dropbox_message() if text_looks_auth_failure(LAST_COMMAND_OUTPUT) else f"rclone exit {code}"
             record_event(
                 folder_cfg,
@@ -1741,52 +1996,42 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 api_state,
                 config,
                 state="error",
-                failed_folder=folder["id"],
+                failed_folder=folder_id,
                 last_error=error,
                 last_finish=now_iso(),
                 last_progress=f"Failed on folder {index} of {total_folders}",
             )
-            return code, folder["id"]
+            return code, folder_id
 
-        if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
-            retry_after = rate_limit_retry_after_seconds(LAST_COMMAND_OUTPUT, int(config.get("rate_limit_backoff_seconds", 300)))
-            record_event(
-                folder_cfg,
-                "backup.failed",
-                component="backup",
-                severity="warning",
-                data={"reason": "rate_limited", "retry_after_seconds": retry_after, "counts": counts},
-                correlation=correlation,
-                effect="none" if dry_run else None,
-            )
-            publish_runtime_status(
-                api_state,
-                config,
-                state="backoff",
-                failed_folder=folder["id"],
-                last_warning=f"Dropbox reported throttling; cooling down for {retry_after}s",
-                last_error=None,
-                queued_backup=False,
-                backoff_seconds=retry_after,
-                backoff_until=future_iso(retry_after),
-                last_finish=now_iso(),
-                last_progress=f"Dropbox throttled folder {index} of {total_folders}",
-            )
-            return RATE_LIMIT_EXIT, folder["id"]
+        saw_rate_limit = text_looks_rate_limited(LAST_COMMAND_OUTPUT)
 
         if not dry_run:
-            publication_code = publish_generation(folder_cfg, report_path, operation_id=operation_id)
+            item["stage"] = "generation"
+            save_backup_queue(config, queue)
+            publication_code = publish_generation(
+                folder_cfg,
+                operation_id=operation_id,
+                changes=list(item.get("changes") or []),
+            )
             if publication_code != 0:
+                item["attempts"] = int(item.get("attempts", 0)) + 1
+                delay = temporary_retry_seconds(int(item["attempts"]))
+                retry_delay = max(retry_delay, delay)
+                retry_reason = f"Change publication for {folder_id} is pending; retrying in {delay}s"
+                save_backup_queue(config, queue)
                 publish_runtime_status(
                     api_state,
                     config,
-                    state="error",
-                    failed_folder=folder["id"],
-                    last_error="generation publication failed",
+                    state="retry_pending",
+                    failed_folder=folder_id,
+                    last_error=None,
+                    last_warning=retry_reason,
+                    queued_backup=True,
+                    backoff_seconds=delay,
                     last_finish=now_iso(),
-                    last_progress=f"Backup completed but change publication failed for folder {index} of {total_folders}",
+                    last_progress=f"Folder data converged; change publication is pending for folder {index} of {total_folders}",
                 )
-                return publication_code, folder["id"]
+                continue
 
         record_event(
             folder_cfg,
@@ -1796,15 +2041,46 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             correlation=correlation,
             effect="none" if dry_run else None,
         )
+        queue["items"].remove(item)
+        completed_this_run.append(folder_id)
+        if not dry_run:
+            save_backup_queue(config, queue)
+        if saw_rate_limit:
+            retry_delay = max(retry_delay, int(config.get("rate_limit_backoff_seconds", 300)))
+            retry_reason = f"Dropbox throttled requests but {folder_id} completed; pausing before remaining folders"
+            provider_limited = True
+            break
 
-        last_code = code
+    if queue["items"]:
+        retry_delay = retry_delay or temporary_retry_seconds(1)
+        failed_folder = str(queue["items"][0]["folder_id"])
+        pending_ids = [str(item["folder_id"]) for item in queue["items"]]
+        warning = retry_reason or f"Backup work remains for {len(pending_ids)} folder(s)"
+        publish_runtime_status(
+            api_state,
+            config,
+            state="backoff",
+            failed_folder=failed_folder,
+            last_warning=warning,
+            last_error=None,
+            queued_backup=True,
+            configured_folder_count=total_folders,
+            pending_folders=pending_ids,
+            completed_folders=completed_this_run,
+            backoff_seconds=retry_delay,
+            backoff_until=future_iso(retry_delay),
+            last_finish=now_iso(),
+            last_progress=f"{len(pending_ids)} of {total_folders} folders pending; completed folders will not be repeated",
+            retry_kind="provider_rate_limit" if provider_limited else "temporary_remote",
+        )
+        return RATE_LIMIT_EXIT, failed_folder
 
     if not dry_run:
         registry_code = update_registry(config)
         if registry_code != 0:
             publish_runtime_status(api_state, config, state="error", last_error="registry update failed", last_finish=now_iso())
             return registry_code, "registry"
-    return last_code, None
+    return 0, None
 
 
 def run_receive_runtime(config: dict[str, Any], request: dict[str, Any], api_state: DaemonApiState) -> int:
@@ -2694,7 +2970,16 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     error_text = str(exc) or "backup failed"
                 after = time.monotonic()
                 rate_limited = code == RATE_LIMIT_EXIT
-                daemon.note_sync_finished(after, rate_limited=rate_limited)
+                requested_backoff = api_state.snapshot().get("backoff_seconds") if rate_limited else None
+                try:
+                    backoff_seconds = float(requested_backoff) if requested_backoff is not None else None
+                except (TypeError, ValueError):
+                    backoff_seconds = None
+                daemon.note_sync_finished(
+                    after,
+                    rate_limited=rate_limited,
+                    backoff_seconds=backoff_seconds,
+                )
                 if code == 0:
                     publish_runtime_status(api_state, config, state="watching", last_success=now_iso(), last_finish=now_iso(), last_error=None, last_warning=None, queued_backup=False)
                 elif rate_limited:
@@ -2893,7 +3178,7 @@ def rclone_capture(config: dict[str, Any], cmd: list[str], input_text: str | Non
         "--retries",
         "1",
         "--low-level-retries",
-        "1",
+        "10",
     ]
     return subprocess.run(
         guarded_cmd,
@@ -3013,12 +3298,150 @@ def backup_report_path(config: dict[str, Any]) -> Path:
     return root / f"{folder_id}-{uuid.uuid4().hex}.combined"
 
 
-def publish_generation(config: dict[str, Any], report_path: Path, *, operation_id: str | None = None) -> int:
-    """Publish an immutable owner generation, then its latest pointer."""
+def generation_local_dir(config: dict[str, Any]) -> Path:
+    cfg = normalized_config(config)
+    folder_id = safe_id(str(config.get("folder_id") or "folder"))
+    return state_root_path(cfg) / "generations" / str(cfg["machine_id"]) / folder_id
+
+
+def pending_generation_path(config: dict[str, Any]) -> Path:
+    return generation_local_dir(config) / "pending.json"
+
+
+def _verified_remote_write(
+    config: dict[str, Any],
+    remote_path: str,
+    body: str,
+    *,
+    immutable: bool,
+) -> tuple[int, str]:
+    """Write one object and resolve an ambiguous upload by reading it back."""
+    existing = rclone_capture(config, ["cat", remote_path])
+    if existing.returncode == 0 and (existing.stdout or "") == body:
+        return 0, "already verified"
+    if immutable and existing.returncode == 0:
+        return 1, "immutable generation path already contains different data"
+    uploaded = rclone_capture(config, ["rcat", remote_path], input_text=body)
+    verified = rclone_capture(config, ["cat", remote_path])
+    if verified.returncode == 0 and (verified.stdout or "") == body:
+        return 0, "verified"
+    detail = (uploaded.stdout or verified.stdout or "remote verification failed").strip()
+    return int(uploaded.returncode or verified.returncode or 1), detail
+
+
+def _publish_pending_generation(config: dict[str, Any], body: str, *, operation_id: str | None) -> int:
+    cfg = normalized_config(config)
+    try:
+        record = json.loads(body)
+    except json.JSONDecodeError:
+        return 1
+    folder_id = str(record.get("folder_id") or config.get("folder_id") or "")
+    generation_id = str(record.get("generation_id") or "")
+    remote_dir = generation_remote_dir(str(cfg["remote_base"]), str(cfg["machine_id"]), folder_id)
+    immutable_path = remote_join(remote_dir, f"generations/{generation_id}.json")
+    latest_path = remote_join(remote_dir, "latest.json")
+    correlation = {
+        "operation_id": operation_id,
+        "folder_id": folder_id,
+        "generation_id": generation_id,
+    }
+    immutable_code, immutable_detail = _verified_remote_write(cfg, immutable_path, body, immutable=True)
+    if immutable_code != 0:
+        record_event(
+            cfg,
+            "generation.publication_failed",
+            component="generation",
+            severity="error",
+            data={"stage": "immutable", "exit_code": immutable_code, "error": immutable_detail},
+            correlation=correlation,
+        )
+        return immutable_code
+    latest_code, latest_detail = _verified_remote_write(cfg, latest_path, body, immutable=False)
+    if latest_code != 0:
+        record_event(
+            cfg,
+            "generation.publication_failed",
+            component="generation",
+            severity="error",
+            data={"stage": "latest", "exit_code": latest_code, "error": latest_detail},
+            correlation=correlation,
+        )
+        return latest_code
+
+    local_dir = generation_local_dir({**cfg, "folder_id": folder_id})
+    atomic_write_text(local_dir / "generations" / f"{generation_id}.json", body)
+    atomic_write_text(local_dir / "latest.json", body)
+    try:
+        pending_generation_path({**cfg, "folder_id": folder_id}).unlink()
+    except FileNotFoundError:
+        pass
+    record_event(
+        cfg,
+        "generation.published",
+        component="generation",
+        data={
+            "change_count": len(record.get("changes") or []),
+            "parent_generation": record.get("parent_generation"),
+        },
+        correlation=correlation,
+    )
+    return 0
+
+
+def publish_generation(
+    config: dict[str, Any],
+    report_path: Path | None = None,
+    *,
+    operation_id: str | None = None,
+    changes: list[dict[str, str]] | None = None,
+) -> int:
+    """Durably publish an immutable owner generation, then its latest pointer."""
     cfg = normalized_config(config)
     folder_id = str(config.get("folder_id") or "")
     if not folder_id:
         raise TransferError("folder_id is required to publish a generation")
+    supplied_changes = changes
+    if supplied_changes is None:
+        report_text = report_path.read_text(errors="replace") if report_path is not None and report_path.exists() else ""
+        supplied_changes = parse_combined_report(report_text)
+    supplied_changes = [change for change in supplied_changes if change.get("operation") != "error"]
+
+    pending_path = pending_generation_path(config)
+    if pending_path.exists():
+        pending_body = pending_path.read_text()
+        try:
+            pending_record = json.loads(pending_body)
+        except json.JSONDecodeError:
+            record_event(
+                cfg,
+                "generation.publication_failed",
+                component="generation",
+                severity="error",
+                data={"stage": "local_pending", "error": "pending generation is invalid JSON"},
+                correlation={"operation_id": operation_id, "folder_id": folder_id},
+            )
+            return 1
+        pending_code = _publish_pending_generation(config, pending_body, operation_id=operation_id)
+        if pending_code != 0:
+            return pending_code
+        canonical_supplied = sorted(supplied_changes, key=lambda change: (str(change.get("path")), str(change.get("operation"))))
+        canonical_pending = sorted(
+            list(pending_record.get("changes") or []),
+            key=lambda change: (str(change.get("path")), str(change.get("operation"))),
+        )
+        if canonical_supplied == canonical_pending:
+            return 0
+
+    if not supplied_changes:
+        record_event(
+            cfg,
+            "generation.skipped",
+            component="generation",
+            data={"reason": "no_changes"},
+            correlation={"operation_id": operation_id, "folder_id": folder_id},
+        )
+        return 0
+
     remote_dir = generation_remote_dir(str(cfg["remote_base"]), str(cfg["machine_id"]), folder_id)
     latest_path = remote_join(remote_dir, "latest.json")
     parent_generation: str | None = None
@@ -3027,15 +3450,36 @@ def publish_generation(config: dict[str, Any], report_path: Path, *, operation_i
         try:
             parent_generation = str(json.loads(previous.stdout).get("generation_id") or "") or None
         except (json.JSONDecodeError, AttributeError):
-            parent_generation = None
-    changes = parse_combined_report(report_path.read_text(errors="replace") if report_path.exists() else "")
+            record_event(
+                cfg,
+                "generation.publication_failed",
+                component="generation",
+                severity="error",
+                data={"stage": "parent_lookup", "error": "latest generation pointer is invalid"},
+                correlation={"operation_id": operation_id, "folder_id": folder_id},
+            )
+            return 1
+    elif not text_looks_remote_not_found(previous.stdout or ""):
+        record_event(
+            cfg,
+            "generation.publication_failed",
+            component="generation",
+            severity="warning",
+            data={
+                "stage": "parent_lookup",
+                "exit_code": previous.returncode,
+                "error": previous.stdout or "",
+            },
+            correlation={"operation_id": operation_id, "folder_id": folder_id},
+        )
+        return int(previous.returncode or 1)
     record = generation_record(
         machine_id=str(cfg["machine_id"]),
         install_id=str(cfg["install_id"]),
         profile_id=str(cfg["profile_id"]),
         folder_id=folder_id,
         filter_policy=effective_filter_fingerprint(config),
-        changes=changes,
+        changes=supplied_changes,
         parent_generation=parent_generation,
     )
     correlation = {
@@ -3047,45 +3491,14 @@ def publish_generation(config: dict[str, Any], report_path: Path, *, operation_i
         cfg,
         "generation.publication_started",
         component="generation",
-        data={"change_count": len(changes), "parent_generation": parent_generation},
+        data={"change_count": len(supplied_changes), "parent_generation": parent_generation},
         correlation=correlation,
     )
     body = json.dumps(record, indent=2, sort_keys=True) + "\n"
-    immutable_path = remote_join(remote_dir, f"generations/{record['generation_id']}.json")
-    immutable = rclone_capture(cfg, ["rcat", immutable_path], input_text=body)
-    if immutable.returncode != 0:
-        record_event(
-            cfg,
-            "generation.publication_failed",
-            component="generation",
-            severity="error",
-            data={"stage": "immutable", "exit_code": immutable.returncode, "error": immutable.stdout or ""},
-            correlation=correlation,
-        )
-        return int(immutable.returncode)
-    latest = rclone_capture(cfg, ["rcat", latest_path], input_text=body)
-    if latest.returncode != 0:
-        record_event(
-            cfg,
-            "generation.publication_failed",
-            component="generation",
-            severity="error",
-            data={"stage": "latest", "exit_code": latest.returncode, "error": latest.stdout or ""},
-            correlation=correlation,
-        )
-        return int(latest.returncode)
-
-    local_dir = state_root_path(cfg) / "generations" / str(cfg["machine_id"]) / folder_id
-    atomic_write_text(local_dir / "generations" / f"{record['generation_id']}.json", body)
-    atomic_write_text(local_dir / "latest.json", body)
-    record_event(
-        cfg,
-        "generation.published",
-        component="generation",
-        data={"change_count": len(changes), "parent_generation": parent_generation},
-        correlation=correlation,
-    )
-    return 0
+    # Persist the exact ID/body before the first remote mutation. A restart or
+    # timeout retries this same generation rather than inventing another one.
+    atomic_write_text(pending_path, body)
+    return _publish_pending_generation(config, body, operation_id=operation_id)
 
 
 def fetch_remote_inventory(config: dict[str, Any], remote_scope: str) -> dict[str, dict[str, Any]]:

@@ -117,9 +117,10 @@ too_many_requests
 Trying again in 300 seconds
 ```
 
-Safe Sync deliberately has no whole-transfer deadline. Large models and data files may take as long as they need while progress continues. rclone still has short connection and inactive-network timeouts, so a genuinely stalled transfer fails visibly and the daemon can retry it.
+Safe Sync deliberately has no whole-transfer deadline. Large models and data files may take as long as they need while progress continues. Rclone still has short connection and inactive-network timeouts. A temporary exit 5 or timeout is retained in the profile's durable per-folder queue and retried with bounded backoff; completed folders are not repeated, and unrelated later folders continue unless Dropbox imposes a provider-wide cooldown.
 
-If this happens during testing, wait a few minutes and retry. Do not keep hammering Dropbox in a loop.
+During testing, confirm that Status names the pending folder and retry delay,
+then let the daemon retry it. Do not manually hammer Dropbox in a loop.
 
 ## Interrupted-Sync Simulation
 

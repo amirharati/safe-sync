@@ -30,12 +30,20 @@ separate future path for allowlisted durable recovery events.
 **Priority:** critical; fix before resuming Stage 1 dogfooding or trusting a
 multi-folder backup.
 
+**Status:** implemented on 2026-08-12; automated regression coverage passes.
+Awaiting verification during the next clean one-profile dogfood run.
+
 **Observed during the clean one-profile restart on 2026-08-10:** the `dist`
 payload sync exited successfully with zero remaining changes. Safe Sync then
 attempted to publish its immutable generation record, but Dropbox's
 `upload_session/append_v2` call timed out waiting for HTTP/2 response headers.
 Rclone returned exit code 5. Safe Sync converted that post-backup metadata
 failure into a fatal folder-set result and stopped at folder 1 of 5.
+
+A later run exposed the payload-side form of the same reliability gap: a
+temporary Dropbox directory-list timeout returned rclone exit 5 after five
+files had already copied. Safe Sync discarded the partial attempt context,
+skipped the remaining folders, and did not queue an immediate retry.
 
 The daemon did not immediately retry the pending generation, did not continue
 with the other configured folders, and did not queue another backup. It
@@ -65,6 +73,25 @@ Required behavior:
 - Cover immutable-record and `latest.json` failures, timeout-after-remote-write
   ambiguity, repeated throttling, process interruption, restart reconciliation,
   and continuation through the remaining folders.
+
+Implemented behavior:
+
+- rclone request-level retries are restored while whole-operation retries stay
+  at one so combined change reports remain unambiguous.
+- A profile-scoped atomic queue retains the precise payload or generation stage,
+  attempt count, and net successful path changes for every unfinished folder.
+- Temporary exit 5/timeouts use bounded adaptive backoff. Unrelated later
+  folders continue unless Dropbox reports a provider-wide throttle, and a retry
+  processes only unfinished folders.
+- Generation bodies and IDs are persisted before upload. Immutable and latest
+  objects are read back after every write, including an apparent timeout, so an
+  ambiguous successful upload is accepted and a restart reuses the same ID.
+- No-change cycles no longer publish empty generations. Runtime status exposes
+  configured, completed, and pending folder lists and clears stale warnings when
+  work resumes.
+- Regression tests cover partial-copy exit 5 and continuation, restart-safe
+  generation retry, timeout-after-write verification, no-op suppression, net
+  change accumulation, and scheduler backoff preservation.
 
 ### LOG-001: Protect audit history from diagnostic floods
 

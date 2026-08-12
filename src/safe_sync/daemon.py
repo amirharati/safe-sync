@@ -82,7 +82,7 @@ class WatchDaemon:
         """Record that at least one meaningful filesystem change happened."""
         self.state.dirty = True
         self.state.last_change_monotonic = monotonic_time
-        if self.state.state == DaemonState.SYNCING:
+        if self.state.state in {DaemonState.SYNCING, DaemonState.BACKOFF}:
             self.state.pending = True
         elif self.state.state != DaemonState.BACKOFF:
             self.state.state = DaemonState.DIRTY
@@ -127,11 +127,17 @@ class WatchDaemon:
         self.state.state = DaemonState.SYNCING
         self.state.last_sync_start_monotonic = monotonic_time
 
-    def note_sync_finished(self, monotonic_time: float, rate_limited: bool = False) -> None:
+    def note_sync_finished(
+        self,
+        monotonic_time: float,
+        rate_limited: bool = False,
+        backoff_seconds: float | None = None,
+    ) -> None:
         self.state.last_sync_finish_monotonic = monotonic_time
         if rate_limited:
             self.state.state = DaemonState.BACKOFF
-            self.state.backoff_until_monotonic = monotonic_time + self.settings.rate_limit_backoff_seconds
+            delay = self.settings.rate_limit_backoff_seconds if backoff_seconds is None else max(1.0, backoff_seconds)
+            self.state.backoff_until_monotonic = monotonic_time + delay
             return
         if self.state.pending:
             self.state.state = DaemonState.COOLDOWN
