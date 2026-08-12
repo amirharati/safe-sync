@@ -90,6 +90,8 @@ const stateLabel = document.querySelector<HTMLElement>("[data-status-state]");
 const reasonLabel = document.querySelector<HTMLElement>("[data-status-reason]");
 const serviceLabel = document.querySelector<HTMLElement>("[data-service-state]");
 const syncLabel = document.querySelector<HTMLElement>("[data-sync-state]");
+const configuredFoldersLabel = document.querySelector<HTMLElement>("[data-configured-folders]");
+const currentFolderHeading = document.querySelector<HTMLElement>("[data-current-folder-heading]");
 const currentFolderLabel = document.querySelector<HTMLElement>("[data-current-folder]");
 const currentProgressLabel = document.querySelector<HTMLElement>("[data-current-progress]");
 const currentFileLabel = document.querySelector<HTMLElement>("[data-current-file]");
@@ -256,13 +258,33 @@ function currentFolderSummary(status: SafeSyncStatus): string {
   const index = Number(status.sync_state?.current_folder_index ?? 0);
   const total = Number(status.sync_state?.current_folder_total ?? 0);
   if (!folderLabel) return "-";
-  if (index > 0 && total > 0) {
+  if (["syncing", "publishing", "retry_pending", "backoff", "cooldown"].includes(syncStateValue) && index > 0 && total > 0) {
     return `${folderLabel} (${index}/${total})`;
   }
-  if (syncStateValue === "syncing" || syncStateValue === "transferring" || syncStateValue === "backoff" || syncStateValue === "cooldown") {
-    return folderLabel;
-  }
   return folderLabel;
+}
+
+function configuredFoldersSummary(status: SafeSyncStatus): string {
+  const rawFolders = status.sync_state?.folders;
+  const folders = Array.isArray(rawFolders) ? rawFolders : [];
+  const names = folders
+    .map((raw) => {
+      if (!raw || typeof raw !== "object") return "";
+      const folder = raw as Record<string, unknown>;
+      return text(folder.label, text(folder.id, ""));
+    })
+    .filter((name) => name.length > 0);
+  const configuredCount = Number(status.sync_state?.configured_folder_count ?? folders.length);
+  if (names.length > 0) return `${configuredCount}: ${names.join(", ")}`;
+  if (configuredCount > 0) return String(configuredCount);
+  return "None";
+}
+
+function currentFolderHeadingText(status: SafeSyncStatus): string {
+  const state = syncState(status);
+  if (state === "backoff" || state === "retry_pending") return "Pending folder";
+  if (state === "syncing" || state === "publishing") return "Current folder";
+  return "Last folder";
 }
 
 function progressSummary(status: SafeSyncStatus): string {
@@ -386,6 +408,8 @@ function renderStatus(status: SafeSyncStatus): void {
     serviceLabel.dataset.value = status.service_state;
   }
   if (syncLabel) syncLabel.textContent = syncState(status);
+  if (configuredFoldersLabel) configuredFoldersLabel.textContent = configuredFoldersSummary(status);
+  if (currentFolderHeading) currentFolderHeading.textContent = currentFolderHeadingText(status);
   if (currentFolderLabel) currentFolderLabel.textContent = currentFolderSummary(status);
   if (currentProgressLabel) currentProgressLabel.textContent = progressSummary(status);
   if (currentFileLabel) currentFileLabel.textContent = currentFileSummary(status);

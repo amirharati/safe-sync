@@ -341,6 +341,30 @@ def test_status_health_reports_setup_required_before_the_first_folder():
     assert "Choose a folder" in health["reason"]
 
 
+def test_status_payload_always_lists_all_configured_folders(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config = normalized_config(default_config("test-machine"))
+    config["state_root"] = str(tmp_path / "state")
+    config["log_dir"] = str(tmp_path / "logs")
+    config["status_path"] = str(tmp_path / "state/status.json")
+    for name in ("first", "second"):
+        folder = tmp_path / name
+        folder.mkdir()
+        add_setup_folder(config, str(folder))
+    write_config(config_path, config)
+    monkeypatch.setattr("safe_sync.cli.service_status_text", lambda: "service: stopped")
+
+    def unavailable(*_args, **_kwargs):
+        raise FileNotFoundError("daemon stopped")
+
+    monkeypatch.setattr("safe_sync.cli.api_request", unavailable)
+    payload = status_payload(config_path)
+
+    assert payload["sync_state"]["configured_folder_count"] == 2
+    assert [folder["id"] for folder in payload["sync_state"]["folders"]] == ["first", "second"]
+    assert payload["sync_state"]["state"] == "unknown"
+
+
 def test_login_check_is_silent_when_healthy(monkeypatch, tmp_path, capsys):
     config_path = tmp_path / "config.json"
     config = normalized_config(default_config("test-machine"))
@@ -398,6 +422,20 @@ def test_every_open_control_panel_button_is_wired():
     assert page.count('data-action="open-control-panel"') == 2
     assert 'querySelectorAll("[data-action=\'open-control-panel\']")' in main
     assert 'querySelector("[data-action=\'open-control-panel\']")?.addEventListener' not in main
+
+
+def test_status_ui_separates_configured_folders_from_runtime_folder():
+    project = Path(__file__).parents[1]
+    page = (project / "ui" / "index.html").read_text()
+    main = (project / "ui" / "src" / "main.ts").read_text()
+
+    assert "Configured folders" in page
+    assert 'data-configured-folders' in page
+    assert 'data-current-folder-heading' in page
+    assert '`${configuredCount}: ${names.join(", ")}`' in main
+    assert 'return "Pending folder"' in main
+    assert 'return "Current folder"' in main
+    assert 'return "Last folder"' in main
 
 
 def test_login_check_gives_headless_reconnect_command(monkeypatch, tmp_path, capsys):

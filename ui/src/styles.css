@@ -1039,7 +1039,7 @@ button.danger:hover:not(:disabled) {
 }
 
 :root[data-panel="quick"] .facts > div {
-  grid-template-columns: 74px minmax(0, 1fr);
+  grid-template-columns: 110px minmax(0, 1fr);
   gap: 10px;
   min-height: 32px;
   padding: 7px 2px;

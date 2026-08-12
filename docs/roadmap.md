@@ -135,15 +135,18 @@ retry start, active progress, success, and repeated throttling.
 **Priority:** fix after the current basic one-profile logging dogfood review,
 when the owner returns from travel.
 
-The Status view's singular `Folder` row currently displays only the daemon's
+**Status:** implemented on 2026-08-12; pending installation and visual review.
+
+The Status view's former singular `Folder` row displayed only the daemon's
 current or most recently processed folder. While idle it can therefore show
 one folder even when the active profile has several enabled folders, making a
 healthy configuration look incomplete.
 
-The latest clean-restart observation has five configured folders while Status
-shows only `Folder: tools`, confirming the ambiguity remains.
+The clean-restart observation had five configured folders while Status showed
+only `Folder: tools`, confirming the ambiguity.
 
-Show `Configured folders` as an explicit count, and relabel the runtime value
+The fix shows `Configured folders` as an explicit count and complete name list,
+and relabels the runtime value
 as `Current folder` while work is active and `Last folder` while idle. During
 multi-folder backup, retain the useful `name (index/total)` progress. Keep the
 quick panel and full control panel consistent, and add UI regression coverage

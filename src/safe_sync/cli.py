@@ -1480,6 +1480,20 @@ def status_payload(config_path: Path, api_timeout_seconds: float = 5.0) -> dict[
     except Exception as exc:
         sync_state = {"state": "unknown", "socket_path": str(socket_path(config)), "error": str(exc)}
 
+    # Configuration truth must not depend on whichever folder the daemon most
+    # recently processed. Keep the complete enabled-folder list available to
+    # CLI and UI status consumers even while the service is stopped or stale.
+    configured_folders = [
+        {
+            "id": folder["id"],
+            "label": folder.get("label", folder["id"]),
+            "local_path": str(Path(folder["local_path"]).expanduser()),
+        }
+        for folder in enabled_folders(config)
+    ]
+    sync_state["folders"] = configured_folders
+    sync_state["configured_folder_count"] = len(configured_folders)
+
     service_text = service_status_text()
     service_state = service_text.split(":", 1)[1].strip() if ":" in service_text else service_text
     health = status_health(config, service_state, sync_state)
