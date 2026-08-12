@@ -282,6 +282,43 @@ as `flutter/bin/cache` may be appropriate user-selected exclusions, but Safe
 Sync must not silently exclude an arbitrary tracked tree. Offer documented
 ignore presets or a preflight warning for cache/vendor-heavy roots instead.
 
+#### Small-file architecture direction
+
+Direct mirroring remains the first implementation path because it is
+transparent in Dropbox, independently inspectable with ordinary tools, and the
+simplest physical layout for selective transfer between computers. First test
+the strongest safe version of that model: synchronous verified batching,
+measured concurrency, durable provider-aware retry, and bounded diagnostics.
+
+Do not couple the logical file model to that physical layout. Compare,
+selective sync, clone, and recovery should consume a verified manifest through
+a storage interface rather than assume every logical path is always a loose
+Dropbox object. This preserves a migration path to an immutable packed-small-
+file store if tuned mirroring misses the acceptance target.
+
+A future packed store would group small files into immutable hash-named packs
+and publish a manifest mapping logical path, content hash, size, metadata, pack
+ID, offset, and length. Upload and hash-verify packs before atomically publishing
+the generation; use tombstones for deletion and garbage-collect only objects no
+retained manifest references. Selective sync would still operate on logical
+paths and extract only the needed pack data. This can be integrity-safe, but it
+adds substantial implementation and test scope: consistent pack creation while
+files change, range/fallback reads, interrupted publication, history retention,
+compaction, garbage collection, and independent disaster recovery.
+
+If both fast protection and a human-browsable Dropbox mirror are ultimately
+required, consider a two-state projection rather than making safety wait for
+thousands of loose writes: publish verified packs/manifests first (`Protected`),
+then materialize the ordinary file mirror in a lower-priority queue
+(`Dropbox mirror catching up`). This duplicates some storage and cannot remove
+the eventual Dropbox write cost, so it is a later optional design—not the first
+fix. The UI and logs must never confuse pack protection with mirror completion.
+
+Decision gate: retain direct mirror as the initial default, build the storage
+boundary now, and introduce packed or dual-layer storage only if the isolated
+tiny-file benchmark proves verified synchronous batching cannot meet the agreed
+throughput/reliability target.
+
 ### REMOTE-001: Optional remote backup purge
 
 **Priority:** after real two-machine install testing.
