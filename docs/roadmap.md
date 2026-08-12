@@ -255,6 +255,15 @@ settings against explicit synchronous batch size/transfer concurrency, measure
 files/s, bytes/s, throttles, retry correctness, memory, and final hashes, then
 choose conservative provider-specific settings.
 
+Safe Sync's provider classifier must also recognize Dropbox's literal
+`too_many_write_operations` / `too many write operations` response as a rate
+limit. The current Debug child additionally emits `pacer: Rate limited`, which
+makes this run enter the correct durable cooldown path by coincidence. At
+Normal rclone verbosity the literal error may be the only evidence and would
+currently fall through to a fatal generic rclone exit instead of a queued
+provider retry. Add direct classification and regression coverage independent
+of diagnostic verbosity.
+
 Also separate backup policy from transport tuning. Regenerable SDK caches such
 as `flutter/bin/cache` may be appropriate user-selected exclusions, but Safe
 Sync must not silently exclude an arbitrary tracked tree. Offer documented
