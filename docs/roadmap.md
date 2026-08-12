@@ -162,6 +162,28 @@ quick panel and full control panel consistent, and add UI regression coverage
 for idle, active, and stopped backend states. This issue is presentation-only;
 the confirmed active configuration contains all five enabled folders.
 
+### PROGRESS-001: Show stable backup completion progress
+
+**Priority:** fix before restarting the clean Stage 1 dogfood baseline.
+
+**Status:** implemented on 2026-08-12; automated regression coverage passes.
+Awaiting verification during the clean reinstall.
+
+The former Status projection showed whichever raw rclone line arrived last.
+Its discovered-so-far totals changed during traversal, a bare `Transferring:`
+line could replace useful detail, and the result could not answer how much
+work remained.
+
+Backup now uses rclone's check-first mode so comparison finishes before
+uploads begin. Status deliberately shows `Scanning and comparing` without a
+fabricated percentage during discovery, then shows a stable file percentage,
+file and byte totals, and rclone's approximate ETA during transfer, followed
+by `Finalizing folder backup` and `Backup cycle complete`. This rearranges the
+existing comparison rather than adding a second pre-scan. The tradeoff is that
+the first upload starts later and rclone retains the transfer backlog in
+memory; verify that behavior with the current disposable five-folder profile
+before considering larger production trees.
+
 ### REMOTE-001: Optional remote backup purge
 
 **Priority:** after real two-machine install testing.

@@ -290,9 +290,31 @@ function currentFolderHeadingText(status: SafeSyncStatus): string {
 }
 
 function progressSummary(status: SafeSyncStatus): string {
+  const syncStateValue = syncState(status);
+  const phase = text(status.sync_state?.sync_phase, "");
+  if (["syncing", "publishing"].includes(syncStateValue) && phase === "scanning") {
+    const checked = Number(status.sync_state?.checks_completed ?? 0);
+    const listed = Number(status.sync_state?.listed_entries ?? 0);
+    if (checked > 0 && listed > 0) return `Scanning and comparing · ${checked.toLocaleString()} checked · ${listed.toLocaleString()} listed`;
+    if (checked > 0) return `Scanning and comparing · ${checked.toLocaleString()} checked`;
+    if (listed > 0) return `Scanning and comparing · ${listed.toLocaleString()} listed`;
+    return "Scanning and comparing";
+  }
+  if (["syncing", "publishing"].includes(syncStateValue) && phase === "transferring") {
+    const percent = Number(status.sync_state?.progress_percent ?? 0);
+    const transferred = Number(status.sync_state?.transferred_files ?? 0);
+    const total = Number(status.sync_state?.total_transfer_files ?? 0);
+    const bytesDone = text(status.sync_state?.transferred_bytes_display, "");
+    const bytesTotal = text(status.sync_state?.total_bytes_display, "");
+    const eta = text(status.sync_state?.eta, "");
+    const parts = [`Transferring — ${percent}%`, `${transferred.toLocaleString()}/${total.toLocaleString()} files`];
+    if (bytesDone && bytesTotal) parts.push(`${bytesDone}/${bytesTotal}`);
+    if (eta) parts.push(`ETA ${eta}`);
+    return parts.join(" · ");
+  }
+  if (["syncing", "publishing"].includes(syncStateValue) && phase === "finalizing") return "Finalizing folder backup";
   const live = text(status.sync_state?.last_progress, "");
   if (live) return live;
-  const syncStateValue = syncState(status);
   const backoff = Number(status.sync_state?.backoff_remaining_seconds ?? 0);
   if (syncStateValue === "backoff" && backoff > 0) return `Retrying in ${Math.ceil(backoff)}s`;
   const cooldown = Number(status.sync_state?.cooldown_remaining_seconds ?? 0);

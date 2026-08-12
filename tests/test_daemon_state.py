@@ -37,6 +37,7 @@ from safe_sync.cli import (
     run_backup_with_config,
     cmd_login_check,
     preflight,
+    parse_backup_progress_line,
     parser,
     selected_folders,
     status_health,
@@ -739,6 +740,46 @@ def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
 
     assert "--max-duration" not in backup_cmd(config, dry_run=False)
     assert "--max-duration" not in copy_cmd(config, "dropbox:source", str(tmp_path), dry_run=False)
+
+
+def test_backup_progress_uses_stable_check_first_totals(tmp_path):
+    config = {
+        "rclone_bin": "rclone",
+        "local_path": str(tmp_path),
+        "remote_root": "dropbox:computer-backups/test/machine/folder",
+        "trash_root": "dropbox:computer-backups/test/.trash/machine/folder",
+        "filter_file": str(tmp_path / "filter.txt"),
+    }
+
+    assert "--check-first" in backup_cmd(config, dry_run=False)
+    assert parse_backup_progress_line("Checks: 7,995 / 7,995, 100%, Listed 20,693") == {
+        "sync_phase": "scanning",
+        "checks_completed": 7995,
+        "checks_total": 7995,
+        "listed_entries": 20693,
+    }
+    assert parse_backup_progress_line("Transferred: 95 / 111, 86%") == {
+        "sync_phase": "transferring",
+        "progress_percent": 86,
+        "transferred_files": 95,
+        "total_transfer_files": 111,
+    }
+    assert parse_backup_progress_line("Transferred: 902.884 KiB / 903.266 KiB, 100%, 9.860 KiB/s, ETA 0s") == {
+        "transferred_bytes_display": "902.884 KiB",
+        "total_bytes_display": "903.266 KiB",
+        "transfer_bytes_percent": 100,
+        "transfer_speed": "9.860 KiB/s",
+        "eta": "0s",
+    }
+
+
+def test_status_ui_labels_backup_progress_phases():
+    main = (Path(__file__).parents[1] / "ui/src/main.ts").read_text()
+
+    assert 'phase === "scanning"' in main
+    assert 'phase === "transferring"' in main
+    assert 'phase === "finalizing"' in main
+    assert 'Transferring — ${percent}%' in main
 
 
 def test_copy_command_limits_a_transfer_to_selected_files_and_folders(tmp_path):

@@ -813,6 +813,10 @@ def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None =
         *filter_args(config),
         "--backup-dir", trash,
         "--create-empty-src-dirs",
+        # Finish the comparison before uploading so rclone's transfer totals
+        # are stable. This lets the UI show an honest completion percentage
+        # instead of a denominator that grows while the tree is discovered.
+        "--check-first",
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
         # Keep high-level retries at one because rclone's combined report is
@@ -1634,12 +1638,65 @@ def summarize_progress_line(line: str) -> str | None:
     cleaned = line.strip()
     if not cleaned:
         return None
-    if "Transferred:" in cleaned or "Checks:" in cleaned or "Elapsed time:" in cleaned or "Transferring:" in cleaned:
+    if "Transferred:" in cleaned or "Checks:" in cleaned or "Elapsed time:" in cleaned:
         return cleaned
     if ": Copied" in cleaned or ": Deleted" in cleaned or ": Updated" in cleaned:
         _, detail = cleaned.split("INFO  :", 1) if "INFO  :" in cleaned else ("", cleaned)
         return detail.strip()
     return None
+
+
+def parse_backup_progress_line(line: str) -> dict[str, Any]:
+    """Translate rclone stats into stable, UI-safe backup progress fields."""
+    cleaned = line.strip()
+    updates: dict[str, Any] = {}
+
+    checks = re.search(r"Checks:\s+([\d,]+)\s*/\s*([\d,]+),\s*(\d+)%", cleaned)
+    if checks:
+        updates.update({
+            "sync_phase": "scanning",
+            "checks_completed": int(checks.group(1).replace(",", "")),
+            "checks_total": int(checks.group(2).replace(",", "")),
+        })
+        listed = re.search(r"Listed\s+([\d,]+)", cleaned)
+        if listed:
+            updates["listed_entries"] = int(listed.group(1).replace(",", ""))
+        return updates
+
+    transferred = re.search(r"Transferred:\s+(.+?)\s*/\s*(.+?),\s*(\d+)%", cleaned)
+    if transferred:
+        completed = transferred.group(1).strip()
+        total = transferred.group(2).strip()
+        percent = int(transferred.group(3))
+        if completed.replace(",", "").isdigit() and total.replace(",", "").isdigit():
+            total_files = int(total.replace(",", ""))
+            updates.update({
+                "transferred_files": int(completed.replace(",", "")),
+                "total_transfer_files": total_files,
+            })
+            if total_files > 0:
+                updates.update({
+                    "sync_phase": "transferring",
+                    "progress_percent": percent,
+                })
+        else:
+            updates.update({
+                "transferred_bytes_display": completed,
+                "total_bytes_display": total,
+                "transfer_bytes_percent": percent,
+            })
+            speed = re.search(r",\s*([^,]+/s)(?:,|$)", cleaned)
+            eta = re.search(r"ETA\s+(.+)$", cleaned)
+            if speed:
+                updates["transfer_speed"] = speed.group(1).strip()
+            if eta:
+                updates["eta"] = eta.group(1).strip()
+        return updates
+
+    elapsed = re.search(r"Elapsed time:\s+(.+)$", cleaned)
+    if elapsed:
+        updates["elapsed"] = elapsed.group(1).strip()
+    return updates
 
 
 def current_file_from_progress(progress: str | None) -> str | None:
@@ -1785,7 +1842,21 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             pending_folders=pending_ids,
             completed_folders=completed_this_run,
             retry_cycle=bool(resumed),
-            last_progress="Resuming change publication" if item["stage"] == "generation" else "Starting folder sync",
+            sync_phase="finalizing" if item["stage"] == "generation" else "scanning",
+            progress_percent=None,
+            transferred_files=None,
+            total_transfer_files=None,
+            transferred_bytes_display=None,
+            total_bytes_display=None,
+            transfer_bytes_percent=None,
+            transfer_speed=None,
+            eta=None,
+            checks_completed=None,
+            checks_total=None,
+            listed_entries=None,
+            elapsed=None,
+            current_file=None,
+            last_progress="Resuming change publication" if item["stage"] == "generation" else "Scanning and comparing",
         )
 
         if item["stage"] == "generation":
@@ -1838,7 +1909,8 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
 
         def on_progress(line: str) -> None:
             summary = summarize_progress_line(line)
-            if summary:
+            structured = parse_backup_progress_line(line)
+            if summary or structured:
                 current_file = current_file_from_progress(summary)
                 publish_runtime_status(
                     api_state,
@@ -1849,8 +1921,9 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     current_folder_total=total_folders,
                     current_folder_label=folder.get("label", folder["id"]),
                     local_path=str(Path(folder["local_path"]).expanduser()),
-                    last_progress=summary,
-                    current_file=current_file,
+                    **structured,
+                    last_progress=summary if summary else api_state.snapshot().get("last_progress"),
+                    current_file=current_file if current_file else api_state.snapshot().get("current_file"),
                     _activity_event=summary if current_file else None,
                 )
         try:
@@ -2022,6 +2095,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
         if not dry_run:
             item["stage"] = "generation"
             save_backup_queue(config, queue)
+            publish_runtime_status(
+                api_state,
+                config,
+                state="publishing",
+                sync_phase="finalizing",
+                progress_percent=100,
+                current_file=None,
+                last_progress="Finalizing folder backup",
+            )
             publication_code = publish_generation(
                 folder_cfg,
                 operation_id=operation_id,
@@ -2995,7 +3077,20 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     backoff_seconds=backoff_seconds,
                 )
                 if code == 0:
-                    publish_runtime_status(api_state, config, state="watching", last_success=now_iso(), last_finish=now_iso(), last_error=None, last_warning=None, queued_backup=False)
+                    publish_runtime_status(
+                        api_state,
+                        config,
+                        state="watching",
+                        sync_phase="complete",
+                        progress_percent=100,
+                        current_file=None,
+                        last_progress="Backup cycle complete",
+                        last_success=now_iso(),
+                        last_finish=now_iso(),
+                        last_error=None,
+                        last_warning=None,
+                        queued_backup=False,
+                    )
                 elif rate_limited:
                     manual_backup_pending = manual_backup_pending or manual_run
                     publish_runtime_status(

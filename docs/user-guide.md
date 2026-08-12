@@ -146,6 +146,13 @@ In the desktop app:
 - Open Logs opens the current log location.
 - Settings manages local folders, profiles, and timing controls.
 
+Backup progress has three honest phases. `Scanning and comparing` discovers
+the complete change set and intentionally has no percentage. `Transferring`
+then shows a stable file percentage, file/byte totals, and an approximate ETA.
+`Finalizing` publishes the backup's change record. The folder position, such
+as `3/5`, describes which configured folder is active; it is separate from the
+percentage within that folder.
+
 From a terminal:
 
 ```bash
