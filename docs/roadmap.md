@@ -25,6 +25,19 @@ separate future path for allowlisted durable recovery events.
 
 ## Open Issues
 
+### Immediate next-fix order
+
+1. `PERF-001` is the first implementation gate: make the worst-case
+   many-small-file Dropbox path safe, measurable, retryable, and practically
+   fast. Its implementation includes the literal provider-throttle classifier
+   and depends on the `LOG-001` diagnostic cap/protected audit capacity so the
+   performance test remains observable.
+2. Close the live `PROGRESS-001` failed-file denominator edge case and implement
+   the `PROGRESS-002` exact whole-profile summary in the same status pass.
+3. Reinstall, clean only the disposable active-machine namespace, and repeat
+   Stage 1 with an explicit tiny-file-heavy acceptance fixture before advancing
+   to recovery or multi-machine workflows.
+
 ### GEN-001: Retry generation publication without aborting the backup set
 
 **Priority:** critical; fix before resuming Stage 1 dogfooding or trusting a
@@ -232,9 +245,9 @@ folder-completion summary proves insufficient during dogfooding.
 
 ### PERF-001: Make Dropbox small-file backups practical
 
-**Priority:** investigate and tune before treating the current Stage 1 large
-folder baseline as a performance pass; do not interrupt the active run merely
-to deploy an unmeasured flag change.
+**Priority:** critical and first to implement before the next clean Stage 1
+run. Continue observing the active run, but do not interrupt it merely to deploy
+an unmeasured flag change.
 
 The clean `tools` run demonstrates a pathological but realistic developer-tree
 case. The exact filter policy admits 10,082 files / 2.367 GB, including 6,410
