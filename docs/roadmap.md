@@ -115,6 +115,16 @@ diagnostic budget while a remote operation remains active and proves lifecycle,
 failure, and per-path audit evidence is retained even when diagnostic detail is
 dropped.
 
+**Fresh confirmation on 2026-08-12:** timed Debug launched the active rclone
+child at DEBUG and, in roughly ten minutes of the `tools` run, filled the 64 MiB
+journal, created 14 new gaps, and emitted repeated `logging.events_dropped`
+warnings while all 63 segments remained pending behind the active backup.
+When timed Debug expired the effective journal level returned to Normal, but
+the already-running child continued writing DEBUG output because its command
+line cannot change in place. The fix must cap/sample rclone diagnostics per
+operation and ensure a temporary diagnostic level cannot continue producing an
+unbounded raw child stream after expiry.
+
 ### STATUS-001: Clear expired backoff warnings after retry resumes
 
 **Priority:** fix after the current Stage 1 dogfood review and before Stage 2
@@ -193,6 +203,62 @@ existing comparison rather than adding a second pre-scan. The tradeoff is that
 the first upload starts later and rclone retains the transfer backlog in
 memory; verify that behavior with the current disposable five-folder profile
 before considering larger production trees.
+
+**Live edge case:** the clean `tools` retry began with a complete comparison
+set of 5,767 files, but Dropbox rejected three batch commits with
+`too_many_write_operations` and rclone subsequently reported 5,764 as the
+denominator. Preserve the comparison-phase total independently from rclone's
+mutable post-error stats, and show failed/retry-pending files separately so a
+provider error cannot make total work appear to shrink.
+
+### PROGRESS-002: Show exact whole-profile backup-cycle progress
+
+**Priority:** implement in the next UI/status pass after the current clean
+Stage 1 run; do not interrupt the active backup to deploy it.
+
+The current stable file percentage is intentionally scoped to the active
+folder, but the Status view does not say that clearly enough. Add a separate
+whole-profile summary such as `2/5 folders complete · 1 active · 2 waiting`,
+derived from the durable queue so it remains accurate across cooldowns,
+temporary failures, and daemon restarts. Relabel the existing percentage as
+`Current folder progress` and keep the current folder name/position visible.
+
+Do not manufacture a combined file percentage by weighting folders equally or
+by using totals discovered so far. A reliable all-folder file/byte percentage
+would require comparing every pending folder before transfers begin (or
+persisting an equivalent complete plan), which adds startup delay, memory, and
+Dropbox API work. Treat that as a separate design decision only if the exact
+folder-completion summary proves insufficient during dogfooding.
+
+### PERF-001: Make Dropbox small-file backups practical
+
+**Priority:** investigate and tune before treating the current Stage 1 large
+folder baseline as a performance pass; do not interrupt the active run merely
+to deploy an unmeasured flag change.
+
+The clean `tools` run demonstrates a pathological but realistic developer-tree
+case. The exact filter policy admits 10,082 files / 2.367 GB, including 6,410
+files at or below 4 KiB and 2,037 more at or below 64 KiB. Nearly all content is
+the Flutter SDK: `flutter/packages` (3,568 files), `flutter/dev` (2,909),
+`flutter/bin` (1,998 files / 2.295 GB), and `flutter/examples` (1,528). A live
+45-second window advanced about 57 files but only 242 KiB (roughly 1.2 files/s
+and 5-7 KiB/s).
+
+Dropbox is the demonstrated bottleneck rather than local CPU: rclone repeatedly
+receives `too_many_write_operations`, its pacer rises as high as two seconds,
+and batch commits have failed individual files that the durable queue must
+retry. Rclone's Dropbox documentation recommends batch uploads and specifically
+notes larger batches/transfers for many small files, but Safe Sync currently
+uses rclone's defaults. Before changing production defaults, run an isolated
+real-Dropbox A/B fixture with representative tiny files comparing current
+settings against explicit synchronous batch size/transfer concurrency, measure
+files/s, bytes/s, throttles, retry correctness, memory, and final hashes, then
+choose conservative provider-specific settings.
+
+Also separate backup policy from transport tuning. Regenerable SDK caches such
+as `flutter/bin/cache` may be appropriate user-selected exclusions, but Safe
+Sync must not silently exclude an arbitrary tracked tree. Offer documented
+ignore presets or a preflight warning for cache/vendor-heavy roots instead.
 
 ### REMOTE-001: Optional remote backup purge
 
