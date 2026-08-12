@@ -752,14 +752,26 @@ def test_backup_progress_uses_stable_check_first_totals(tmp_path):
     }
 
     assert "--check-first" in backup_cmd(config, dry_run=False)
+    assert parse_backup_progress_line(
+        "Dropbox root 'backup': Running all checks before starting transfers"
+    ) == {"sync_phase": "scanning"}
+    assert parse_backup_progress_line(
+        "Dropbox root 'backup': Checks finished, now starting transfers"
+    ) == {
+        "sync_phase": "transferring",
+        "progress_percent": None,
+        "transferred_files": None,
+        "total_transfer_files": None,
+        "transferred_bytes_display": None,
+        "total_bytes_display": None,
+        "eta": None,
+    }
     assert parse_backup_progress_line("Checks: 7,995 / 7,995, 100%, Listed 20,693") == {
-        "sync_phase": "scanning",
         "checks_completed": 7995,
         "checks_total": 7995,
         "listed_entries": 20693,
     }
     assert parse_backup_progress_line("Transferred: 95 / 111, 86%") == {
-        "sync_phase": "transferring",
         "progress_percent": 86,
         "transferred_files": 95,
         "total_transfer_files": 111,

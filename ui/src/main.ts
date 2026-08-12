@@ -307,6 +307,7 @@ function progressSummary(status: SafeSyncStatus): string {
     const bytesDone = text(status.sync_state?.transferred_bytes_display, "");
     const bytesTotal = text(status.sync_state?.total_bytes_display, "");
     const eta = text(status.sync_state?.eta, "");
+    if (total <= 0) return "Transferring — preparing stable totals";
     const parts = [`Transferring — ${percent}%`, `${transferred.toLocaleString()}/${total.toLocaleString()} files`];
     if (bytesDone && bytesTotal) parts.push(`${bytesDone}/${bytesTotal}`);
     if (eta) parts.push(`ETA ${eta}`);

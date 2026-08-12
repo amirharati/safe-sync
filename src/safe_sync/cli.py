@@ -1651,10 +1651,25 @@ def parse_backup_progress_line(line: str) -> dict[str, Any]:
     cleaned = line.strip()
     updates: dict[str, Any] = {}
 
+    # With --check-first rclone still prints provisional transfer counters
+    # during traversal. Only this explicit message marks the point at which
+    # their denominator is complete and safe to present as a percentage.
+    if "Checks finished, now starting transfers" in cleaned:
+        return {
+            "sync_phase": "transferring",
+            "progress_percent": None,
+            "transferred_files": None,
+            "total_transfer_files": None,
+            "transferred_bytes_display": None,
+            "total_bytes_display": None,
+            "eta": None,
+        }
+    if "Running all checks before starting transfers" in cleaned:
+        return {"sync_phase": "scanning"}
+
     checks = re.search(r"Checks:\s+([\d,]+)\s*/\s*([\d,]+),\s*(\d+)%", cleaned)
     if checks:
         updates.update({
-            "sync_phase": "scanning",
             "checks_completed": int(checks.group(1).replace(",", "")),
             "checks_total": int(checks.group(2).replace(",", "")),
         })
@@ -1675,10 +1690,7 @@ def parse_backup_progress_line(line: str) -> dict[str, Any]:
                 "total_transfer_files": total_files,
             })
             if total_files > 0:
-                updates.update({
-                    "sync_phase": "transferring",
-                    "progress_percent": percent,
-                })
+                updates["progress_percent"] = percent
         else:
             updates.update({
                 "transferred_bytes_display": completed,
