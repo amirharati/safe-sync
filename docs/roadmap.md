@@ -109,12 +109,14 @@ Implemented behavior:
 
 **Priority:** fix before another long Debug/Trace dogfood run.
 
-**Status:** first containment pass implemented in source on 2026-08-12; pending
-live verification. Debug now keeps rclone at INFO while retaining Safe Sync's
+**Status:** first containment pass implemented and installed on 2026-08-12.
+Debug now keeps rclone at INFO while retaining Safe Sync's
 own detailed events. Raw rclone DEBUG is reserved for Trace, and every rclone
 operation caps repetitive raw lines at 2,000 while retaining errors, warnings,
 provider failures, phase changes, and aggregate stats, followed by an explicit
-suppression summary. A later hardening pass must still give audit events
+suppression summary. During the initial resumed `tools` soak, journal sequence,
+size, and gap count remained unchanged while per-file INFO progress continued
+in the UI. A later hardening pass must still give audit events
 physically protected capacity independent of diagnostics and add the full
 budget-exhaustion retention test below.
 
@@ -230,22 +232,25 @@ denominator. Preserve the comparison-phase total independently from rclone's
 mutable post-error stats, and show failed/retry-pending files separately so a
 provider error cannot make total work appear to shrink.
 
-**Source update on 2026-08-12:** implemented a stateful progress tracker that
+**Installed update on 2026-08-12:** implemented a stateful progress tracker that
 freezes the comparison-phase file and byte plan, recomputes percentages against
 that plan, and counts unique failed paths separately. Regression coverage
-replays the observed 5,767-to-5,764 denominator shrink. Pending installed live
-verification during the resumed `tools` run.
+replays the observed 5,767-to-5,764 denominator shrink. The resumed `tools` run
+completed comparison at 2,026 remaining files / 1.083 GiB and kept that plan
+fixed through the initial transfer sample with zero failed files.
 
 ### PROGRESS-002: Show exact whole-profile backup-cycle progress
 
 **Priority:** implement in the next UI/status pass after the current clean
 Stage 1 run; do not interrupt the active backup to deploy it.
 
-**Status:** implemented in source on 2026-08-12; pending installed live
-verification. Status now labels the per-file row `Current folder progress` and
+**Status:** implemented and installed on 2026-08-12. Status now labels the
+per-file row `Current folder progress` and
 adds an `Overall backup` row derived from the durable pending queue, displaying
 completed, active, and waiting folder counts. Successful cycle completion also
-persists an empty pending set and the complete configured-folder ID set.
+persists an empty pending set and the complete configured-folder ID set. The
+preserved three-item queue rendered as `2/5 complete · 1 active · 2 waiting`
+after restart while `tools (3/5)` remained the named current folder.
 
 The current stable file percentage is intentionally scoped to the active
 folder, but the Status view does not say that clearly enough. Add a separate
@@ -267,8 +272,8 @@ folder-completion summary proves insufficient during dogfooding.
 run. Continue observing the active run, but do not interrupt it merely to deploy
 an unmeasured flag change.
 
-**Status:** experimental direct-mirror tuning implemented in source on
-2026-08-12; pending installed measurement. Backup commands now explicitly use
+**Status:** experimental direct-mirror tuning implemented and installed on
+2026-08-12. Backup commands now explicitly use
 Dropbox's integrity-checked synchronous batch mode with batch size 32, a five-
 second batch dwell, and 32 transfers. Async batching remains prohibited. The
 literal `too_many_write_operations` response is classified directly as a
@@ -276,6 +281,14 @@ provider cooldown, and regression coverage verifies the command and retry
 classification. The first comparison will resume the existing partial remote
 to isolate throughput; clean-fixture hash verification remains required before
 closing this issue.
+
+Initial resumed measurement is promising but not yet the clean acceptance
+result. The old run sampled about 1.2 files/s. After reinstall, the same partial
+`tools` remote reached 518/2,026 remaining files in 3m30s including comparison;
+the latest one-minute interval completed 284 files (about 4.7 files/s) at
+2.41 MiB/s with no failed files, warning, or error. Continue the run and retain
+the later clean-fixture/hash gate before choosing these values as production
+defaults.
 
 The clean `tools` run demonstrates a pathological but realistic developer-tree
 case. The exact filter policy admits 10,082 files / 2.367 GB, including 6,410
