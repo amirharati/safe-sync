@@ -30,8 +30,10 @@ separate future path for allowlisted durable recovery events.
 **Priority:** critical; fix before resuming Stage 1 dogfooding or trusting a
 multi-folder backup.
 
-**Status:** implemented on 2026-08-12; automated regression coverage passes.
-Awaiting verification during the next clean one-profile dogfood run.
+**Status:** implemented and installed on 2026-08-12; automated regression
+coverage passes. The clean one-profile dogfood rerun is active and has already
+completed its first folder while preserving the remaining four in the durable
+queue during a real Dropbox throttle.
 
 **Observed during the clean one-profile restart on 2026-08-10:** the `dist`
 payload sync exited successfully with zero remaining changes. Safe Sync then
@@ -118,8 +120,10 @@ dropped.
 **Priority:** fix after the current Stage 1 dogfood review and before Stage 2
 recovery dogfooding; do not interrupt the active backup to deploy it.
 
-**Status:** implemented on 2026-08-12; pending installation after the active
-clean baseline completes.
+**Status:** implemented and installed on 2026-08-12. The new clean run reports
+an actual active Dropbox backoff after folder 1 without retaining any prior-run
+warning; verify the corresponding clear-on-resume behavior when the retry
+begins.
 
 **Observed during one-profile dogfood on 2026-08-09:** the Status view showed
 `Dropbox rate limited ... cooling down for 300s` while the daemon was actively
@@ -144,7 +148,9 @@ warning text cannot override an actively healthy sync/transfer/publication.
 **Priority:** fix after the current basic one-profile logging dogfood review,
 when the owner returns from travel.
 
-**Status:** implemented on 2026-08-12; pending installation and visual review.
+**Status:** implemented and installed on 2026-08-12. Live status reports all
+five configured folders separately from the active folder position; final
+visual review remains with the owner.
 
 The Status view's former singular `Folder` row displayed only the daemon's
 current or most recently processed folder. While idle it can therefore show
@@ -166,8 +172,9 @@ the confirmed active configuration contains all five enabled folders.
 
 **Priority:** fix before restarting the clean Stage 1 dogfood baseline.
 
-**Status:** implemented on 2026-08-12; automated regression coverage passes.
-Awaiting verification during the clean reinstall.
+**Status:** implemented and installed on 2026-08-12; automated regression
+coverage passes. Clean live verification observed the explicit comparison
+completion marker, then a fixed 13/13 transfer and finalization for folder 1.
 
 The former Status projection showed whichever raw rclone line arrived last.
 Its discovered-so-far totals changed during traversal, a bare `Transferring:`
