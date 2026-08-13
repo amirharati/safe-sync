@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -244,6 +245,7 @@ def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_pa
     monkeypatch.setattr(cli, "run_command", fake_run)
     monkeypatch.setattr(cli, "publish_generation", fake_publish)
     monkeypatch.setattr(cli, "update_registry", lambda _config: 0)
+    monkeypatch.setattr(cli, "replicate_event_journal", lambda _config: {})
     monkeypatch.setattr(cli, "record_event", lambda *_args, **_kwargs: None)
     api_state = DaemonApiState()
 
@@ -309,6 +311,7 @@ def test_runtime_generation_failure_continues_and_retries_without_payload(tmp_pa
     monkeypatch.setattr(cli, "run_command", fake_run)
     monkeypatch.setattr(cli, "publish_generation", fake_publish)
     monkeypatch.setattr(cli, "update_registry", lambda _config: 0)
+    monkeypatch.setattr(cli, "replicate_event_journal", lambda _config: {})
     monkeypatch.setattr(cli, "record_event", lambda *_args, **_kwargs: None)
     api_state = DaemonApiState()
 
@@ -324,6 +327,62 @@ def test_runtime_generation_failure_continues_and_retries_without_payload(tmp_pa
         "later",
         "metadata-flaky",
     ]
+
+
+def test_runtime_recovers_interrupted_report_before_convergence_retry(tmp_path, monkeypatch):
+    local = tmp_path / "watched"
+    local.mkdir()
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = cli.default_config("test-machine")
+    folder = {
+        "id": "watched",
+        "label": "watched",
+        "local_path": str(local),
+        "remote_path": "test-machine/watched",
+        "trash_path": ".trash/test-machine/watched",
+        "remote_root": "dropbox:computer-backups/test/test-machine/watched",
+        "trash_root": "dropbox:computer-backups/test/.trash/test-machine/watched",
+        "filter_file": str(filter_path),
+        "enabled": True,
+    }
+    config["profiles"][0]["folders"] = [folder]
+    config["profiles"][0]["filter_file"] = str(filter_path)
+    config["state_root"] = str(tmp_path / "state")
+    config["status_path"] = str(tmp_path / "state/status.json")
+    config = cli.normalized_config(config)
+
+    interrupted_report = tmp_path / "interrupted.combined"
+    interrupted_report.write_text("+ created-before-restart.txt\n")
+    queue = cli._new_backup_queue(config, [folder])
+    queue["items"][0]["attempt"] = {
+        "operation_id": "backup_interrupted",
+        "report_path": str(interrupted_report),
+        "started_at": cli.now_iso(),
+        "status": "running",
+    }
+    cli.save_backup_queue(config, queue)
+    published = []
+
+    def converged_run(_config, command, **_kwargs):
+        Path(command[command.index("--combined") + 1]).write_text("= created-before-restart.txt\n")
+        cli.LAST_COMMAND_OUTPUT = ""
+        return 0
+
+    def publish(_folder_config, _report=None, *, operation_id=None, changes=None):
+        published.append(list(changes or []))
+        return 0
+
+    monkeypatch.setattr(cli, "preflight", lambda _config: None)
+    monkeypatch.setattr(cli, "run_command", converged_run)
+    monkeypatch.setattr(cli, "publish_generation", publish)
+    monkeypatch.setattr(cli, "update_registry", lambda _config: 0)
+    monkeypatch.setattr(cli, "replicate_event_journal", lambda _config: {})
+    monkeypatch.setattr(cli, "record_event", lambda *_args, **_kwargs: None)
+
+    assert cli.run_all_backups_runtime(config, False, DaemonApiState()) == (0, None)
+    assert published == [[{"path": "created-before-restart.txt", "operation": "added"}]]
+    assert not cli.backup_queue_path(config).exists()
 
 
 def test_status_health_reports_rate_limit_as_warning():
@@ -753,6 +812,51 @@ def test_transfer_commands_do_not_set_a_whole_upload_deadline(tmp_path):
     assert "--max-duration" not in copy_cmd(config, "dropbox:source", str(tmp_path), dry_run=False)
 
 
+def test_progress_command_tracks_and_clears_exact_child_metadata(tmp_path):
+    config = default_config("test-machine")
+    config["state_root"] = str(tmp_path / "state")
+    config = normalized_config(config)
+
+    assert run_command(
+        config,
+        [sys.executable, "-c", "print('progress')"],
+        progress_callback=lambda _line: None,
+    ) == 0
+    assert not cli.active_child_path(config).exists()
+
+
+def test_startup_reconciliation_stops_only_recorded_exact_child(tmp_path, monkeypatch):
+    config = default_config("test-machine")
+    config["state_root"] = str(tmp_path / "state")
+    config["rclone_bin"] = sys.executable
+    config = normalized_config(config)
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    process = subprocess.Popen(command, start_new_session=True)
+    ps_calls = 0
+
+    def fake_ps(arguments, **_kwargs):
+        nonlocal ps_calls
+        assert arguments[0] == "ps"
+        ps_calls += 1
+        if "command=" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, " ".join(command))
+        return subprocess.CompletedProcess(arguments, 1, "")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_ps)
+    try:
+        cli._write_active_child(config, process, command)
+        result = cli.reconcile_orphan_child(config)
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert result and result["status"] == "orphan_stopped"
+    assert ps_calls == 2
+    assert not cli.active_child_path(config).exists()
+
+
 def test_backup_progress_uses_stable_check_first_totals(tmp_path):
     config = {
         "rclone_bin": "rclone",
@@ -767,7 +871,9 @@ def test_backup_progress_uses_stable_check_first_totals(tmp_path):
     assert command[command.index("--dropbox-batch-mode") + 1] == "sync"
     assert command[command.index("--dropbox-batch-size") + 1] == "32"
     assert command[command.index("--dropbox-batch-timeout") + 1] == "5s"
-    assert command[command.index("--transfers") + 1] == "32"
+    assert command[command.index("--transfers") + 1] == "8"
+    retry_command = backup_cmd({**config, "_backup_attempt": 2}, dry_run=False)
+    assert retry_command[retry_command.index("--transfers") + 1] == "4"
     assert parse_backup_progress_line(
         "Dropbox root 'backup': Running all checks before starting transfers"
     ) == {"sync_phase": "scanning"}

@@ -27,14 +27,14 @@ separate future path for allowlisted durable recovery events.
 
 ### Immediate next-fix order
 
-1. Close `GEN-002`: reconcile a completed payload/report after daemon
-   interruption before declaring the folder complete or skipping its generation.
-2. Close the remaining `LOG-001` audit-capacity and cloud-manifest race gaps so
-   a long backup cannot erase the evidence needed to review it.
-3. Keep `PERF-001` experimental: run the clean tiny-file/hash acceptance matrix
-   and retune synchronous batching because the largest folder still spent hours
-   under Dropbox throttling. Do not advance to recovery or multi-machine work
-   until the Stage 1 audit is complete.
+1. Reinstall the `GEN-002`/`LOG-001` repair build and rerun the clean Stage 1
+   fixture from an empty machine-owned remote namespace.
+2. Execute the targeted SIGTERM/SIGKILL interruption cases and verify report
+   recovery, exact-child cleanup, generation publication, and complete audit
+   evidence before closing either issue.
+3. Keep `PERF-001` experimental: compare the new conservative 8-transfer
+   baseline and adaptive 4-transfer retry against the prior throttled run. Do
+   not advance to recovery or multi-machine work until the Stage 1 audit passes.
 
 ### GEN-001: Retry generation publication without aborting the backup set
 
@@ -111,6 +111,15 @@ Implemented behavior:
 **Priority:** critical; fix before Stage 2 recovery or any linked-folder test
 that depends on complete generation history.
 
+**Status:** implemented on 2026-08-13; automated interruption-boundary
+regression coverage passes. Each daemon attempt now persists its operation and
+combined-report identity before rclone starts, atomically commits the report
+hash/counts/net changes and successful generation stage before audit expansion,
+and recovers an unfinished report before the next convergence retry. Rclone
+runs in a tracked process group; graceful shutdown terminates that exact group,
+and startup verifies/stops a recorded orphan before starting new work. The
+clean real-provider interruption matrix remains required before closure.
+
 **Observed during the overnight Stage 1 run on 2026-08-12:** the initial
 `workbench_agent2-history-safe` rclone process completed at 21:36:03 after a
 2h27m provider-throttled upload. Its persisted combined report contains 14,964
@@ -159,6 +168,16 @@ size, and gap count remained unchanged while per-file INFO progress continued
 in the UI. A later hardening pass must still give audit events
 physically protected capacity independent of diagnostics and add the full
 budget-exhaustion retention test below.
+
+**Repair implemented on 2026-08-13:** unreplicated diagnostics now stop before
+the final quarter of journal slots, reserving that physical capacity for audit
+events. Backup results are recorded as a hashed report summary plus bounded
+250-path/256-KiB batches instead of one full event per path. The daemon attempts
+verified replication between completed folders. Cloud publication is serialized
+with a process-safe lock and now writes a verified content-addressed immutable
+manifest followed by a verified latest pointer, eliminating the temporary-file
+`moveto` race. Automated capacity, batching, and publication tests pass; repeat
+the long offline/throttled real-provider test before closing the issue.
 
 **Overnight result on 2026-08-13:** the cap worked for `tools` (2,744 repetitive
 lines suppressed), but the 16,592 retained `backup.path_result` events plus
@@ -325,10 +344,11 @@ run. Continue observing the active run, but do not interrupt it merely to deploy
 an unmeasured flag change.
 
 **Status:** experimental direct-mirror tuning implemented and installed on
-2026-08-12. Backup commands now explicitly use
-Dropbox's integrity-checked synchronous batch mode with batch size 32, a five-
-second batch dwell, and 32 transfers. Async batching remains prohibited. The
-literal `too_many_write_operations` response is classified directly as a
+2026-08-12 and revised for the next clean run on 2026-08-13. Backup commands
+now explicitly use Dropbox's integrity-checked synchronous batch mode with
+batch size 32, a five-second batch dwell, and a conservative 8 transfers
+(reduced to 4 on a retry). Async batching remains prohibited. The literal
+`too_many_write_operations` response is classified directly as a
 provider cooldown, and regression coverage verifies the command and retry
 classification. The first comparison will resume the existing partial remote
 to isolate throughput; clean-fixture hash verification remains required before

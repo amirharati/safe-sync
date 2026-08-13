@@ -285,6 +285,7 @@ class EventJournal:
             "slot_count": self.settings.slot_count,
             "segments": {},
             "gaps": [],
+            "diagnostics_suppressed": 0,
             "replication": {
                 "last_success_at": None,
                 "last_error": None,
@@ -541,6 +542,28 @@ class EventJournal:
             cursor = self._recover_intent(self._read_cursor())
             initial_gap_count = len(cursor["gaps"])
             active_data = self._complete_lines(self.active_path.read_bytes() if self.active_path.exists() else b"")
+            pending_bytes = len(active_data) + sum(
+                int(item.get("bytes", 0))
+                for item in cursor["segments"].values()
+                if not item.get("replicated", False)
+            )
+            audit_reserve = max(self.settings.segment_bytes, self.settings.max_local_bytes // 4)
+            pending_slots = sum(
+                1 for item in cursor["segments"].values() if not item.get("replicated", False)
+            ) + (1 if active_data else 0)
+            audit_reserve_slots = max(1, (self.settings.slot_count + 3) // 4)
+            diagnostic_slot_limit = max(1, self.settings.slot_count - audit_reserve_slots)
+            if channel == "diagnostic" and (
+                pending_bytes >= self.settings.max_local_bytes - audit_reserve
+                or pending_slots >= diagnostic_slot_limit
+            ):
+                # Persist the transition once, then drop without a cursor
+                # rewrite per raw line. The next audit event remains free to
+                # consume the physically reserved slots.
+                if not int(cursor.get("diagnostics_suppressed", 0)):
+                    cursor["diagnostics_suppressed"] = 1
+                    self._save_cursor(cursor)
+                return None
             try:
                 active_events = self._parse_events(active_data)
             except (ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -757,6 +780,8 @@ class EventJournal:
                 "oldest_sequence": int(segments[0]["start_sequence"]) if segments else None,
                 "newest_sequence": int(cursor["next_sequence"]) - 1,
                 "pending_cloud_segments": len(pending),
+                "diagnostics_suppressed": int(cursor.get("diagnostics_suppressed", 0)),
+                "audit_reserve_bytes": max(self.settings.segment_bytes, self.settings.max_local_bytes // 4),
                 "gaps": list(cursor["gaps"]),
                 "history_complete": not bool(cursor["gaps"]),
                 "history_gap_count": len(cursor["gaps"]),

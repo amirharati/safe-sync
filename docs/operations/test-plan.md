@@ -63,6 +63,13 @@ cloud replication caught up, and cloud-manifest publication transiently failed
 three times before recovering. Track these as `GEN-002` and `LOG-001`; fix and
 repeat the targeted interruption/audit acceptance checks before Stage 2.
 
+The repair build was implemented on 2026-08-13 and passes 126 backend tests.
+The clean rerun must prove that an interruption after payload completion still
+publishes the recovered generation, no stale/orphan rclone overlaps the next
+worker, diagnostic pressure preserves the audit reserve, between-folder cloud
+flushes finish with a verified content-addressed manifest pointer, and the
+8-transfer baseline/4-transfer retry materially reduces Dropbox throttling.
+
 ### Stage 2: Recovery on one profile/computer
 
 Remain on the same computer/profile. Exercise selected-version history and the

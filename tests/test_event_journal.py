@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import safe_sync.cli as cli
 from safe_sync.event_journal import EventJournal, JournalError, JournalSettings, redact, settings_from_config
 from safe_sync.cli import cmd_logs, default_config, normalized_config, parser, record_event, replicate_event_journal, run_command
 
@@ -157,7 +158,7 @@ def test_query_filters_folder_event_and_limit(tmp_path: Path) -> None:
 def test_historical_gaps_do_not_report_current_logging_failure(tmp_path: Path) -> None:
     value = journal(tmp_path, max_bytes=3072, segment_bytes=1024)
     for index in range(100):
-        value.emit("diagnostic.sample", component="test", channel="diagnostic", data={"index": index, "detail": "x" * 160})
+        value.emit("backup.sample", component="test", channel="audit", data={"index": index, "detail": "x" * 160})
     value.seal_active()
 
     status = value.status()
@@ -166,6 +167,24 @@ def test_historical_gaps_do_not_report_current_logging_failure(tmp_path: Path) -
     assert status["history_complete"] is False
     assert status["history_gap_count"] == len(status["gaps"])
     assert status["health"] == "ok"
+
+
+def test_unreplicated_diagnostics_yield_reserved_capacity_to_audit(tmp_path: Path) -> None:
+    value = journal(tmp_path, max_bytes=8192, segment_bytes=2048, level="trace")
+    for index in range(200):
+        value.emit(
+            "diagnostic.sample",
+            component="test",
+            channel="diagnostic",
+            severity="trace",
+            data={"index": index, "detail": "x" * 200},
+        )
+    status = value.status()
+    assert status["diagnostics_suppressed"] > 0
+    assert status["audit_reserve_bytes"] == 2048
+
+    assert value.emit("backup.completed", component="backup", channel="audit")
+    assert any(event["event_type"] == "backup.completed" for event in value.events(limit=None))
 
 
 def test_settings_validate_capacity_and_temporary_level() -> None:
@@ -241,6 +260,29 @@ def test_commands_use_journal_without_creating_parallel_text_log(tmp_path: Path)
     assert [event["event_type"] for event in events] == ["command.completed"]
 
 
+def test_backup_report_audit_is_compacted_into_bounded_batches(monkeypatch, tmp_path: Path) -> None:
+    report = tmp_path / "backup.combined"
+    report.write_text("".join(f"+ path-{index}.txt\n" for index in range(501)))
+    events = []
+    monkeypatch.setattr(cli, "record_event", lambda _config, event_type, **kwargs: events.append((event_type, kwargs)))
+
+    counts = cli.record_backup_report(
+        {"folder_id": "watched"},
+        report,
+        "backup_test",
+        dry_run=False,
+    )
+
+    assert counts["added"] == 501
+    assert [event_type for event_type, _kwargs in events] == [
+        "backup.report_committed",
+        "backup.path_batch",
+        "backup.path_batch",
+        "backup.path_batch",
+    ]
+    assert [event[1]["data"]["batch_size"] for event in events[1:]] == [250, 250, 1]
+
+
 def test_cloud_replication_uses_profile_owned_remote_and_marks_segments(monkeypatch, tmp_path: Path) -> None:
     config = default_config("machine-a")
     config["state_root"] = str(tmp_path / "state")
@@ -272,7 +314,11 @@ def test_cloud_replication_uses_profile_owned_remote_and_marks_segments(monkeypa
     assert status["pending_cloud_segments"] == 0
     segment_upload = next(command for command, body in calls if command[0] == "rcat" and body and '"event_type"' in body)
     assert "dropbox:backups/profile-a/.audit/profile-a/machine-a/" in segment_upload[1]
-    assert any(command[0] == "moveto" and command[-1].endswith("/manifest.json") for command, _body in calls)
+    immutable = [command for command, body in calls if command[0] == "rcat" and "/manifests/" in command[1] and body]
+    assert len(immutable) == 1
+    pointer = next(body for command, body in calls if command[0] == "rcat" and command[1].endswith("/manifest.json"))
+    assert pointer and json.loads(pointer)["object"].startswith("manifests/")
+    assert not any(command[0] == "moveto" for command, _body in calls)
 
 
 def test_cloud_replication_failure_is_visible_without_raising(monkeypatch, tmp_path: Path) -> None:

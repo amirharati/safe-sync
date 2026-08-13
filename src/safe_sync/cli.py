@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
 import platform
 import re
+import signal
 import shlex
 import shutil
 import socket
@@ -16,8 +18,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -111,8 +115,17 @@ _EVENT_JOURNALS: dict[tuple[str, str, str, str], EventJournal] = {}
 INTERNAL_FILTER_RULES = TEMPLATE_INTERNAL_FILTER.read_text()
 MAX_RCLONE_DIAGNOSTIC_LINES = 2_000
 DROPBOX_BATCH_SIZE = 32
-DROPBOX_TRANSFERS = 32
+DROPBOX_TRANSFERS = 8
 DROPBOX_BATCH_TIMEOUT = "5s"
+BACKUP_PATH_BATCH_SIZE = 250
+BACKUP_PATH_BATCH_BYTES = 256 * 1024
+ACTIVE_CHILD_GRACE_SECONDS = 15
+_ACTIVE_CHILD: subprocess.Popen[str] | None = None
+_ACTIVE_CHILD_METADATA: Path | None = None
+
+
+class DaemonShutdown(BaseException):
+    """Stop the daemon without converting shutdown into a backup failure."""
 
 
 class RateLimitedError(RuntimeError):
@@ -173,6 +186,131 @@ def atomic_write_text(path: Path, text: str) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def active_child_path(config: dict[str, Any]) -> Path:
+    cfg = normalized_config(config)
+    identity = f"{safe_id(str(cfg['profile_id']))}-{safe_id(str(cfg['machine_id']))}.json"
+    return state_root_path(cfg) / "active-children" / identity
+
+
+def _write_active_child(config: dict[str, Any], process: subprocess.Popen[str], cmd: list[str]) -> Path:
+    path = active_child_path(config)
+    report_path = None
+    if "--combined" in cmd:
+        report_index = cmd.index("--combined") + 1
+        if report_index < len(cmd):
+            report_path = cmd[report_index]
+    document = {
+        "schema_version": 1,
+        "pid": process.pid,
+        "process_group_id": process.pid,
+        "started_at": now_iso(),
+        "operation_id": config.get("_operation_id"),
+        "folder_id": config.get("folder_id"),
+        "executable": str(cmd[0]),
+        "argv": cmd,
+        "report_path": report_path,
+        "argv_sha256": hashlib.sha256("\0".join(cmd).encode()).hexdigest(),
+    }
+    atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def _terminate_process_group(process: subprocess.Popen[str], grace_seconds: float = ACTIVE_CHILD_GRACE_SECONDS) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.kill()
+    process.wait(timeout=5)
+
+
+def request_active_child_stop() -> None:
+    process = _ACTIVE_CHILD
+    if process is not None and process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.terminate()
+
+
+def reconcile_orphan_child(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Stop only a previously recorded Safe Sync rclone process group."""
+    path = active_child_path(config)
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text())
+        pid = int(document["pid"])
+        pgid = int(document.get("process_group_id", pid))
+        executable = Path(str(document["executable"])).name
+        expected_argv = [str(value) for value in document.get("argv") or []]
+        report_path = str(document.get("report_path") or "")
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        path.unlink(missing_ok=True)
+        return {"status": "invalid_metadata_removed"}
+
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    command = result.stdout.strip()
+    exact_child = (
+        result.returncode == 0
+        and executable == Path(rclone_bin(config)).name
+        and bool(expected_argv)
+        and Path(command.split(maxsplit=1)[0]).name == executable
+        and all(argument in command for argument in expected_argv[1:])
+        and (not report_path or report_path in command)
+    )
+    if exact_child:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + ACTIVE_CHILD_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            probe = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "stat="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            if probe.returncode != 0 or probe.stdout.strip().startswith("Z"):
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    path.unlink(missing_ok=True)
+    return {
+        "status": "orphan_stopped" if exact_child else "stale_metadata_removed",
+        "operation_id": document.get("operation_id"),
+        "folder_id": document.get("folder_id"),
+        "report_path": report_path or None,
+    }
 
 
 def save_status(config: dict[str, Any], **updates: Any) -> None:
@@ -304,7 +442,7 @@ def run_command(
     dry_run: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> int:
-    global LAST_COMMAND_OUTPUT
+    global LAST_COMMAND_OUTPUT, _ACTIVE_CHILD, _ACTIVE_CHILD_METADATA
     LAST_COMMAND_OUTPUT = ""
     env = rclone_env(config)
     operation_id = str(config.get("_operation_id") or "") or None
@@ -384,7 +522,15 @@ def run_command(
         text=True,
         bufsize=1,
         env=env,
+        start_new_session=True,
     )
+    _ACTIVE_CHILD = process
+    try:
+        _ACTIVE_CHILD_METADATA = _write_active_child(config, process, cmd)
+    except BaseException:
+        _terminate_process_group(process)
+        _ACTIVE_CHILD = None
+        raise
     lines: list[str] = []
     output_line_count = 0
     suppressed_line_count = 0
@@ -444,7 +590,18 @@ def run_command(
         return int(returncode)
     finally:
         if process.poll() is None:
-            process.kill()
+            _terminate_process_group(process)
+        if _ACTIVE_CHILD is process:
+            _ACTIVE_CHILD = None
+        metadata_path = _ACTIVE_CHILD_METADATA
+        if metadata_path is not None:
+            try:
+                current = json.loads(metadata_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                current = {}
+            if int(current.get("pid", -1)) == process.pid:
+                metadata_path.unlink(missing_ok=True)
+            _ACTIVE_CHILD_METADATA = None
 
 
 def rclone_bin(config: dict[str, Any]) -> str:
@@ -890,6 +1047,11 @@ def reconnect_dropbox_message() -> str:
     return "Dropbox authorization is invalid or revoked. Reconnect with: safe-sync connect-dropbox"
 
 
+def dropbox_transfer_count(config: dict[str, Any]) -> int:
+    attempt = max(1, int(config.get("_backup_attempt", 1)))
+    return max(4, DROPBOX_TRANSFERS // (2 ** min(attempt - 1, 1)))
+
+
 def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None = None) -> list[str]:
     remote = config["remote_root"].rstrip("/")
     local = str(Path(config["local_path"]).expanduser())
@@ -906,11 +1068,13 @@ def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None =
         # Dropbox commits uploads in synchronous batches with full integrity
         # checking. A larger batch and transfer pool amortize API round trips
         # for the worst-case many-small-file workload without changing the
-        # direct-mirror format or using the unsafe async batch mode.
+        # direct-mirror format or using the unsafe async batch mode. Start
+        # conservatively for Dropbox's write-operation limit and reduce the
+        # pool again after a failed attempt.
         "--dropbox-batch-mode", "sync",
         "--dropbox-batch-size", str(DROPBOX_BATCH_SIZE),
         "--dropbox-batch-timeout", DROPBOX_BATCH_TIMEOUT,
-        "--transfers", str(DROPBOX_TRANSFERS),
+        "--transfers", str(dropbox_transfer_count(config)),
         "--stats", "10s",
         "--timeout", "30s", "--contimeout", "10s",
         # Keep high-level retries at one because rclone's combined report is
@@ -1219,28 +1383,62 @@ def new_operation_id(prefix: str) -> str:
     return f"{safe_id(prefix)}_{uuid.uuid4().hex}"
 
 
+def backup_report_details(report_path: Path) -> tuple[list[dict[str, str]], dict[str, int], str, int]:
+    raw = report_path.read_bytes() if report_path.exists() else b""
+    changes = parse_combined_report(raw.decode(errors="replace"))
+    counts = {"added": 0, "modified": 0, "removed": 0, "error": 0}
+    for change in changes:
+        operation = str(change["operation"])
+        counts[operation] = counts.get(operation, 0) + 1
+    return changes, counts, hashlib.sha256(raw).hexdigest(), len(raw)
+
+
 def record_backup_report(
     config: dict[str, Any],
     report_path: Path,
     operation_id: str,
     *,
     dry_run: bool,
+    details: tuple[list[dict[str, str]], dict[str, int], str, int] | None = None,
 ) -> dict[str, int]:
-    changes = parse_combined_report(report_path.read_text(errors="replace") if report_path.exists() else "")
-    counts = {"added": 0, "modified": 0, "removed": 0, "error": 0}
+    changes, counts, report_hash, report_bytes = details or backup_report_details(report_path)
     correlation = {"operation_id": operation_id, "folder_id": config.get("folder_id")}
+    record_event(
+        config,
+        "backup.report_committed",
+        component="backup",
+        data={
+            "report_sha256": report_hash,
+            "report_bytes": report_bytes,
+            "counts": counts,
+            "change_count": len(changes),
+        },
+        correlation=correlation,
+        effect="none" if dry_run else None,
+    )
+    batches: list[list[dict[str, str]]] = []
+    batch: list[dict[str, str]] = []
+    batch_bytes = 0
     for change in changes:
-        operation = str(change["operation"])
-        counts[operation] = counts.get(operation, 0) + 1
+        change_bytes = len(json.dumps([change["operation"], change["path"]], separators=(",", ":")).encode())
+        if batch and (len(batch) >= BACKUP_PATH_BATCH_SIZE or batch_bytes + change_bytes > BACKUP_PATH_BATCH_BYTES):
+            batches.append(batch)
+            batch = []
+            batch_bytes = 0
+        batch.append(change)
+        batch_bytes += change_bytes
+    if batch:
+        batches.append(batch)
+    for batch_index, batch in enumerate(batches, start=1):
         record_event(
             config,
-            "backup.path_result",
+            "backup.path_batch",
             component="backup",
-            severity="error" if operation == "error" else "info",
+            severity="error" if any(change["operation"] == "error" for change in batch) else "info",
             data={
-                "path": change["path"],
-                "result": operation,
-                "previous_remote_preserved": bool(not dry_run and operation in {"modified", "removed"}),
+                "batch_index": batch_index,
+                "batch_size": len(batch),
+                "changes": [[change["operation"], change["path"]] for change in batch],
             },
             correlation=correlation,
             effect="none" if dry_run else None,
@@ -1922,14 +2120,14 @@ def _new_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> 
     cfg = normalized_config(config)
     created = now_iso()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "cycle_id": new_operation_id("cycle"),
         "profile_id": cfg["profile_id"],
         "machine_id": cfg["machine_id"],
         "created_at": created,
         "updated_at": created,
         "items": [
-            {"folder_id": folder["id"], "stage": "payload", "attempts": 0, "changes": []}
+            {"folder_id": folder["id"], "stage": "payload", "attempts": 0, "changes": [], "attempt": None}
             for folder in folders
         ],
     }
@@ -1952,10 +2150,12 @@ def load_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> 
         item.setdefault("stage", "payload")
         item.setdefault("attempts", 0)
         item.setdefault("changes", [])
+        item.setdefault("attempt", None)
         folder_cfg = folder_config(config, next(folder for folder in folders if folder["id"] == item["folder_id"]))
         if pending_generation_path(folder_cfg).exists():
             item["stage"] = "generation"
     queue["items"] = items
+    queue["schema_version"] = 2
     return queue, True
 
 
@@ -1998,6 +2198,45 @@ def merge_backup_changes(
     return [merged[path] for path in sorted(merged)]
 
 
+def reconcile_backup_queue_reports(config: dict[str, Any], queue: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recover report facts saved before an interrupted attempt could commit them."""
+    recovered: list[dict[str, Any]] = []
+    for item in queue.get("items") or []:
+        attempt = item.get("attempt")
+        if not isinstance(attempt, dict) or attempt.get("status") != "running":
+            continue
+        report_text = str(attempt.get("report_path") or "")
+        if not report_text:
+            continue
+        report_path = Path(report_text)
+        if not report_path.exists():
+            attempt["status"] = "interrupted_without_report"
+            recovered.append({"folder_id": item.get("folder_id"), "status": attempt["status"]})
+            continue
+        changes, counts, report_hash, report_bytes = backup_report_details(report_path)
+        item["changes"] = merge_backup_changes(list(item.get("changes") or []), changes)
+        attempt.update(
+            {
+                "status": "report_recovered",
+                "recovered_at": now_iso(),
+                "report_sha256": report_hash,
+                "report_bytes": report_bytes,
+                "counts": counts,
+            }
+        )
+        recovered.append(
+            {
+                "folder_id": item.get("folder_id"),
+                "status": attempt["status"],
+                "operation_id": attempt.get("operation_id"),
+                "counts": counts,
+            }
+        )
+    if recovered:
+        save_backup_queue(config, queue)
+    return recovered
+
+
 def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: DaemonApiState) -> tuple[int, str | None]:
     folders = enabled_folders(config)
     total_folders = len(folders)
@@ -2005,6 +2244,20 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
     queue, resumed = load_backup_queue(config, folders) if not dry_run else (_new_backup_queue(config, folders), False)
     if not dry_run:
         save_backup_queue(config, queue)
+        recovered_reports = reconcile_backup_queue_reports(config, queue)
+        for recovered in recovered_reports:
+            record_event(
+                config,
+                "backup.report_recovered",
+                component="backup",
+                severity="warning",
+                data=recovered,
+                correlation={
+                    "operation_id": recovered.get("operation_id"),
+                    "folder_id": recovered.get("folder_id"),
+                    "cycle_id": queue["cycle_id"],
+                },
+            )
     retry_delay = 0
     retry_reason: str | None = None
     provider_limited = False
@@ -2020,8 +2273,17 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             continue
         index = next(position for position, candidate in enumerate(folders, start=1) if candidate["id"] == folder_id)
         folder_cfg = folder_config(config, folder)
-        operation_id = new_operation_id("backup")
-        operation_cfg = {**folder_cfg, "_operation_id": operation_id}
+        previous_attempt = item.get("attempt") if isinstance(item.get("attempt"), dict) else {}
+        operation_id = (
+            str(previous_attempt.get("operation_id"))
+            if item["stage"] == "generation" and previous_attempt.get("operation_id")
+            else new_operation_id("backup")
+        )
+        operation_cfg = {
+            **folder_cfg,
+            "_operation_id": operation_id,
+            "_backup_attempt": int(item.get("attempts", 0)) + 1,
+        }
         correlation = {"operation_id": operation_id, "folder_id": folder_id, "cycle_id": queue["cycle_id"]}
         report_path = backup_report_path(folder_cfg)
         pending_ids = [str(pending["folder_id"]) for pending in queue["items"]]
@@ -2079,6 +2341,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 queue["items"].remove(item)
                 completed_this_run.append(folder_id)
                 save_backup_queue(config, queue)
+                replicate_event_journal(config)
                 continue
             item["attempts"] = int(item.get("attempts", 0)) + 1
             retry_delay = max(retry_delay, temporary_retry_seconds(int(item["attempts"])))
@@ -2133,7 +2396,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 )
         try:
             preflight(folder_cfg)
-            code = run_command(operation_cfg, backup_cmd(folder_cfg, dry_run, report_path), dry_run=dry_run, progress_callback=on_progress)
+            if not dry_run:
+                item["attempt"] = {
+                    "operation_id": operation_id,
+                    "report_path": str(report_path),
+                    "started_at": now_iso(),
+                    "status": "running",
+                }
+                save_backup_queue(config, queue)
+            code = run_command(operation_cfg, backup_cmd(operation_cfg, dry_run, report_path), dry_run=dry_run, progress_callback=on_progress)
         except RateLimitedError as exc:
             item["attempts"] = int(item.get("attempts", 0)) + 1
             retry_delay = max(retry_delay, exc.retry_after_seconds)
@@ -2200,11 +2471,25 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             )
             raise
 
-        counts = record_backup_report(folder_cfg, report_path, operation_id, dry_run=dry_run)
-        attempt_changes = parse_combined_report(report_path.read_text(errors="replace") if report_path.exists() else "")
+        report_details = backup_report_details(report_path)
+        attempt_changes, counts, report_hash, report_bytes = report_details
         item["changes"] = merge_backup_changes(list(item.get("changes") or []), attempt_changes)
         if not dry_run:
+            item["attempt"] = {
+                "operation_id": operation_id,
+                "report_path": str(report_path),
+                "started_at": (item.get("attempt") or {}).get("started_at"),
+                "completed_at": now_iso(),
+                "status": "report_committed",
+                "exit_code": code,
+                "report_sha256": report_hash,
+                "report_bytes": report_bytes,
+                "counts": counts,
+            }
+            if code == 0:
+                item["stage"] = "generation"
             save_backup_queue(config, queue)
+        record_backup_report(folder_cfg, report_path, operation_id, dry_run=dry_run, details=report_details)
 
         if code != 0:
             if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
@@ -2298,8 +2583,6 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
         saw_rate_limit = text_looks_rate_limited(LAST_COMMAND_OUTPUT)
 
         if not dry_run:
-            item["stage"] = "generation"
-            save_backup_queue(config, queue)
             publish_runtime_status(
                 api_state,
                 config,
@@ -2346,6 +2629,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
         completed_this_run.append(folder_id)
         if not dry_run:
             save_backup_queue(config, queue)
+            replicate_event_journal(config)
         if saw_rate_limit:
             retry_delay = max(retry_delay, int(config.get("rate_limit_backoff_seconds", 300)))
             retry_reason = f"Dropbox throttled requests but {folder_id} completed; pausing before remaining folders"
@@ -2993,6 +3277,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, Any]) -> int:
     validate_local_path(config)
+    orphan_result = reconcile_orphan_child(config)
     settings = watch_settings_from_config(config, args)
     daemon = WatchDaemon(settings)
     api_state = DaemonApiState()
@@ -3051,9 +3336,19 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         config,
         "reconciliation.completed",
         component="watcher",
-        data={"reason": "daemon_startup", "reconciled_jobs": reconciled_jobs},
+        data={"reason": "daemon_startup", "reconciled_jobs": reconciled_jobs, "orphan_child": orphan_result},
     )
     api_server.start()
+
+    previous_signal_handlers: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        def handle_shutdown(signum: int, _frame: Any) -> None:
+            request_active_child_stop()
+            raise DaemonShutdown(f"signal {signum}")
+
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, handle_shutdown)
 
     try:
         loops = 0
@@ -3326,7 +3621,12 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 record_event(config, "runtime.stopping", component="runtime", data={"reason": "max_loops"})
                 return 0
             api_state.wait(settings.poll_interval_seconds)
+    except DaemonShutdown as exc:
+        record_event(config, "runtime.stopping", component="runtime", data={"reason": str(exc)})
+        return 0
     finally:
+        for signum, previous in previous_signal_handlers.items():
+            signal.signal(signum, previous)
         watcher.stop()
         api_server.stop()
         record_event(config, "runtime.stopped", component="runtime", data={"watcher": watcher_mode})
@@ -3521,7 +3821,24 @@ def audit_remote_root(config: dict[str, Any]) -> str:
     )
 
 
+@contextmanager
+def audit_replication_lock(config: dict[str, Any]):
+    path = event_journal(normalized_config(config)).root / "replication.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def replicate_event_journal(config: dict[str, Any], *, seal: bool = True) -> dict[str, Any]:
+    with audit_replication_lock(config):
+        return _replicate_event_journal_unlocked(config, seal=seal)
+
+
+def _replicate_event_journal_unlocked(config: dict[str, Any], *, seal: bool = True) -> dict[str, Any]:
     """Publish verified sealed journal segments to this profile's owned remote."""
     cfg = normalized_config(config)
     journal = event_journal(cfg)
@@ -3565,13 +3882,27 @@ def replicate_event_journal(config: dict[str, Any], *, seal: bool = True) -> dic
             segment["object"] = remote_names[str(segment["sha256"])]
         manifest_body = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         manifest_hash = hashlib.sha256(manifest_body.encode()).hexdigest()
-        temporary_manifest = remote_join(remote_root, f"manifest.{uuid.uuid4().hex}.tmp")
-        staged = rclone_capture(cfg, ["rcat", temporary_manifest], input_text=manifest_body)
+        immutable_manifest = remote_join(remote_root, f"manifests/{manifest_hash}.json")
+        staged = rclone_capture(cfg, ["rcat", immutable_manifest], input_text=manifest_body)
         if staged.returncode != 0:
             raise JournalError(f"manifest upload failed ({staged.returncode}): {staged.stdout or ''}")
-        published = rclone_capture(cfg, ["moveto", temporary_manifest, remote_join(remote_root, "manifest.json")])
+        manifest_check = rclone_capture(cfg, ["cat", immutable_manifest])
+        if manifest_check.returncode != 0 or hashlib.sha256((manifest_check.stdout or "").encode()).hexdigest() != manifest_hash:
+            raise JournalError(f"manifest verification failed ({manifest_check.returncode}): {immutable_manifest}")
+        pointer = {
+            "schema_version": 1,
+            "manifest_sha256": manifest_hash,
+            "object": f"manifests/{manifest_hash}.json",
+            "published_at": now_iso(),
+        }
+        pointer_body = json.dumps(pointer, indent=2, sort_keys=True) + "\n"
+        latest_manifest = remote_join(remote_root, "manifest.json")
+        published = rclone_capture(cfg, ["rcat", latest_manifest], input_text=pointer_body)
         if published.returncode != 0:
-            raise JournalError(f"manifest publication failed ({published.returncode}): {published.stdout or ''}")
+            raise JournalError(f"manifest pointer upload failed ({published.returncode}): {published.stdout or ''}")
+        pointer_check = rclone_capture(cfg, ["cat", latest_manifest])
+        if pointer_check.returncode != 0 or (pointer_check.stdout or "") != pointer_body:
+            raise JournalError(f"manifest pointer verification failed ({pointer_check.returncode}): {latest_manifest}")
         journal.mark_replicated(uploaded_hashes, manifest_hash=manifest_hash)
 
         # Cleanup is deliberately after manifest publication. A cleanup error
