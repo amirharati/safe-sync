@@ -48,6 +48,21 @@ remote-trash handling, cloud log replication, and final local/remote state.
 Do not advance until unexplained missing, duplicate, or contradictory events
 have been resolved.
 
+**Overnight result, 2026-08-13:** payload behavior passed on the disposable
+five-folder profile. Status is healthy and watching with `5/5` complete, an
+empty durable queue, zero failed files, and no current warning/error. The large
+initial upload converged, and six later complete profile reconciliations found
+zero changes in every folder. Cloud log replication eventually recovered and
+drained its backlog to zero.
+
+Stage 1 is not yet fully closed. An explicit daemon service reload occurred
+after the largest rclone payload completed but before Safe Sync published its
+14,964-path generation, so restart reconciliation later skipped that generation
+as `no_changes`. The bounded journal also accumulated 32 permanent gaps before
+cloud replication caught up, and cloud-manifest publication transiently failed
+three times before recovering. Track these as `GEN-002` and `LOG-001`; fix and
+repeat the targeted interruption/audit acceptance checks before Stage 2.
+
 ### Stage 2: Recovery on one profile/computer
 
 Remain on the same computer/profile. Exercise selected-version history and the

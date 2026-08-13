@@ -27,13 +27,14 @@ separate future path for allowlisted durable recovery events.
 
 ### Immediate next-fix order
 
-1. Install the experimental `PERF-001` verified synchronous batch/concurrency
-   pass and measure its resumed `tools` throughput against the captured baseline.
-2. Live-check the `PROGRESS-001` frozen failed-file denominator and
-   `PROGRESS-002` durable whole-profile summary through transfer and cooldown.
-3. After the resumed throughput comparison, repeat Stage 1 from a clean
-   disposable namespace with an explicit tiny-file-heavy acceptance fixture
-   before advancing to recovery or multi-machine workflows.
+1. Close `GEN-002`: reconcile a completed payload/report after daemon
+   interruption before declaring the folder complete or skipping its generation.
+2. Close the remaining `LOG-001` audit-capacity and cloud-manifest race gaps so
+   a long backup cannot erase the evidence needed to review it.
+3. Keep `PERF-001` experimental: run the clean tiny-file/hash acceptance matrix
+   and retune synchronous batching because the largest folder still spent hours
+   under Dropbox throttling. Do not advance to recovery or multi-machine work
+   until the Stage 1 audit is complete.
 
 ### GEN-001: Retry generation publication without aborting the backup set
 
@@ -105,6 +106,45 @@ Implemented behavior:
   generation retry, timeout-after-write verification, no-op suppression, net
   change accumulation, and scheduler backoff preservation.
 
+### GEN-002: Reconcile a completed payload report after daemon interruption
+
+**Priority:** critical; fix before Stage 2 recovery or any linked-folder test
+that depends on complete generation history.
+
+**Observed during the overnight Stage 1 run on 2026-08-12:** the initial
+`workbench_agent2-history-safe` rclone process completed at 21:36:03 after a
+2h27m provider-throttled upload. Its persisted combined report contains 14,964
+added paths and zero report errors. One minute later launchctl explicitly
+unloaded/reloaded the daemon while Safe Sync was still processing the large
+per-path report, before it atomically advanced the durable queue to generation
+publication. The cause of the two external unload/load actions is not yet
+identified; macOS evidence shows this was not an rclone crash.
+
+After restart, Safe Sync compared the folder again, correctly found all 14,964
+paths already present remotely, reported zero changes, removed the queue item,
+and skipped generation publication. Six later whole-profile reconciliations
+also found zero changes, so the remote payload is converged, but there is no
+local `latest.json` or retained `generation.published` event for the folder's
+initial upload. The on-disk combined report is sufficient evidence that the
+change plan existed, but current restart logic does not associate or reconcile
+it.
+
+Required behavior:
+
+- Persist operation/report identity in the queue before starting rclone and
+  atomically retain the parsed net change set before expensive per-path event
+  emission.
+- On startup, reconcile an unfinished payload-stage item with its report and a
+  fresh remote comparison. If the payload is already converged, publish the
+  recovered generation instead of treating it as a new no-change cycle.
+- Make per-path audit emission resumable/bounded so thousands of events cannot
+  hold the only payload-to-generation transition open for minutes.
+- Prevent a new worker from overlapping an orphan child, and explicitly stop or
+  adopt the exact child on graceful restart. Cover SIGTERM/SIGKILL and the
+  payload-complete/report-processing crash windows in the interruption matrix.
+- Surface `payload converged; generation recovery pending` until the recovered
+  generation is verified rather than marking the entire folder fully complete.
+
 ### LOG-001: Protect audit history from diagnostic floods
 
 **Priority:** fix before another long Debug/Trace dogfood run.
@@ -119,6 +159,18 @@ size, and gap count remained unchanged while per-file INFO progress continued
 in the UI. A later hardening pass must still give audit events
 physically protected capacity independent of diagnostics and add the full
 budget-exhaustion retention test below.
+
+**Overnight result on 2026-08-13:** the cap worked for `tools` (2,744 repetitive
+lines suppressed), but the 16,592 retained `backup.path_result` events plus
+other diagnostics still drove the 64 MiB journal from 18 to 32 permanent gaps
+before 01:47. All 63 pending segments eventually replicated and current cloud
+backlog is zero, but the local/remote audit history remains incomplete. Cloud
+manifest publication also degraded three times: one Dropbox
+`too_many_write_operations`, one source/destination shape error, and one
+temporary-manifest `from_lookup/not_found`; all three later emitted
+`logging.cloud_recovered` and current replication health is good. Audit events
+need protected capacity, large-report aggregation, replication opportunities
+between folders, and race-safe idempotent cloud-manifest publication.
 
 **Observed during one-profile dogfood on 2026-08-09:** a large repository with
 many `.git/objects` produced hundreds of thousands of rclone Debug lines during
@@ -289,6 +341,15 @@ the latest one-minute interval completed 284 files (about 4.7 files/s) at
 2.41 MiB/s with no failed files, warning, or error. Continue the run and retain
 the later clean-fixture/hash gate before choosing these values as production
 defaults.
+
+The largest-folder result shows that the current values are not yet acceptable
+as production defaults. `workbench_agent2-history-safe` needed roughly 2h27m
+for a 14,964-path / 338.893 MiB initial report and repeatedly received Dropbox
+300-second `too_many_requests` delays, although it ultimately converged with no
+report errors. Six later full-profile reconciliations reported zero changes for
+all five folders, proving correctness, but some no-change comparisons were also
+slow under provider throttling. Keep the direct-mirror experiment open and
+compare more conservative transfer/batch values in the isolated benchmark.
 
 The clean `tools` run demonstrates a pathological but realistic developer-tree
 case. The exact filter policy admits 10,082 files / 2.367 GB, including 6,410
