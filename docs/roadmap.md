@@ -34,8 +34,8 @@ separate future path for allowlisted durable recovery events.
    acceptance evidence.
 2. In one focused maintenance pass, implement `RETRY-001` and `LOG-002`,
    including clearing stale failed-folder/progress fields as soon as recovery
-   starts. Re-run the targeted automated interruption, retry, generation, and
-   journal-pressure tests and commit the result before deployment.
+   starts. This source pass is implemented with automated retry/interruption
+   coverage; commit and deploy the reviewed result before the clean rerun.
 3. After review, stop Safe Sync cleanly, preserve the completed run's logs and
    reports, remove only the disposable active-machine Dropbox namespace, and
    reinstall the reviewed commit once.
@@ -171,6 +171,18 @@ Required behavior:
 
 **Priority:** high; fix before the next clean Stage 1 acceptance rerun.
 
+**Status:** implemented in source on 2026-08-14; not yet installed. The exact
+Dropbox error is retained as a temporary remote failure, first retry waits 30
+seconds, repeated attempts use bounded exponential delays, and an expired retry
+backoff bypasses the unrelated 120-second normal backup interval. Durable
+reports/net changes survive repeated attempts and daemon restart. Status exposes
+the retry attempt/countdown and clears obsolete failure, interruption, backoff,
+file, and progress projection fields at retry start and final success. The UI
+renders the live retry countdown ahead of the prior attempt's progress text.
+Regression coverage reproduces the exit-1 error, repeated 30/60-second attempts
+across a new daemon API state, eventual one-time accumulated generation
+publication, and immediate scheduler execution when retry backoff expires.
+
 **Observed on 2026-08-14:** after macOS wake/restart recovery, folder 5 resumed
 with 2,110 planned transfers. At 10:52:35 Dropbox returned one destination-
 directory read error for
@@ -285,6 +297,15 @@ unbounded raw child stream after expiry.
 
 **Priority:** minor; fix in the next maintenance round after the active Stage 1
 run completes. Do not interrupt the current backup to deploy it.
+
+**Status:** implemented in source on 2026-08-14; not yet installed. SIGTERM and
+SIGINT now carry their signal number through a dedicated `DaemonShutdown` path.
+An in-flight payload records warning-level `backup.interrupted` with operation,
+folder, report identity/existence, and recovery-pending state, then re-raises for
+the normal exact-child shutdown path; it no longer falls through to error-level
+`backup.failed`. Regression coverage proves the report remains `running` in the
+durable queue, is recovered on the next attempt, publishes its accumulated
+change exactly once after convergence, and clears interruption/failure state.
 
 **Observed on 2026-08-14:** macOS fully woke at 10:51 after an overnight idle-
 sleep cycle and restarted the GUI launchd session. Launchd sent SIGTERM to the

@@ -90,6 +90,14 @@ Then preserve the current evidence, clean only the disposable machine-owned
 remote namespace, reinstall once, and repeat Stage 1 with controlled transient
 failure and interruption cases. Do not advance to Stage 2 until that run passes.
 
+**Source repair, 2026-08-14:** `RETRY-001` and `LOG-002` are implemented but not
+installed. Automated coverage reproduces the exact exit-1 directory-read error,
+30/60-second bounded retries across a simulated restart, immediate scheduling
+when retry backoff expires, retained net changes and one-time final publication,
+stale status cleanup, and graceful SIGTERM report recovery without a false
+`backup.failed`. The complete backend suite passes 130 tests and the production
+UI build passes. Real-provider clean-rerun acceptance is still required.
+
 ### Stage 2: Recovery on one profile/computer
 
 Remain on the same computer/profile. Exercise selected-version history and the

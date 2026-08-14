@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -75,6 +76,15 @@ def test_manual_backup_bypasses_debounce_and_minimum_interval():
     assert not daemon.should_run_backup(101.0, manual=True)
 
 
+def test_scheduled_retry_bypasses_minimum_interval_after_backoff_expires():
+    daemon = WatchDaemon(WatchSettings(min_interval_seconds=120))
+    daemon.state.state = DaemonState.DIRTY
+    daemon.state.last_sync_finish_monotonic = 100.0
+
+    assert not daemon.should_run_backup(130.0)
+    assert daemon.should_run_backup(130.0, retry=True)
+
+
 def test_manual_backup_requests_coalesce_and_remain_consumable():
     state = DaemonApiState()
     state.request_backup()
@@ -147,6 +157,82 @@ def test_daemon_runs_manual_backup_immediately_and_preserves_request_during_run(
     assert len(calls) == 2
 
 
+def test_daemon_runs_retry_immediately_when_backoff_expires(monkeypatch, tmp_path):
+    local = tmp_path / "watched"
+    local.mkdir()
+    config_path = tmp_path / "config.json"
+    config = default_config("test-machine")
+    folder = {
+        "id": "watched",
+        "label": "watched",
+        "local_path": str(local),
+        "remote_root": "dropbox:computer-backups/test-machine/watched",
+        "trash_root": "dropbox:computer-backups/.trash/test-machine/watched",
+        "enabled": True,
+    }
+    config["profiles"][0]["folders"] = [folder]
+    config["folders"] = [folder]
+    config["socket_path"] = str(tmp_path / "daemon.sock")
+    config["status_path"] = str(tmp_path / "status.json")
+    config["log_dir"] = str(tmp_path / "logs")
+    config["lock_file"] = str(tmp_path / "safe-sync.lock")
+    config["debounce_seconds"] = 0
+    config_path.write_text(json.dumps(config))
+
+    class FakeWatcher:
+        def __init__(self, _folders, wake):
+            self.wake = wake
+
+        def start(self):
+            return None
+
+        def consume(self):
+            return []
+
+        def healthy(self):
+            return True
+
+        def stop(self):
+            return None
+
+    calls = []
+    scheduler_triggers = []
+
+    def fake_server_start(_server):
+        return None
+
+    def fake_run_all(_config, _dry_run, api_state):
+        calls.append(True)
+        if len(calls) == 1:
+            api_state.update(
+                state="backoff",
+                backoff_seconds=1,
+                last_warning="temporary Dropbox failure",
+                retry_kind="temporary_remote",
+            )
+            return RATE_LIMIT_EXIT, "watched"
+        return 0, None
+
+    def capture_event(_config, event_type, **kwargs):
+        if event_type == "backup.queued":
+            scheduler_triggers.append(kwargs["data"]["trigger"])
+        return {}
+
+    clock = iter(float(value) for value in range(0, 100, 2))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr("safe_sync.cli.NativeWatcher", FakeWatcher)
+    monkeypatch.setattr("safe_sync.cli.DaemonApiServer.start", fake_server_start)
+    monkeypatch.setattr("safe_sync.cli.DaemonApiState.wait", lambda _self, _timeout: None)
+    monkeypatch.setattr("safe_sync.cli.ensure_local_profiles_registered", lambda _config: None)
+    monkeypatch.setattr("safe_sync.cli.run_all_backups_runtime", fake_run_all)
+    monkeypatch.setattr("safe_sync.cli.record_event", capture_event)
+
+    args = SimpleNamespace(poll_interval=None, debounce=None, dry_run=True, once=False, max_loops=2)
+    assert run_daemon(args, config_path, normalized_config(config)) == 0
+    assert len(calls) == 2
+    assert scheduler_triggers == ["automatic", "retry"]
+
+
 def test_pending_change_during_sync_goes_to_cooldown():
     daemon = WatchDaemon()
     daemon.note_sync_started(100.0)
@@ -189,6 +275,16 @@ def test_dropbox_write_operation_limit_is_a_provider_cooldown():
     assert cli.text_looks_rate_limited("Error in call to API function upload_session/finish_batch: too_many_write_operations")
 
 
+def test_dropbox_unexpected_destination_read_error_is_temporary():
+    output = (
+        "ERROR : data/example: error reading destination directory: "
+        "unexpected error occurred"
+    )
+
+    assert cli.text_looks_temporary_remote_failure(output, 1)
+    assert cli.rclone_line_must_retain(output)
+
+
 def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_path, monkeypatch):
     filter_path = tmp_path / "filter.txt"
     filter_path.write_text("")
@@ -228,12 +324,15 @@ def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_pa
         folder_id = command_config["folder_id"]
         calls.append(folder_id)
         report = Path(command[command.index("--combined") + 1])
-        if folder_id == "flaky" and flaky_attempt == 0:
+        if folder_id == "flaky" and flaky_attempt < 2:
             flaky_attempt += 1
-            report.write_text("+ copied-before-timeout.txt\n! unfinished.txt\n")
-            cli.LAST_COMMAND_OUTPUT = "timeout awaiting response headers"
-            return 5
-        report.write_text(f"+ {folder_id}.txt\n" if folder_id != "flaky" else "= copied-before-timeout.txt\n")
+            report.write_text("+ copied-before-error.txt\n" if flaky_attempt == 1 else "= copied-before-error.txt\n")
+            cli.LAST_COMMAND_OUTPUT = (
+                "ERROR : data/example: error reading destination directory: "
+                "unexpected error occurred"
+            )
+            return 1
+        report.write_text(f"+ {folder_id}.txt\n" if folder_id != "flaky" else "= copied-before-error.txt\n")
         cli.LAST_COMMAND_OUTPUT = ""
         return 0
 
@@ -253,13 +352,122 @@ def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_pa
     assert calls == ["first", "flaky", "last"]
     queue = json.loads(cli.backup_queue_path(config).read_text())
     assert [item["folder_id"] for item in queue["items"]] == ["flaky"]
-    assert queue["items"][0]["changes"] == [{"path": "copied-before-timeout.txt", "operation": "added"}]
+    assert queue["items"][0]["changes"] == [{"path": "copied-before-error.txt", "operation": "added"}]
+    retry_status = api_state.snapshot()
+    assert retry_status["state"] == "backoff"
+    assert retry_status["last_error"] is None
+    assert retry_status["failed_folder"] == "flaky"
+    assert retry_status["retry_attempt"] == 1
+    assert retry_status["retry_after_seconds"] == 30
+    assert retry_status["backoff_remaining_seconds"] == 30
+    assert retry_status["retry_kind"] == "temporary_remote"
 
-    assert cli.run_all_backups_runtime(config, False, api_state) == (0, None)
+    restarted_api_state = DaemonApiState()
+    assert cli.run_all_backups_runtime(config, False, restarted_api_state) == (RATE_LIMIT_EXIT, "flaky")
     assert calls == ["first", "flaky", "last", "flaky"]
+    queue = json.loads(cli.backup_queue_path(config).read_text())
+    assert queue["items"][0]["attempts"] == 2
+    assert queue["items"][0]["changes"] == [{"path": "copied-before-error.txt", "operation": "added"}]
+    repeated_status = restarted_api_state.snapshot()
+    assert repeated_status["retry_attempt"] == 2
+    assert repeated_status["retry_after_seconds"] == 60
+    assert repeated_status["backoff_remaining_seconds"] == 60
+
+    assert cli.run_all_backups_runtime(config, False, restarted_api_state) == (0, None)
+    assert calls == ["first", "flaky", "last", "flaky", "flaky"]
     assert not cli.backup_queue_path(config).exists()
     flaky_publication = next(changes for folder_id, changes, _operation in published if folder_id == "flaky")
-    assert flaky_publication == [{"path": "copied-before-timeout.txt", "operation": "added"}]
+    assert flaky_publication == [{"path": "copied-before-error.txt", "operation": "added"}]
+    assert sum(1 for folder_id, _changes, _operation in published if folder_id == "flaky") == 1
+    recovered_status = restarted_api_state.snapshot()
+    assert recovered_status["failed_folder"] is None
+    assert recovered_status["backoff_until"] is None
+    assert recovered_status["retry_attempt"] is None
+    assert recovered_status["retry_kind"] is None
+
+
+def test_graceful_shutdown_records_interruption_and_recovers_report(tmp_path, monkeypatch):
+    local = tmp_path / "watched"
+    local.mkdir()
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = cli.default_config("test-machine")
+    folder = {
+        "id": "watched",
+        "label": "watched",
+        "local_path": str(local),
+        "remote_path": "test-machine/watched",
+        "trash_path": ".trash/test-machine/watched",
+        "remote_root": "dropbox:computer-backups/test/test-machine/watched",
+        "trash_root": "dropbox:computer-backups/test/.trash/test-machine/watched",
+        "filter_file": str(filter_path),
+        "enabled": True,
+    }
+    config["profiles"][0]["folders"] = [folder]
+    config["profiles"][0]["filter_file"] = str(filter_path)
+    config["state_root"] = str(tmp_path / "state")
+    config["status_path"] = str(tmp_path / "state/status.json")
+    config = cli.normalized_config(config)
+    events = []
+    published = []
+    interrupted = True
+
+    def fake_run(_config, command, **_kwargs):
+        nonlocal interrupted
+        report = Path(command[command.index("--combined") + 1])
+        if interrupted:
+            interrupted = False
+            report.write_text("+ created-before-shutdown.txt\n")
+            raise cli.DaemonShutdown(signal.SIGTERM)
+        report.write_text("= created-before-shutdown.txt\n")
+        cli.LAST_COMMAND_OUTPUT = ""
+        return 0
+
+    def capture_event(_config, event_type, **kwargs):
+        events.append((event_type, kwargs))
+        return {}
+
+    def publish(_folder_config, _report=None, *, operation_id=None, changes=None):
+        published.append((operation_id, list(changes or [])))
+        return 0
+
+    monkeypatch.setattr(cli, "preflight", lambda _config: None)
+    monkeypatch.setattr(cli, "run_command", fake_run)
+    monkeypatch.setattr(cli, "publish_generation", publish)
+    monkeypatch.setattr(cli, "update_registry", lambda _config: 0)
+    monkeypatch.setattr(cli, "replicate_event_journal", lambda _config: {})
+    monkeypatch.setattr(cli, "record_event", capture_event)
+    api_state = DaemonApiState()
+
+    with pytest.raises(cli.DaemonShutdown) as stopped:
+        cli.run_all_backups_runtime(config, False, api_state)
+
+    assert stopped.value.signum == signal.SIGTERM
+    interrupted_events = [kwargs for event_type, kwargs in events if event_type == "backup.interrupted"]
+    assert len(interrupted_events) == 1
+    assert interrupted_events[0]["severity"] == "warning"
+    assert interrupted_events[0]["data"]["signal"] == signal.SIGTERM
+    assert interrupted_events[0]["data"]["report_exists"] is True
+    assert not [event for event, _kwargs in events if event == "backup.failed"]
+    interrupted_status = api_state.snapshot()
+    assert interrupted_status["state"] == "stopping"
+    assert interrupted_status["last_error"] is None
+    assert interrupted_status["recovery_pending"] is True
+    assert interrupted_status["interrupted_folder"] == "watched"
+
+    queue = json.loads(cli.backup_queue_path(config).read_text())
+    assert queue["items"][0]["attempt"]["status"] == "running"
+
+    assert cli.run_all_backups_runtime(config, False, api_state) == (0, None)
+    assert [event for event, _kwargs in events if event == "backup.report_recovered"]
+    assert len(published) == 1
+    assert published[0][0].startswith("backup_")
+    assert published[0][1] == [{"path": "created-before-shutdown.txt", "operation": "added"}]
+    assert not cli.backup_queue_path(config).exists()
+    recovered_status = api_state.snapshot()
+    assert recovered_status["recovery_pending"] is False
+    assert recovered_status["interrupted_folder"] is None
+    assert recovered_status["failed_folder"] is None
 
 
 def test_runtime_generation_failure_continues_and_retries_without_payload(tmp_path, monkeypatch):
@@ -522,6 +730,8 @@ def test_status_ui_separates_configured_folders_from_runtime_folder():
     assert 'return "Pending folder"' in main
     assert 'return "Current folder"' in main
     assert 'return "Last folder"' in main
+    progress = main[main.index("function progressSummary"):main.index("function currentFileSummary")]
+    assert progress.index("const backoff") < progress.index("const live")
 
 
 def test_activity_keeps_historical_warnings_out_of_main_status():

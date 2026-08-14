@@ -97,6 +97,10 @@ TEMPORARY_REMOTE_PATTERNS = (
     "temporarily unavailable",
     "tls handshake timeout",
     "server closed idle connection",
+    # Dropbox can return this generic response while rclone is listing the
+    # destination. A fresh read succeeds afterward, so keep the durable folder
+    # queued and converge again instead of waiting for the full fallback scan.
+    "error reading destination directory: unexpected error occurred",
 )
 REMOTE_NOT_FOUND_PATTERNS = ("not found", "path/not_found", "object not found", "directory not found")
 AUTH_FAILURE_PATTERNS = (
@@ -126,6 +130,10 @@ _ACTIVE_CHILD_METADATA: Path | None = None
 
 class DaemonShutdown(BaseException):
     """Stop the daemon without converting shutdown into a backup failure."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = int(signum)
+        super().__init__(f"signal {self.signum}")
 
 
 class RateLimitedError(RuntimeError):
@@ -2300,7 +2308,16 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             last_command="daemon",
             last_error=None,
             last_warning=None,
+            failed_folder=None,
+            interrupted_folder=None,
+            recovery_pending=False,
             queued_backup=False,
+            backoff_seconds=None,
+            backoff_until=None,
+            backoff_remaining_seconds=0,
+            retry_after_seconds=None,
+            retry_attempt=None,
+            retry_kind=None,
             configured_folder_count=total_folders,
             pending_folders=pending_ids,
             completed_folders=completed_this_run,
@@ -2450,6 +2467,41 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 correlation=correlation,
             )
             continue
+        except DaemonShutdown as exc:
+            attempt = item.get("attempt") if isinstance(item.get("attempt"), dict) else {}
+            interrupted_report = Path(str(attempt.get("report_path") or report_path))
+            record_event(
+                folder_cfg,
+                "backup.interrupted",
+                component="backup",
+                severity="warning",
+                data={
+                    "reason": "daemon_shutdown",
+                    "signal": exc.signum,
+                    "stage": "payload",
+                    "report_id": interrupted_report.name,
+                    "report_exists": interrupted_report.exists(),
+                    "recovery_pending": True,
+                },
+                correlation=correlation,
+                effect="none" if dry_run else None,
+            )
+            publish_runtime_status(
+                api_state,
+                config,
+                state="stopping",
+                failed_folder=None,
+                interrupted_folder=folder_id,
+                recovery_pending=True,
+                last_error=None,
+                last_warning=None,
+                queued_backup=True,
+                current_file=None,
+                sync_phase="interrupted",
+                last_finish=now_iso(),
+                last_progress=f"Backup interrupted during shutdown on folder {index} of {total_folders}; recovery is pending",
+            )
+            raise
         except BaseException as exc:
             record_event(
                 folder_cfg,
@@ -2555,6 +2607,10 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     last_error=None,
                     queued_backup=True,
                     backoff_seconds=delay,
+                    backoff_until=future_iso(delay),
+                    retry_after_seconds=delay,
+                    retry_attempt=item["attempts"],
+                    retry_kind="temporary_remote",
                     last_finish=now_iso(),
                     last_progress=f"Temporary failure on folder {index} of {total_folders}; later folders will continue",
                 )
@@ -2612,6 +2668,10 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     last_warning=retry_reason,
                     queued_backup=True,
                     backoff_seconds=delay,
+                    backoff_until=future_iso(delay),
+                    retry_after_seconds=delay,
+                    retry_attempt=item["attempts"],
+                    retry_kind="temporary_remote",
                     last_finish=now_iso(),
                     last_progress=f"Folder data converged; change publication is pending for folder {index} of {total_folders}",
                 )
@@ -2654,6 +2714,9 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             completed_folders=completed_this_run,
             backoff_seconds=retry_delay,
             backoff_until=future_iso(retry_delay),
+            backoff_remaining_seconds=retry_delay,
+            retry_after_seconds=retry_delay,
+            retry_attempt=int(queue["items"][0].get("attempts", 0)),
             last_finish=now_iso(),
             last_progress=f"{len(pending_ids)} of {total_folders} folders pending; completed folders will not be repeated",
             retry_kind="provider_rate_limit" if provider_limited else "temporary_remote",
@@ -2667,6 +2730,15 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
         pending_folders=[],
         completed_folders=[str(folder["id"]) for folder in folders],
         queued_backup=False,
+        failed_folder=None,
+        interrupted_folder=None,
+        recovery_pending=False,
+        backoff_seconds=None,
+        backoff_until=None,
+        backoff_remaining_seconds=0,
+        retry_after_seconds=None,
+        retry_attempt=None,
+        retry_kind=None,
     )
     if not dry_run:
         registry_code = update_registry(config)
@@ -3315,6 +3387,15 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         fallback_interval_seconds=settings.fallback_interval_seconds,
         last_error=None,
         last_warning=watcher_warning,
+        failed_folder=None,
+        interrupted_folder=None,
+        recovery_pending=False,
+        backoff_seconds=None,
+        backoff_until=None,
+        backoff_remaining_seconds=0,
+        retry_after_seconds=None,
+        retry_attempt=None,
+        retry_kind=None,
         note="startup reconcile queued",
         reconciled_jobs=reconciled_jobs,
     )
@@ -3344,7 +3425,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
     if threading.current_thread() is threading.main_thread():
         def handle_shutdown(signum: int, _frame: Any) -> None:
             request_active_child_stop()
-            raise DaemonShutdown(f"signal {signum}")
+            raise DaemonShutdown(signum)
 
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous_signal_handlers[signum] = signal.getsignal(signum)
@@ -3353,6 +3434,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
     try:
         loops = 0
         manual_backup_pending = False
+        retry_backup_pending = False
         while True:
             loops += 1
             now = time.monotonic()
@@ -3519,6 +3601,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 if daemon.backoff_expired(now):
                     daemon.state.state = DaemonState.DIRTY
                     daemon.mark_dirty(now)
+                    retry_backup_pending = True
                     publish_runtime_status(api_state, config, state="dirty", last_error=None, note="backoff expired", backoff_remaining_seconds=0)
                 else:
                     publish_runtime_status(
@@ -3533,8 +3616,9 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     continue
 
             manual_run = manual_backup_pending
-            automatic_due = daemon.should_sync_after_debounce(now) or daemon.should_run_fallback(now)
-            should_run = daemon.should_run_backup(now, manual=manual_run)
+            retry_run = retry_backup_pending
+            automatic_due = retry_run or daemon.should_sync_after_debounce(now) or daemon.should_run_fallback(now)
+            should_run = daemon.should_run_backup(now, manual=manual_run, retry=retry_run)
             blocking_jobs = backup_blocking_jobs(config)
             if should_run and blocking_jobs:
                 should_run = False
@@ -3550,11 +3634,12 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
 
             if should_run:
                 manual_backup_pending = False
+                retry_backup_pending = False
                 record_event(
                     config,
                     "backup.queued",
                     component="scheduler",
-                    data={"trigger": "manual" if manual_run else "automatic", "ready": True},
+                    data={"trigger": "manual" if manual_run else "retry" if retry_run else "automatic", "ready": True},
                 )
                 daemon.note_sync_started(now)
                 publish_runtime_status(
@@ -3597,7 +3682,16 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                         last_finish=now_iso(),
                         last_error=None,
                         last_warning=None,
+                        failed_folder=None,
+                        interrupted_folder=None,
+                        recovery_pending=False,
                         queued_backup=False,
+                        backoff_seconds=None,
+                        backoff_until=None,
+                        backoff_remaining_seconds=0,
+                        retry_after_seconds=None,
+                        retry_attempt=None,
+                        retry_kind=None,
                     )
                 elif rate_limited:
                     manual_backup_pending = manual_backup_pending or manual_run
@@ -3622,7 +3716,12 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 return 0
             api_state.wait(settings.poll_interval_seconds)
     except DaemonShutdown as exc:
-        record_event(config, "runtime.stopping", component="runtime", data={"reason": str(exc)})
+        record_event(
+            config,
+            "runtime.stopping",
+            component="runtime",
+            data={"reason": "signal", "signal": exc.signum},
+        )
         return 0
     finally:
         for signum, previous in previous_signal_handlers.items():

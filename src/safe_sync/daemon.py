@@ -114,11 +114,13 @@ class WatchDaemon:
         elapsed = monotonic_time - self.state.last_sync_finish_monotonic
         return max(0.0, self.settings.min_interval_seconds - elapsed)
 
-    def should_run_backup(self, monotonic_time: float, *, manual: bool = False) -> bool:
+    def should_run_backup(self, monotonic_time: float, *, manual: bool = False, retry: bool = False) -> bool:
         """Return whether a backup may start at this safe scheduling point."""
         if self.state.state == DaemonState.BACKOFF:
             return False
-        if manual:
+        # A scheduled retry has already waited its provider/app backoff. Do not
+        # add the ordinary change-coalescing minimum interval on top of it.
+        if manual or retry:
             return True
         due = self.should_sync_after_debounce(monotonic_time) or self.should_run_fallback(monotonic_time)
         return due and not self.in_min_interval(monotonic_time)

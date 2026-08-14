@@ -339,12 +339,12 @@ function progressSummary(status: SafeSyncStatus): string {
     return parts.join(" · ");
   }
   if (["syncing", "publishing"].includes(syncStateValue) && phase === "finalizing") return "Finalizing folder backup";
-  const live = text(status.sync_state?.last_progress, "");
-  if (live) return live;
   const backoff = Number(status.sync_state?.backoff_remaining_seconds ?? 0);
   if (syncStateValue === "backoff" && backoff > 0) return `Retrying in ${Math.ceil(backoff)}s`;
   const cooldown = Number(status.sync_state?.cooldown_remaining_seconds ?? 0);
   if (syncStateValue === "cooldown" && cooldown > 0) return `Waiting ${Math.ceil(cooldown)}s before next sync`;
+  const live = text(status.sync_state?.last_progress, "");
+  if (live) return live;
   if (syncStateValue === "dirty") return "Changes queued";
   if (syncStateValue === "watching") return "Watching for changes";
   return "-";

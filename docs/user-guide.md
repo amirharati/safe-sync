@@ -424,7 +424,11 @@ safe-sync connect-dropbox --headless --reconnect
 
 If Dropbox rate-limits a transfer, Safe Sync enters a visible cooldown and
 keeps queued work for the next safe opportunity. Do not start a competing raw
-rclone process.
+rclone process. A recognized temporary Dropbox read or network failure keeps
+the durable folder/report state, shows a bounded retry countdown, and retries
+only unfinished work when that countdown expires. A normal backend stop during
+backup is recorded as an interruption with recovery pending, not as corruption
+or a completed backup; the next daemon start reconciles the retained report.
 
 For Linux service details:
 
