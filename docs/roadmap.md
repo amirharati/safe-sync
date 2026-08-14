@@ -27,14 +27,27 @@ separate future path for allowlisted durable recovery events.
 
 ### Immediate next-fix order
 
-1. Reinstall the `GEN-002`/`LOG-001` repair build and rerun the clean Stage 1
-   fixture from an empty machine-owned remote namespace.
-2. Execute the targeted SIGTERM/SIGKILL interruption cases and verify report
-   recovery, exact-child cleanup, generation publication, and complete audit
-   evidence before closing either issue.
-3. Keep `PERF-001` experimental: compare the new conservative 8-transfer
-   baseline and adaptive 4-transfer retry against the prior throttled run. Do
-   not advance to recovery or multi-machine work until the Stage 1 audit passes.
+1. Preserve the completed 2026-08-14 run before changing or reinstalling
+   anything. Its fallback reconciliation completed all five folders, emptied
+   the durable queue, and published the recovered 14,964-change folder-5
+   generation; retain its logs, reports, generation, and final status as
+   acceptance evidence.
+2. In one focused maintenance pass, implement `RETRY-001` and `LOG-002`,
+   including clearing stale failed-folder/progress fields as soon as recovery
+   starts. Re-run the targeted automated interruption, retry, generation, and
+   journal-pressure tests and commit the result before deployment.
+3. After review, stop Safe Sync cleanly, preserve the completed run's logs and
+   reports, remove only the disposable active-machine Dropbox namespace, and
+   reinstall the reviewed commit once.
+4. Repeat one final clean Stage 1 run. Include a controlled transient remote
+   read failure plus the SIGTERM/SIGKILL boundary cases and verify prompt
+   bounded retry, exact-child cleanup, recovered generation publication,
+   complete audit evidence, and final local/remote convergence.
+5. Keep `PERF-001` experimental during that rerun. Do not advance to Stage 2
+   recovery or Stage 3 multi-machine work until `GEN-002`, `LOG-001`,
+   `RETRY-001`, and the Stage 1 acceptance evidence pass. Later product issues
+   such as remote purge, profile import, notifications, and Dock polish are not
+   blockers for this rerun.
 
 ### GEN-001: Retry generation publication without aborting the backup set
 
@@ -153,6 +166,57 @@ Required behavior:
   payload-complete/report-processing crash windows in the interruption matrix.
 - Surface `payload converged; generation recovery pending` until the recovered
   generation is verified rather than marking the entire folder fully complete.
+
+### RETRY-001: Promptly recover ambiguous transient rclone failures
+
+**Priority:** high; fix before the next clean Stage 1 acceptance rerun.
+
+**Observed on 2026-08-14:** after macOS wake/restart recovery, folder 5 resumed
+with 2,110 planned transfers. At 10:52:35 Dropbox returned one destination-
+directory read error for
+`data/experiments/enrich-fetch/a1-2026-05-30T22-fetch-400/bodies/265-developers.google.com`:
+`unexpected error occurred`. Rclone retained `Errors: 1 (retrying may help)`,
+continued copying, recorded 2,442 added report paths with zero individual
+failed-transfer paths, and exited 1 at 11:31:23.
+
+A direct read-only listing of that exact remote directory later returned exit
+0, proving the provider read error was transient. Safe Sync's temporary-error
+classifier recognizes exit 5 and specific timeout/network strings but not this
+generic Dropbox response, so it treated the attempt as fatal. The daemon stayed
+alive and the schema-2 queue/report plus recovered 14,964-change set remained
+safe, but no retry countdown was shown and no immediate retry was scheduled.
+The normal 1,800-second fallback finally started a new reconciliation at
+12:01:24 and restored health to `ok`.
+
+That reconciliation exited 0, committed a zero-new-change comparison, and used
+the durable accumulated changes to publish
+`gen_20260814T160238Z_67cb88254a` with all 14,964 changes. The cycle completed
+all five folders and emptied the pending queue at 12:03:04. Runtime health is
+correctly `ok`, but the idle status projection still retains the obsolete
+`failed_folder` value, reinforcing the status-cleanup requirement below.
+
+This was therefore neither data corruption nor a permanently dead daemon, but
+it was a real 30-minute backup-completeness delay presented as an indefinite
+error. A longer configured fallback would make the delay longer.
+
+Required behavior:
+
+- Treat a known Dropbox destination-list/read failure as retryable. For other
+  ambiguous non-authentication, non-configuration rclone exits with a durable
+  pending folder, prefer bounded convergence retry over a terminal idle state.
+- Preserve the committed attempt report and accumulated net changes across
+  retries; a successful no-change convergence must still publish the recovered
+  generation exactly once.
+- Enter an explicit `retry_pending` state with the reason, attempt number, and
+  countdown. Use bounded adaptive backoff, avoid a rapid retry loop, and retain
+  attention state when repeated attempts continue to fail.
+- Clear active `last_error`, `failed_folder`, old transfer totals, current file,
+  and other failed-attempt projection fields when retry scanning begins, while
+  retaining the historical failure in the audit journal.
+- Add regression coverage for a generic exit-1 directory-read failure after
+  successful copies, daemon restart during the delay, repeated persistent
+  failure, fallback recovery, final generation publication, and accurate UI
+  state throughout.
 
 ### LOG-001: Protect audit history from diagnostic floods
 

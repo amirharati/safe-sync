@@ -70,6 +70,26 @@ worker, diagnostic pressure preserves the audit reserve, between-folder cloud
 flushes finish with a verified content-addressed manifest pointer, and the
 8-transfer baseline/4-transfer retry materially reduces Dropbox throttling.
 
+**Clean-rerun incident, 2026-08-14:** folders 1-4 completed and folder 5 safely
+resumed after an overnight macOS sleep/restart. Dropbox then returned one
+generic `unexpected error occurred` while rclone read a destination directory.
+Rclone continued its transfers but exited 1 with one retained error. Safe Sync
+preserved the durable report and pending generation state but missed the
+temporary-error classifier, remained idle/error for 30 minutes, and recovered
+only when the normal fallback reconciliation ran. The same remote directory was
+readable afterward. Track this as `RETRY-001`. Do not erase this run yet: first
+preserve its evidence. The fallback comparison subsequently exited 0, published
+generation `gen_20260814T160238Z_67cb88254a` containing the accumulated 14,964
+changes, completed all five folders, and emptied the durable queue. Audit health
+remained good with no gaps. Status returned to healthy/complete but retained a
+stale `failed_folder` value, which is also part of `RETRY-001`.
+
+Before the next clean reset, implement prompt bounded recovery for this case
+and the `LOG-002` graceful-shutdown event correction in one reviewed build.
+Then preserve the current evidence, clean only the disposable machine-owned
+remote namespace, reinstall once, and repeat Stage 1 with controlled transient
+failure and interruption cases. Do not advance to Stage 2 until that run passes.
+
 ### Stage 2: Recovery on one profile/computer
 
 Remain on the same computer/profile. Exercise selected-version history and the
@@ -139,7 +159,7 @@ too_many_requests
 Trying again in 300 seconds
 ```
 
-Safe Sync deliberately has no whole-transfer deadline. Large models and data files may take as long as they need while progress continues. Rclone still has short connection and inactive-network timeouts. A temporary exit 5 or timeout is retained in the profile's durable per-folder queue and retried with bounded backoff; completed folders are not repeated, and unrelated later folders continue unless Dropbox imposes a provider-wide cooldown.
+Safe Sync deliberately has no whole-transfer deadline. Large models and data files may take as long as they need while progress continues. Rclone still has short connection and inactive-network timeouts. A temporary exit 5 or recognized timeout is retained in the profile's durable per-folder queue and retried with bounded backoff; completed folders are not repeated, and unrelated later folders continue unless Dropbox imposes a provider-wide cooldown. `RETRY-001` extends that prompt bounded recovery to ambiguous Dropbox directory-read exit-1 failures that currently wait for the normal fallback reconciliation.
 
 During testing, confirm that Status names the pending folder and retry delay,
 then let the daemon retry it. Do not manually hammer Dropbox in a loop.
