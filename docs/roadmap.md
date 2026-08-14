@@ -364,6 +364,29 @@ historical completeness. Permanent circular-journal gaps remain visible as
 Activity provides a `Recent Warnings` view for the last 24 hours, while stale
 warning text cannot override an actively healthy sync/transfer/publication.
 
+### SERVICE-001: Do not self-heal an intentional backend stop
+
+**Priority:** minor; track for the next service-control maintenance pass. It is
+not a blocker for the prepared clean Stage 1 rerun.
+
+**Observed during the 2026-08-14 clean reset:** `safe-sync stop` returned
+`service: stopped`, but the still-running tray polled during the shutdown race,
+interpreted the transition as stale health, and invoked its automatic restart
+path. Launchd reloaded `com.safe-sync.daemon` seconds later. Quitting the exact
+tray process first and then stopping the backend worked; no remote deletion was
+attempted until launchd and the process table both proved Safe Sync absent.
+
+Required behavior:
+
+- Distinguish an explicit operator stop from an unexpectedly stale running
+  daemon. The tray must not invoke stale self-heal after a CLI or UI stop.
+- Require positive evidence that the service is still loaded/running before
+  stale self-heal can call restart, and suppress healing across the intentional
+  stop transition for a bounded interval or durable stop marker.
+- Keep automatic recovery for a genuinely stale loaded daemon.
+- Add a regression for the stop/status-poll race and verify Start Backend still
+  works normally afterward.
+
 ### UI-001: Distinguish configured folders from current sync folder
 
 **Priority:** fix after the current basic one-profile logging dogfood review,
