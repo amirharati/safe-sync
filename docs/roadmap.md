@@ -217,6 +217,37 @@ line cannot change in place. The fix must cap/sample rclone diagnostics per
 operation and ensure a temporary diagnostic level cannot continue producing an
 unbounded raw child stream after expiry.
 
+### LOG-002: Classify graceful backup interruption without a false error
+
+**Priority:** minor; fix in the next maintenance round after the active Stage 1
+run completes. Do not interrupt the current backup to deploy it.
+
+**Observed on 2026-08-14:** macOS fully woke at 10:51 after an overnight idle-
+sleep cycle and restarted the GUI launchd session. Launchd sent SIGTERM to the
+previous daemon. Safe Sync correctly signaled and waited for its exact rclone
+child, emitted `runtime.stopping` and `runtime.stopped`, restarted without an
+orphan, recovered the prior 14,964-change report, and resumed with only 2,110
+file transfers remaining. Runtime health correctly returned to `ok` with no
+current warning or error.
+
+The audit stream nevertheless records an error-severity `backup.failed` event
+with `reason: DaemonShutdown` and `error: signal 15`. This makes an expected,
+successfully recovered lifecycle transition look like a real backup failure.
+
+Required behavior:
+
+- Handle `DaemonShutdown` separately from unexpected backup exceptions.
+- Record a correlated interruption/cancellation lifecycle event at info or
+  warning severity, including the signal, operation, folder, report identity,
+  and whether restart recovery is pending.
+- Preserve the later `backup.report_recovered` evidence and link it to the
+  interrupted operation; do not erase or rewrite history.
+- Keep genuine rclone exits, unhandled exceptions, failed graceful termination,
+  and unrecoverable reports as error-level backup failures.
+- Add SIGTERM regression coverage proving clean child exit, no orphan overlap,
+  no false error event, durable report recovery, and eventual generation
+  publication.
+
 ### STATUS-001: Clear expired backoff warnings after retry resumes
 
 **Priority:** fix after the current Stage 1 dogfood review and before Stage 2
