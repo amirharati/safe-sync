@@ -36,9 +36,11 @@ separate future path for allowlisted durable recovery events.
    including clearing stale failed-folder/progress fields as soon as recovery
    starts. This source pass is implemented with automated retry/interruption
    coverage; commit and deploy the reviewed result before the clean rerun.
-3. After review, stop Safe Sync cleanly, preserve the completed run's logs and
-   reports, remove only the disposable active-machine Dropbox namespace, and
-   reinstall the reviewed commit once.
+3. Reset preparation completed on 2026-08-14: the final audit/reports/generations
+   are preserved, the tray and backend are stopped, only the disposable
+   `amirs-macbook-pro` payload/manifests/audit/registry targets were removed,
+   and the prior local state/logs were recoverably archived. The Ubuntu registry
+   and separate `test/` namespace remain. Reinstall the reviewed commit once.
 4. Repeat one final clean Stage 1 run. Include a controlled transient remote
    read failure plus the SIGTERM/SIGKILL boundary cases and verify prompt
    bounded retry, exact-child cleanup, recovered generation publication,

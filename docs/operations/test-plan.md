@@ -98,6 +98,16 @@ stale status cleanup, and graceful SIGTERM report recovery without a false
 `backup.failed`. The complete backend suite passes 130 tests and the production
 UI build passes. Real-provider clean-rerun acceptance is still required.
 
+**Clean reset prepared, 2026-08-14:** the final audit, reports, and generations
+were preserved before stopping the tray/backend. Exact remote checks now prove
+the disposable `amirs-macbook-pro` payload, manifests, audit, trash, and registry
+targets absent; the Ubuntu registry record and separate `computer-backups/test`
+namespace remain. Prior local runtime state and raw logs were recoverably moved
+to `safe-sync-stage1-final-archive-2026-08-14-1219` sibling directories, and the
+active state/log directories are empty with mode 700. Configuration and the
+Safe Sync-owned rclone authorization remain in place. The next action is one
+`./install.sh --update`, followed by fresh status/journal verification.
+
 ### Stage 2: Recovery on one profile/computer
 
 Remain on the same computer/profile. Exercise selected-version history and the
