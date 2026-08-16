@@ -141,7 +141,7 @@ def test_daemon_runs_manual_backup_immediately_and_preserves_request_during_run(
 
     calls = []
 
-    def fake_run_all(_config, _dry_run, api_state):
+    def fake_run_all(_config, _dry_run, api_state, _requested_folder_ids=None):
         calls.append(True)
         if len(calls) == 1:
             api_state.request_backup()
@@ -201,7 +201,7 @@ def test_daemon_runs_retry_immediately_when_backoff_expires(monkeypatch, tmp_pat
     def fake_server_start(_server):
         return None
 
-    def fake_run_all(_config, _dry_run, api_state):
+    def fake_run_all(_config, _dry_run, api_state, _requested_folder_ids=None):
         calls.append(True)
         if len(calls) == 1:
             api_state.update(
@@ -231,6 +231,100 @@ def test_daemon_runs_retry_immediately_when_backoff_expires(monkeypatch, tmp_pat
     assert run_daemon(args, config_path, normalized_config(config)) == 0
     assert len(calls) == 2
     assert scheduler_triggers == ["automatic", "retry"]
+
+
+def test_daemon_targets_only_changed_folders_after_startup_reconciliation(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config = default_config("test-machine")
+    folders = []
+    for folder_id in ("first", "second"):
+        local = tmp_path / folder_id
+        local.mkdir()
+        folders.append(
+            {
+                "id": folder_id,
+                "label": folder_id,
+                "local_path": str(local),
+                "remote_root": f"dropbox:computer-backups/test-machine/{folder_id}",
+                "trash_root": f"dropbox:computer-backups/.trash/test-machine/{folder_id}",
+                "enabled": True,
+            }
+        )
+    config["profiles"][0]["folders"] = folders
+    config["folders"] = folders
+    config["socket_path"] = str(tmp_path / "daemon.sock")
+    config["status_path"] = str(tmp_path / "status.json")
+    config["state_root"] = str(tmp_path / "state")
+    config["log_dir"] = str(tmp_path / "logs")
+    config["lock_file"] = str(tmp_path / "safe-sync.lock")
+    config["debounce_seconds"] = 0
+    config["min_interval_seconds"] = 0
+    config_path.write_text(json.dumps(config))
+
+    class FakeWatcher:
+        def __init__(self, _folders, wake):
+            self.wake = wake
+            self.consumes = 0
+
+        def start(self):
+            return None
+
+        def consume_details(self):
+            self.consumes += 1
+            if self.consumes == 2:
+                return {
+                    "second": {
+                        "paths": ["new.txt"],
+                        "path_count": 1,
+                        "paths_truncated": False,
+                    }
+                }
+            return {}
+
+        def healthy(self):
+            return True
+
+        def stop(self):
+            return None
+
+    requested = []
+    queued = []
+
+    def fake_run_all(_config, _dry_run, _api_state, requested_folder_ids=None):
+        requested.append(requested_folder_ids)
+        return 0, None
+
+    def capture_event(_config, event_type, **kwargs):
+        if event_type == "backup.queued":
+            queued.append(kwargs["data"])
+        return {}
+
+    monkeypatch.setattr(cli, "NativeWatcher", FakeWatcher)
+    monkeypatch.setattr(cli.DaemonApiServer, "start", lambda _server: None)
+    monkeypatch.setattr(cli, "ensure_local_profiles_registered", lambda _config: None)
+    monkeypatch.setattr(cli, "run_all_backups_runtime", fake_run_all)
+    monkeypatch.setattr(cli, "record_event", capture_event)
+    monkeypatch.setattr(cli.DaemonApiState, "wait", lambda _self, _timeout: None)
+
+    args = SimpleNamespace(poll_interval=None, debounce=None, dry_run=True, once=False, max_loops=2)
+    assert run_daemon(args, config_path, normalized_config(config)) == 0
+    assert requested == [None, ["second"]]
+    assert [(item["reason"], item["scope"], item["folder_ids"]) for item in queued] == [
+        ("startup", "full", ["first", "second"]),
+        ("watcher", "targeted", ["second"]),
+    ]
+
+
+def test_logging_level_only_config_change_is_hot_reloadable():
+    current = normalized_config(default_config("test-machine"))
+    updated = json.loads(json.dumps(current))
+    updated["logging"]["temporary_level"] = "debug"
+    updated["logging"]["temporary_until"] = "2099-01-01T00:00:00Z"
+
+    assert cli.logging_level_only_config_change(current, updated)
+
+    updated["debounce_seconds"] = current["debounce_seconds"] + 1
+    assert not cli.logging_level_only_config_change(current, updated)
 
 
 def test_pending_change_during_sync_goes_to_cooldown():
@@ -283,6 +377,66 @@ def test_dropbox_unexpected_destination_read_error_is_temporary():
 
     assert cli.text_looks_temporary_remote_failure(output, 1)
     assert cli.rclone_line_must_retain(output)
+
+
+def test_runtime_targeted_backup_checks_only_requested_folder(tmp_path, monkeypatch):
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("")
+    config = cli.default_config("test-machine")
+    folders = []
+    for folder_id in ("first", "changed", "last"):
+        local = tmp_path / folder_id
+        local.mkdir()
+        folders.append(
+            {
+                "id": folder_id,
+                "label": folder_id,
+                "local_path": str(local),
+                "remote_path": f"test-machine/{folder_id}",
+                "trash_path": f".trash/test-machine/{folder_id}",
+                "remote_root": f"dropbox:computer-backups/test/test-machine/{folder_id}",
+                "trash_root": f"dropbox:computer-backups/test/.trash/test-machine/{folder_id}",
+                "filter_file": str(filter_path),
+                "enabled": True,
+            }
+        )
+    config["profiles"][0]["folders"] = folders
+    config["folders"] = folders
+    config["filter_file"] = str(filter_path)
+    config["profiles"][0]["filter_file"] = str(filter_path)
+    config["state_root"] = str(tmp_path / "state")
+    config["status_path"] = str(tmp_path / "state/status.json")
+    config["log_dir"] = str(tmp_path / "logs")
+    config = cli.normalized_config(config)
+    calls = []
+    registry_calls = []
+
+    def fake_run(command_config, command, **_kwargs):
+        calls.append(command_config["folder_id"])
+        Path(command[command.index("--combined") + 1]).write_text("+ new.txt\n")
+        cli.LAST_COMMAND_OUTPUT = ""
+        return 0
+
+    monkeypatch.setattr(cli, "preflight", lambda _config: None)
+    monkeypatch.setattr(cli, "run_command", fake_run)
+    monkeypatch.setattr(cli, "publish_generation", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(cli, "update_registry", lambda _config: registry_calls.append(True) or 0)
+    monkeypatch.setattr(cli, "replicate_event_journal", lambda _config: {})
+    monkeypatch.setattr(cli, "record_event", lambda *_args, **_kwargs: None)
+    api_state = DaemonApiState()
+
+    assert cli.run_all_backups_runtime(config, False, api_state, ["changed"]) == (0, None)
+    assert calls == ["changed"]
+    assert registry_calls == [True]
+    assert not cli.backup_queue_path(config).exists()
+    status = api_state.snapshot()
+    assert status["backup_scope"] == "targeted"
+    assert status["scheduled_folders"] == ["changed"]
+    assert status["completed_folders"] == ["changed"]
+    assert status["pending_folders"] == []
+    assert status["configured_folder_count"] == 3
+    assert status["current_folder_index"] == 1
+    assert status["current_folder_total"] == 1
 
 
 def test_runtime_retries_only_unfinished_folder_and_keeps_partial_changes(tmp_path, monkeypatch):
@@ -725,7 +879,8 @@ def test_status_ui_separates_configured_folders_from_runtime_folder():
     assert "Current folder progress" in page
     assert 'data-current-folder-heading' in page
     assert '`${configuredCount}: ${names.join(", ")}`' in main
-    assert '`${completed.toLocaleString()}/${total.toLocaleString()} folders complete`' in main
+    assert '`${completed.toLocaleString()}/${total.toLocaleString()} ${folderKind} complete`' in main
+    assert 'const folderKind = targeted ? "changed folders" : "folders"' in main
     assert '`${failed.toLocaleString()} failed this attempt`' in main
     assert 'return "Pending folder"' in main
     assert 'return "Current folder"' in main

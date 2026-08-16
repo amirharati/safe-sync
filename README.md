@@ -365,10 +365,14 @@ The installer does the following:
 6. On macOS desktop installs, builds the production Tauri tray app at `~/Applications/Safe Sync.app` and enables its LaunchAgent.
 
 The daemon uses native FSEvents on macOS and inotify on Linux. It coalesces
-events by watched folder, ignores the same generated/dependency/cache paths as
-the rclone policy, and retains the configured fallback backup as reconciliation
-for events missed during sleep, restart, or watcher failure. A polling fallback
-is visible in status if the native backend cannot start.
+events by watched folder and checks only folders with detected changes during
+normal watcher runs. Changes detected while another folder is being checked
+are retained for the next targeted cycle; the active rclone operation is not
+interrupted. It ignores the same generated/dependency/cache paths as the rclone
+policy and retains startup, manual, and configured fallback full-profile
+backups as reconciliation for events missed during sleep, restart, or watcher
+failure. A polling fallback is visible in status if the native backend cannot
+start.
 
 Set `SAFE_SYNC_INSTALL_UI=0 ./install.sh` for a backend-only install. Set
 `SAFE_SYNC_APP_DIR=/Applications ./install.sh` to install the macOS tray app

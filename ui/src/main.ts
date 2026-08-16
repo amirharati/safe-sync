@@ -286,20 +286,33 @@ function configuredFoldersSummary(status: SafeSyncStatus): string {
 function overallBackupSummary(status: SafeSyncStatus): string {
   const rawFolders = status.sync_state?.folders;
   const folders = Array.isArray(rawFolders) ? rawFolders : [];
-  const total = Number(status.sync_state?.configured_folder_count ?? folders.length);
+  const scope = text(status.sync_state?.backup_scope, "full");
+  const rawScheduled = status.sync_state?.scheduled_folders;
+  const scheduled = Array.isArray(rawScheduled) ? new Set(rawScheduled.map(String)) : null;
+  const targeted = scope === "targeted" && scheduled !== null;
+  const total = targeted
+    ? scheduled.size
+    : Number(status.sync_state?.configured_folder_count ?? folders.length);
   if (total <= 0) return "No folders configured";
 
   const rawPending = status.sync_state?.pending_folders;
   const rawCompleted = status.sync_state?.completed_folders;
-  const pending = Array.isArray(rawPending) ? Math.min(total, new Set(rawPending.map(String)).size) : null;
-  const explicitlyCompleted = Array.isArray(rawCompleted) ? Math.min(total, new Set(rawCompleted.map(String)).size) : null;
+  const pendingIds = Array.isArray(rawPending) ? new Set(rawPending.map(String)) : null;
+  const completedIds = Array.isArray(rawCompleted) ? new Set(rawCompleted.map(String)) : null;
+  const pending = pendingIds === null
+    ? null
+    : Math.min(total, targeted ? [...pendingIds].filter((id) => scheduled?.has(id)).length : pendingIds.size);
+  const explicitlyCompleted = completedIds === null
+    ? null
+    : Math.min(total, targeted ? [...completedIds].filter((id) => scheduled?.has(id)).length : completedIds.size);
   if (pending === null && explicitlyCompleted === null) return "Backup cycle not started";
 
   const completed = pending === null ? explicitlyCompleted ?? 0 : Math.max(0, total - pending);
   const state = syncState(status);
   const active = pending !== null && pending > 0 && ["syncing", "publishing"].includes(state) ? 1 : 0;
   const waiting = pending === null ? Math.max(0, total - completed - active) : Math.max(0, pending - active);
-  const parts = [`${completed.toLocaleString()}/${total.toLocaleString()} folders complete`];
+  const folderKind = targeted ? "changed folders" : "folders";
+  const parts = [`${completed.toLocaleString()}/${total.toLocaleString()} ${folderKind} complete`];
   if (active > 0) parts.push(`${active} active`);
   if (waiting > 0) parts.push(`${waiting.toLocaleString()} waiting`);
   return parts.join(" · ");

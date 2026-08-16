@@ -21,16 +21,19 @@ It should not implement sync logic. It should decide when to call the backup com
 
 ## Event Coalescing
 
-The daemon stores a simple dirty flag:
+The daemon stores a set of dirty configured-folder IDs:
 
 ```text
-dirty = true
+dirty_folders = {"folder-a", "folder-c"}
 ```
 
 It does not need a full queue of changed paths. Native events are coalesced by
-configured folder; rclone scans that folder and decides what changed. The
-configured fallback backup remains the reconciliation path for events missed
-during sleep, restart, or watcher failure.
+configured folder; rclone scans each dirty folder and decides what changed.
+Watcher-triggered work does not rescan unrelated folders. A currently running
+rclone process is not interrupted: events remain in the native watcher queue
+and their folder IDs are scheduled as the next targeted cycle. The configured
+startup and fallback full-profile backups remain the reconciliation paths for
+events missed during sleep, restart, or watcher failure.
 
 ## Ignore Policy
 
@@ -84,11 +87,15 @@ Loop behavior:
 2. Ignore generated paths before they mark a folder dirty.
 3. Coalesce relevant events by folder.
 4. Wait for the debounce window to be quiet.
-5. Run normal guarded backups for all enabled folders.
-6. Refresh this machine's registry file after successful real backups.
-7. Respect a minimum interval between runs.
-8. Enter backoff when rclone output indicates Dropbox rate limiting or registry update failure.
-9. Run a fallback reconciliation backup after the fallback interval even if no event was noticed.
+5. Run normal guarded backups for the dirty folders only. With no older durable
+   cycle pending, startup, Backup Now, and the fallback timer deliberately
+   reconcile all enabled folders.
+6. Keep retries and pending generation publication durable and ahead of newly
+   dirty work; do not interrupt an active rclone child to reorder it.
+7. Refresh this machine's registry file after successful real backups.
+8. Respect a minimum interval between runs.
+9. Enter backoff when rclone output indicates Dropbox rate limiting or registry update failure.
+10. Run a fallback reconciliation backup after the fallback interval even if no event was noticed.
 
 Service install is handled by the repo installer:
 

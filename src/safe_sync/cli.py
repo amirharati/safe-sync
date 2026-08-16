@@ -2124,14 +2124,22 @@ def backup_queue_path(config: dict[str, Any]) -> Path:
     return state_root_path(cfg) / "backup-queue" / name
 
 
-def _new_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> dict[str, Any]:
+def _new_backup_queue(
+    config: dict[str, Any],
+    folders: list[dict[str, Any]],
+    *,
+    scope: str = "full",
+) -> dict[str, Any]:
     cfg = normalized_config(config)
     created = now_iso()
+    scheduled_folder_ids = [str(folder["id"]) for folder in folders]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "cycle_id": new_operation_id("cycle"),
         "profile_id": cfg["profile_id"],
         "machine_id": cfg["machine_id"],
+        "scope": scope,
+        "scheduled_folder_ids": scheduled_folder_ids,
         "created_at": created,
         "updated_at": created,
         "items": [
@@ -2141,10 +2149,40 @@ def _new_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> 
     }
 
 
-def load_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+def selected_backup_folders(
+    folders: list[dict[str, Any]],
+    requested_folder_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Return an ordered, de-duplicated enabled-folder selection.
+
+    ``None`` means a full reconciliation. An explicit empty list means resume
+    only work that is already present in the durable queue.
+    """
+    if requested_folder_ids is None:
+        return list(folders)
+    folder_by_id = {str(folder["id"]): folder for folder in folders}
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_folder_id in requested_folder_ids:
+        folder_id = str(raw_folder_id)
+        if folder_id in seen or folder_id not in folder_by_id:
+            continue
+        seen.add(folder_id)
+        selected.append(folder_by_id[folder_id])
+    return selected
+
+
+def load_backup_queue(
+    config: dict[str, Any],
+    folders: list[dict[str, Any]],
+    requested_folder_ids: list[str] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    requested_folders = selected_backup_folders(folders, requested_folder_ids)
+    requested_ids = [str(folder["id"]) for folder in requested_folders]
+    requested_scope = "full" if requested_folder_ids is None else "targeted"
     path = backup_queue_path(config)
     if not path.exists():
-        return _new_backup_queue(config, folders), False
+        return _new_backup_queue(config, requested_folders, scope=requested_scope), False
     try:
         queue = json.loads(path.read_text())
     except json.JSONDecodeError as exc:
@@ -2152,18 +2190,66 @@ def load_backup_queue(config: dict[str, Any], folders: list[dict[str, Any]]) -> 
     cfg = normalized_config(config)
     if queue.get("profile_id") != cfg["profile_id"] or queue.get("machine_id") != cfg["machine_id"]:
         raise TransferError(f"backup retry state belongs to another profile: {path}")
-    enabled = {str(folder["id"]) for folder in folders}
+    folder_by_id = {str(folder["id"]): folder for folder in folders}
+    enabled = set(folder_by_id)
     items = [item for item in queue.get("items") or [] if str(item.get("folder_id")) in enabled]
     for item in items:
         item.setdefault("stage", "payload")
         item.setdefault("attempts", 0)
         item.setdefault("changes", [])
         item.setdefault("attempt", None)
-        folder_cfg = folder_config(config, next(folder for folder in folders if folder["id"] == item["folder_id"]))
+        folder_cfg = folder_config(config, folder_by_id[str(item["folder_id"])])
         if pending_generation_path(folder_cfg).exists():
             item["stage"] = "generation"
+
+    # A normal ``None`` selection means "full" only when creating a fresh
+    # queue. If durable retry work already exists, preserve the old contract:
+    # resume only its unfinished items. Explicit watcher selections may merge
+    # newly dirty folders into that queue.
+    if requested_folder_ids is not None:
+        existing_ids = {str(item["folder_id"]) for item in items}
+        for folder in requested_folders:
+            folder_id = str(folder["id"])
+            if folder_id in existing_ids:
+                continue
+            items.append({"folder_id": folder_id, "stage": "payload", "attempts": 0, "changes": [], "attempt": None})
+            existing_ids.add(folder_id)
+
+    # A durable retry/generation is always safest first. Newly dirty folders
+    # then take priority over untouched reconciliation work without interrupting
+    # the rclone process that was already in flight.
+    requested_set = set(requested_ids)
+    retry_items = [
+        item
+        for item in items
+        if item.get("stage") != "payload" or int(item.get("attempts", 0)) > 0
+    ]
+    retry_identities = {id(item) for item in retry_items}
+    requested_items = [
+        item for item in items
+        if id(item) not in retry_identities and str(item["folder_id"]) in requested_set
+    ]
+    requested_identities = {id(item) for item in requested_items}
+    remaining_items = [
+        item for item in items
+        if id(item) not in retry_identities and id(item) not in requested_identities
+    ]
+    items = retry_items + requested_items + remaining_items
+
+    scheduled = [
+        str(folder_id)
+        for folder_id in queue.get("scheduled_folder_ids") or []
+        if str(folder_id) in enabled
+    ]
+    if not scheduled:
+        scheduled = [str(item["folder_id"]) for item in items]
+    for folder_id in requested_ids:
+        if folder_id not in scheduled:
+            scheduled.append(folder_id)
+    queue["scope"] = "full" if queue.get("scope") == "full" else "targeted"
+    queue["scheduled_folder_ids"] = scheduled
     queue["items"] = items
-    queue["schema_version"] = 2
+    queue["schema_version"] = 3
     return queue, True
 
 
@@ -2245,11 +2331,31 @@ def reconcile_backup_queue_reports(config: dict[str, Any], queue: dict[str, Any]
     return recovered
 
 
-def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: DaemonApiState) -> tuple[int, str | None]:
+def run_all_backups_runtime(
+    config: dict[str, Any],
+    dry_run: bool,
+    api_state: DaemonApiState,
+    requested_folder_ids: list[str] | None = None,
+) -> tuple[int, str | None]:
     folders = enabled_folders(config)
-    total_folders = len(folders)
+    configured_folder_count = len(folders)
     folder_by_id = {str(folder["id"]): folder for folder in folders}
-    queue, resumed = load_backup_queue(config, folders) if not dry_run else (_new_backup_queue(config, folders), False)
+    requested_folders = selected_backup_folders(folders, requested_folder_ids)
+    requested_scope = "full" if requested_folder_ids is None else "targeted"
+    queue, resumed = (
+        load_backup_queue(config, folders, requested_folder_ids)
+        if not dry_run
+        else (_new_backup_queue(config, requested_folders, scope=requested_scope), False)
+    )
+    backup_scope = str(queue.get("scope") or requested_scope)
+    scheduled_folder_ids = [
+        str(folder_id)
+        for folder_id in queue.get("scheduled_folder_ids") or []
+        if str(folder_id) in folder_by_id
+    ]
+    if not scheduled_folder_ids:
+        scheduled_folder_ids = [str(item["folder_id"]) for item in queue.get("items") or []]
+    scheduled_folder_count = len(scheduled_folder_ids)
     if not dry_run:
         save_backup_queue(config, queue)
         recovered_reports = reconcile_backup_queue_reports(config, queue)
@@ -2269,7 +2375,8 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
     retry_delay = 0
     retry_reason: str | None = None
     provider_limited = False
-    completed_this_run: list[str] = []
+    pending_at_start = {str(item["folder_id"]) for item in queue.get("items") or []}
+    completed_this_run = [folder_id for folder_id in scheduled_folder_ids if folder_id not in pending_at_start]
 
     for item in list(queue["items"]):
         folder_id = str(item["folder_id"])
@@ -2279,7 +2386,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             if not dry_run:
                 save_backup_queue(config, queue)
             continue
-        index = next(position for position, candidate in enumerate(folders, start=1) if candidate["id"] == folder_id)
+        index = scheduled_folder_ids.index(folder_id) + 1 if folder_id in scheduled_folder_ids else 1
         folder_cfg = folder_config(config, folder)
         previous_attempt = item.get("attempt") if isinstance(item.get("attempt"), dict) else {}
         operation_id = (
@@ -2301,7 +2408,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             state="publishing" if item["stage"] == "generation" else "syncing",
             folder_id=folder_id,
             current_folder_index=index,
-            current_folder_total=total_folders,
+            current_folder_total=scheduled_folder_count,
             current_folder_label=folder.get("label", folder["id"]),
             local_path=str(Path(folder["local_path"]).expanduser()),
             last_start=now_iso(),
@@ -2318,7 +2425,9 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             retry_after_seconds=None,
             retry_attempt=None,
             retry_kind=None,
-            configured_folder_count=total_folders,
+            configured_folder_count=configured_folder_count,
+            backup_scope=backup_scope,
+            scheduled_folders=scheduled_folder_ids,
             pending_folders=pending_ids,
             completed_folders=completed_this_run,
             retry_cycle=bool(resumed),
@@ -2382,7 +2491,8 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 "trigger": "daemon",
                 "dry_run": dry_run,
                 "folder_index": index,
-                "folder_total": total_folders,
+                "folder_total": scheduled_folder_count,
+                "backup_scope": backup_scope,
                 "retry_cycle": bool(resumed),
                 "attempt": int(item.get("attempts", 0)) + 1,
             },
@@ -2403,7 +2513,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     state="syncing",
                     folder_id=folder_id,
                     current_folder_index=index,
-                    current_folder_total=total_folders,
+                    current_folder_total=scheduled_folder_count,
                     current_folder_label=folder.get("label", folder["id"]),
                     local_path=str(Path(folder["local_path"]).expanduser()),
                     **structured,
@@ -2449,7 +2559,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 backoff_seconds=exc.retry_after_seconds,
                 backoff_until=future_iso(exc.retry_after_seconds),
                 last_finish=now_iso(),
-                last_progress=f"Paused before folder {index} of {total_folders}",
+                last_progress=f"Paused before folder {index} of {scheduled_folder_count}",
             )
             break
         except TemporaryRemoteError as exc:
@@ -2499,7 +2609,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 current_file=None,
                 sync_phase="interrupted",
                 last_finish=now_iso(),
-                last_progress=f"Backup interrupted during shutdown on folder {index} of {total_folders}; recovery is pending",
+                last_progress=f"Backup interrupted during shutdown on folder {index} of {scheduled_folder_count}; recovery is pending",
             )
             raise
         except BaseException as exc:
@@ -2519,7 +2629,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 failed_folder=folder_id,
                 last_error=str(exc),
                 last_finish=now_iso(),
-                last_progress=f"Failed on folder {index} of {total_folders}",
+                last_progress=f"Failed on folder {index} of {scheduled_folder_count}",
             )
             raise
 
@@ -2572,7 +2682,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     backoff_seconds=retry_after,
                     backoff_until=future_iso(retry_after),
                     last_finish=now_iso(),
-                    last_progress=f"Dropbox throttled folder {index} of {total_folders}",
+                    last_progress=f"Dropbox throttled folder {index} of {scheduled_folder_count}",
                 )
                 break
             if text_looks_temporary_remote_failure(LAST_COMMAND_OUTPUT, code):
@@ -2612,7 +2722,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     retry_attempt=item["attempts"],
                     retry_kind="temporary_remote",
                     last_finish=now_iso(),
-                    last_progress=f"Temporary failure on folder {index} of {total_folders}; later folders will continue",
+                    last_progress=f"Temporary failure on folder {index} of {scheduled_folder_count}; later folders will continue",
                 )
                 continue
             error = reconnect_dropbox_message() if text_looks_auth_failure(LAST_COMMAND_OUTPUT) else f"rclone exit {code}"
@@ -2632,7 +2742,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                 failed_folder=folder_id,
                 last_error=error,
                 last_finish=now_iso(),
-                last_progress=f"Failed on folder {index} of {total_folders}",
+                last_progress=f"Failed on folder {index} of {scheduled_folder_count}",
             )
             return code, folder_id
 
@@ -2673,7 +2783,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
                     retry_attempt=item["attempts"],
                     retry_kind="temporary_remote",
                     last_finish=now_iso(),
-                    last_progress=f"Folder data converged; change publication is pending for folder {index} of {total_folders}",
+                    last_progress=f"Folder data converged; change publication is pending for folder {index} of {scheduled_folder_count}",
                 )
                 continue
 
@@ -2709,7 +2819,9 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             last_warning=warning,
             last_error=None,
             queued_backup=True,
-            configured_folder_count=total_folders,
+            configured_folder_count=configured_folder_count,
+            backup_scope=backup_scope,
+            scheduled_folders=scheduled_folder_ids,
             pending_folders=pending_ids,
             completed_folders=completed_this_run,
             backoff_seconds=retry_delay,
@@ -2718,7 +2830,7 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
             retry_after_seconds=retry_delay,
             retry_attempt=int(queue["items"][0].get("attempts", 0)),
             last_finish=now_iso(),
-            last_progress=f"{len(pending_ids)} of {total_folders} folders pending; completed folders will not be repeated",
+            last_progress=f"{len(pending_ids)} of {scheduled_folder_count} scheduled folders pending; completed folders will not be repeated",
             retry_kind="provider_rate_limit" if provider_limited else "temporary_remote",
         )
         return RATE_LIMIT_EXIT, failed_folder
@@ -2726,9 +2838,11 @@ def run_all_backups_runtime(config: dict[str, Any], dry_run: bool, api_state: Da
     publish_runtime_status(
         api_state,
         config,
-        configured_folder_count=total_folders,
+        configured_folder_count=configured_folder_count,
+        backup_scope=backup_scope,
+        scheduled_folders=scheduled_folder_ids,
         pending_folders=[],
-        completed_folders=[str(folder["id"]) for folder in folders],
+        completed_folders=scheduled_folder_ids,
         queued_backup=False,
         failed_folder=None,
         interrupted_folder=None,
@@ -3347,6 +3461,22 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         return run_daemon(args, config_path, config)
 
 
+HOT_LOGGING_CONFIG_KEYS = {"level", "temporary_level", "temporary_until"}
+
+
+def logging_level_only_config_change(current: dict[str, Any], updated: dict[str, Any]) -> bool:
+    """Return whether a config update is safe to apply without daemon restart."""
+    current_without_logging = {key: value for key, value in current.items() if key != "logging"}
+    updated_without_logging = {key: value for key, value in updated.items() if key != "logging"}
+    if current_without_logging != updated_without_logging:
+        return False
+    current_logging = dict(current.get("logging") or {})
+    updated_logging = dict(updated.get("logging") or {})
+    current_static = {key: value for key, value in current_logging.items() if key not in HOT_LOGGING_CONFIG_KEYS}
+    updated_static = {key: value for key, value in updated_logging.items() if key not in HOT_LOGGING_CONFIG_KEYS}
+    return current_static == updated_static and current_logging != updated_logging
+
+
 def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, Any]) -> int:
     validate_local_path(config)
     orphan_result = reconcile_orphan_child(config)
@@ -3370,6 +3500,8 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         watcher_warning = f"native watcher unavailable; using full-tree polling: {exc}"
         previous_snapshots = folder_snapshots(config)
     startup_now = time.monotonic()
+    startup_reconcile_pending = True
+    dirty_folder_ids: set[str] = set()
     next_link_check = startup_now
     next_audit_flush = startup_now + settings_from_config(config).cloud_flush_interval_seconds
     daemon.mark_dirty(startup_now)
@@ -3440,20 +3572,38 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
             now = time.monotonic()
             latest_mtime_ns = config_path.stat().st_mtime_ns if config_path.exists() else None
             if latest_mtime_ns != config_mtime_ns:
-                publish_runtime_status(
-                    api_state,
-                    config,
-                    state="watching",
-                    last_error=None,
-                    note="config changed; restarting daemon",
-                )
-                record_event(
-                    config,
-                    "runtime.stopping",
-                    component="runtime",
-                    data={"reason": "configuration_changed"},
-                )
-                return 0
+                updated_config = normalized_config(load_config(config_path))
+                if logging_level_only_config_change(config, updated_config):
+                    old_level = settings_from_config(config).level
+                    config = updated_config
+                    config_mtime_ns = latest_mtime_ns
+                    new_level = settings_from_config(config).level
+                    publish_runtime_status(
+                        api_state,
+                        config,
+                        note=f"logging level applied without restart: {new_level}",
+                    )
+                    record_event(
+                        config,
+                        "logging.level_applied",
+                        component="logging",
+                        data={"old_level": old_level, "new_level": new_level, "restart": False},
+                    )
+                else:
+                    publish_runtime_status(
+                        api_state,
+                        config,
+                        state="watching",
+                        last_error=None,
+                        note="config changed; restarting daemon",
+                    )
+                    record_event(
+                        config,
+                        "runtime.stopping",
+                        component="runtime",
+                        data={"reason": "configuration_changed"},
+                    )
+                    return 0
             if watcher_mode == "native" and not watcher.healthy():
                 watcher.stop()
                 watcher_mode = "polling"
@@ -3569,6 +3719,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     for folder_id in changed
                 }
             if changed:
+                dirty_folder_ids.update(str(folder_id) for folder_id in changed)
                 daemon.mark_dirty(now)
                 local_link_changes = detect_local_link_changes(config, changed)
                 for folder_id in changed:
@@ -3617,7 +3768,8 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
 
             manual_run = manual_backup_pending
             retry_run = retry_backup_pending
-            automatic_due = retry_run or daemon.should_sync_after_debounce(now) or daemon.should_run_fallback(now)
+            fallback_run = daemon.should_run_fallback(now)
+            automatic_due = retry_run or daemon.should_sync_after_debounce(now) or fallback_run
             should_run = daemon.should_run_backup(now, manual=manual_run, retry=retry_run)
             blocking_jobs = backup_blocking_jobs(config)
             if should_run and blocking_jobs:
@@ -3635,11 +3787,26 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
             if should_run:
                 manual_backup_pending = False
                 retry_backup_pending = False
+                if manual_run or startup_reconcile_pending or fallback_run:
+                    requested_folder_ids: list[str] | None = None
+                    backup_reason = "manual" if manual_run else "startup" if startup_reconcile_pending else "fallback"
+                    dirty_folder_ids.clear()
+                    startup_reconcile_pending = False
+                else:
+                    requested_folder_ids = sorted(dirty_folder_ids)
+                    backup_reason = "retry" if retry_run else "watcher"
+                    dirty_folder_ids.difference_update(requested_folder_ids)
                 record_event(
                     config,
                     "backup.queued",
                     component="scheduler",
-                    data={"trigger": "manual" if manual_run else "retry" if retry_run else "automatic", "ready": True},
+                    data={
+                        "trigger": "manual" if manual_run else "retry" if retry_run else "automatic",
+                        "reason": backup_reason,
+                        "ready": True,
+                        "scope": "full" if requested_folder_ids is None else "targeted",
+                        "folder_ids": [folder["id"] for folder in folders] if requested_folder_ids is None else requested_folder_ids,
+                    },
                 )
                 daemon.note_sync_started(now)
                 publish_runtime_status(
@@ -3652,7 +3819,12 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 )
                 failed_folder = None
                 try:
-                    code, failed_folder = run_all_backups_runtime(config, args.dry_run, api_state)
+                    code, failed_folder = run_all_backups_runtime(
+                        config,
+                        args.dry_run,
+                        api_state,
+                        requested_folder_ids,
+                    )
                     error_text = f"rclone exit {code}" if code != 0 else None
                 except SystemExit as exc:
                     code = int(exc.code) if isinstance(exc.code, int) else 75

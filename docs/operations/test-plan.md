@@ -48,6 +48,20 @@ remote-trash handling, cloud log replication, and final local/remote state.
 Do not advance until unexplained missing, duplicate, or contradictory events
 have been resolved.
 
+**Targeted incremental acceptance, 2026-08-15:** reinstall the reviewed build
+without deleting the established disposable remote baseline. Let the startup
+full-profile reconciliation finish and wait for `Watching`. Then create a new
+uniquely named subfolder and a few small files under the disposable `temp`
+folder. The watcher should queue `temp` only after the configured debounce,
+Status should identify a targeted `1/1 changed folders` cycle, and no unrelated
+folder comparison should run. If a file changes while another operation is
+already active, it may wait for that operation to finish, but it must become the
+next targeted cycle without waiting for the fallback timer. Review the event
+chain from `watcher.change_detected` through a targeted `backup.queued`, payload
+result, generation publication, audit replication, and healthy completion.
+After that passes, separately exercise modify, delete, rename, nested-directory,
+and empty-directory behavior.
+
 **Overnight result, 2026-08-13:** payload behavior passed on the disposable
 five-folder profile. Status is healthy and watching with `5/5` complete, an
 empty durable queue, zero failed files, and no current warning/error. The large

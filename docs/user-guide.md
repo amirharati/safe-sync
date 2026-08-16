@@ -135,8 +135,12 @@ safe-sync setup --folder ~/projects --allow-unsafe-local-path
 
 The per-user backend starts after login and watches enabled folders with native
 filesystem events. Normal file changes are coalesced and backed up after the
-debounce period. A periodic reconciliation backup covers events missed during
-sleep or restart.
+debounce period. A normal watcher cycle compares only the folders where changes
+were detected, so activity in one small folder does not rescan every configured
+folder. An already-running folder operation finishes safely; newly detected
+folders run next. Startup, Backup Now, and the periodic fallback deliberately
+perform full-profile reconciliation to cover events missed during sleep or
+restart. If durable retry work exists, it is resumed before new work.
 
 In the desktop app:
 
@@ -157,6 +161,9 @@ across a restart or provider cooldown. The separately labeled `Current folder
 progress` shows the stable file percentage within the named active folder. It
 also keeps the comparison-phase total fixed if a provider failure makes
 rclone's retry denominator shrink, and reports failed files for that attempt.
+During a targeted watcher cycle, Overall backup says `changed folders` (for
+example, `0/1 changed folders complete`) while the configured-folder row still
+shows the complete profile.
 
 Dropbox uploads use verified synchronous batching with a larger small-file
 batch and transfer pool. Files remain directly mirrored and individually
@@ -371,6 +378,10 @@ Change the persistent level or temporarily enable Debug:
 safe-sync logs level normal
 safe-sync logs level debug --for 2h
 ```
+
+Logging-level-only changes are applied by the running backend without a restart
+or an extra startup reconciliation. Other configuration changes still restart
+the backend so watcher and folder ownership state are rebuilt safely.
 
 Query, filter, export, and inspect cloud replication:
 

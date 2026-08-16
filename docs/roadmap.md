@@ -478,6 +478,33 @@ persisting an equivalent complete plan), which adds startup delay, memory, and
 Dropbox API work. Treat that as a separate design decision only if the exact
 folder-completion summary proves insufficient during dogfooding.
 
+### SCHED-001: Target watcher backups to changed folders
+
+**Priority:** high for ordinary Stage 1 incremental testing.
+
+**Status:** implemented in source on 2026-08-15; awaiting installed dogfood
+acceptance. Native watcher events now accumulate durable scheduling intent by
+configured folder. After startup reconciliation, a watcher cycle checks only
+the dirty folders instead of rebuilding a five-folder queue. Work already in
+flight is allowed to finish; events collected meanwhile become the next
+targeted cycle. Durable retries and pending generation publication retain
+priority. Startup, manual Backup Now, and the fallback timer remain deliberate
+full-profile reconciliations; degraded polling still identifies dirty folders
+by per-folder snapshots.
+
+Runtime status exposes the cycle scope and scheduled folder IDs. The control
+panel therefore reports a watcher run as, for example, `1/1 changed folders`
+while still listing all configured folders separately. Changing only the
+temporary or persistent logging level is now hot-applied and no longer restarts
+the daemon or creates an unnecessary second startup reconciliation.
+
+Regression coverage proves a post-startup event in folder two schedules only
+folder two, the targeted runtime invokes rclone only for that folder, status is
+scoped to `1/1`, and logging-level-only configuration changes are reloadable.
+Installed acceptance must establish a quiet baseline, add a few files under
+the disposable `temp` folder, and confirm that no unrelated folder comparison
+runs before the new generation is published.
+
 ### PERF-001: Make Dropbox small-file backups practical
 
 **Priority:** critical and first to implement before the next clean Stage 1
