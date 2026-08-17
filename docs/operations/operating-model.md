@@ -24,7 +24,12 @@ Example shape for Mac:
 ~/safe-sync-test -> dropbox:computer-backups/test/<machine_id>/safe-sync-test
 ```
 
-Under the hood Safe Sync uses `rclone sync` with `--backup-dir`, so local deletes can be reflected in that machine's backup, but the old remote file is moved to trash first.
+Under the hood Safe Sync uses `rclone sync` without an app-owned backup
+directory. Local deletes can be reflected in that machine's backup, while
+Dropbox retains recoverable deleted files and prior versions for the account's
+plan window. Safe Sync's durable recovery pause prevents outbound backup while
+a selected Dropbox revision is staged, compared, and explicitly applied
+locally.
 
 ## Safe Receive
 

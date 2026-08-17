@@ -52,7 +52,8 @@ Upload/mirror local project folder to this machine's owned Dropbox backup folder
 Default behavior:
 
 - Uses `rclone sync`.
-- Uses remote trash via `--backup-dir`.
+- Uses Dropbox's plan-bounded version/deleted-file history instead of
+  app-owned remote trash or snapshots.
 - Excludes dependencies/build/cache artifacts.
 - Includes source, data, model artifacts, configs, lockfiles, notebooks, and logs.
 

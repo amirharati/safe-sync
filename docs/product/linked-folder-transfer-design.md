@@ -52,7 +52,7 @@ entry points for selective transfer, cloning, linked folders, and history.
 | Transfer | Download into verified staging on the destination filesystem. |
 | Apply | Move staged files into place; never download/copy directly over live files. |
 | Conflict | Keep local, keep both, replace selected, delete selected, or leave staged. No timestamp winner. |
-| Recovery | Preserve replaced/deleted local files in a journaled checkpoint; use Dropbox only as a secondary source. |
+| Recovery | Use Dropbox revisions as historical payload; pause backup and stage locally before explicit apply. Preserve replaced local files only in the receive job's rollback checkpoint. |
 | Clone | Clone into a new/empty destination and create a new local ownership identity. |
 | History | Recover selected versions first; do not promise full time travel until generation/inventory gates pass. |
 
@@ -505,21 +505,19 @@ the peer reviews changes when it next runs.
 
 ## History and Recovery
 
-### Safe Sync remote trash
+### Dropbox-native history
 
-Current backups already move replaced/deleted remote files into:
+As accepted in `RECOVERY-001`, normal backup keeps no Safe Sync-owned remote
+trash or latest snapshot. Dropbox's plan-bounded versions and deleted-file
+history are the historical payload. Safe Sync generations and audit identify
+changed paths without duplicating file contents.
 
-```text
-.trash/<machine_id>/<folder_id>/<timestamp>/<relative_path>
-```
-
-The first History UI can browse these paths and create a receive job for a
-selected older/deleted item. Recovery goes through staging and comparison,
-never directly over a local file.
-
-Remote trash is not yet a full point-in-time snapshot. It preserves prior
-content for replacements/deletions but does not by itself record that a newly
-added file did not exist at an older time.
+Selected recovery durably pauses outbound backup, lists revisions for one
+configured relative path, downloads the selected immutable revision into the
+existing excluded receive-job staging area, verifies the Dropbox content hash,
+and requires explicit Keep Both or Replace before local mutation. Broad Dropbox
+Rewind remains a website operation; Safe Sync stays paused until the rewound
+remote state is reconciled into the local source.
 
 ### Generation history
 
@@ -533,8 +531,8 @@ versions" rather than "restore the whole folder to this time."
 
 Dropbox can list file revisions, identify whether a revision is restorable,
 and download/restore a particular revision within the account's retention
-window. Safe Sync should record available file IDs/revisions as secondary
-recovery references.
+window. Safe Sync uses those revisions as the primary historical payload for
+content that has already reached Dropbox.
 
 The safe default is to download an older Dropbox revision into a receive job.
 Calling Dropbox restore directly changes the live remote file and creates a new
@@ -568,12 +566,13 @@ Replace the current raw Computers/Transfer separation with related surfaces:
 - Exact planned actions and checkpoint location.
 - Resume, Review, Apply Selected, Reveal Staging, Roll Back, and later Cleanup.
 
-### History
+### Recovery
 
-- Safe Sync remote-trash timestamps and relative paths.
-- Later generation/inventory history.
-- Dropbox revisions for a selected file when API support is available.
-- Recover into a receive job, not a direct restore.
+- Durable backup pause/resume state and clear local-source warning.
+- Dropbox revisions for a selected configured relative path.
+- Hash-verified staging plus bounded text diff or binary size/hash summary.
+- Keep Current, Keep Both, or explicit Replace through a receive job, never a
+  direct remote restore.
 
 The UI must continue showing the exact equivalent CLI command or job operation.
 
@@ -596,8 +595,11 @@ safe-sync links status [link-id]
 safe-sync links review <link-id>
 safe-sync links remove <link-id>
 
-safe-sync history list ...
-safe-sync history receive ...
+safe-sync recovery status
+safe-sync recovery pause
+safe-sync recovery revisions <folder-id> <relative-path>
+safe-sync recovery stage <folder-id> <relative-path> <revision>
+safe-sync recovery resume
 ```
 
 Commands should produce structured JSON internally and concise human output.
@@ -730,11 +732,12 @@ delete-versus-modify become visible conflicts; accepted changes do not loop.
 
 ### Phase 8: History and revision recovery
 
-- Browse Safe Sync remote trash and receive selected prior/deleted versions.
-- Retain enough generation/inventory evidence for explicitly supported
-  reconstruction windows.
-- Add Dropbox revision listing/download as an optional secondary provider.
-- Keep direct remote restore behind separate confirmation.
+- Keep no app-owned remote trash or snapshots.
+- Durably pause outbound backup while continuing to collect local watcher
+  changes.
+- List and download Dropbox revisions as the historical payload provider.
+- Hash-verify and compare in local receive-job staging; keep direct remote
+  restore/Rewind outside normal selected-file recovery.
 
 **Gate:** recovery first stages the selected version, identifies its source and
 timestamp, compares it with current local data, and supports checkpointed apply

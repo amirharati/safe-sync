@@ -235,6 +235,41 @@ def local_inventory(
     return inventory
 
 
+def local_selected_inventory(root: str | Path, selected_paths: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Inventory only selected local paths and their required parent entries."""
+    base = Path(root).expanduser().resolve(strict=False)
+    inventory: dict[str, dict[str, Any]] = {}
+    for raw in selected_paths:
+        relative = normalize_subpath(raw)
+        if not relative:
+            continue
+        parts = PurePosixPath(relative).parts
+        candidate = base.joinpath(*parts)
+        if not is_path_within(candidate.resolve(strict=False), base):
+            raise ScopeError(f"selected local path escapes configured root: {relative}")
+        parent = PurePosixPath(relative).parent
+        parents: list[str] = []
+        while parent.as_posix() not in {"", "."}:
+            parents.append(parent.as_posix())
+            parent = parent.parent
+        for parent_relative in reversed(parents):
+            if parent_relative in inventory:
+                continue
+            parent_path = base.joinpath(*PurePosixPath(parent_relative).parts)
+            entry = _entry_for_path(parent_path, include_hashes=True)
+            if entry is not None:
+                inventory[parent_relative] = entry
+        entry = _entry_for_path(candidate, include_hashes=True)
+        if entry is None:
+            continue
+        inventory[relative] = entry
+        if entry.get("type") == "directory":
+            nested = local_inventory(candidate, include_hashes=True)
+            for nested_relative, nested_entry in nested.items():
+                inventory[f"{relative}/{nested_relative}"] = nested_entry
+    return {path: inventory[path] for path in sorted(inventory)}
+
+
 def validate_inventory_collisions(inventory: dict[str, dict[str, Any]]) -> None:
     """Reject names that can alias on case-folding or normalizing filesystems."""
     canonical: dict[str, str] = {}
@@ -420,6 +455,7 @@ def generation_record(
     parent_generation: str | None = None,
     generation_id: str | None = None,
     completed_at: str | None = None,
+    snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_changes: list[dict[str, Any]] = []
     for raw_change in changes:
@@ -428,7 +464,7 @@ def generation_record(
         if not change["path"]:
             raise ScopeError("generation change path is required")
         normalized_changes.append(change)
-    return {
+    record = {
         "schema_version": SCHEMA_VERSION,
         "generation_id": generation_id or new_id("gen"),
         "parent_generation": parent_generation,
@@ -441,6 +477,9 @@ def generation_record(
         "changes": sorted(normalized_changes, key=lambda item: str(item["path"])),
         "complete": True,
     }
+    if snapshot is not None:
+        record["snapshot"] = snapshot
+    return record
 
 
 def generation_remote_dir(remote_base: str, machine_id: str, folder_id: str) -> str:
@@ -522,6 +561,7 @@ class JobStore:
         baseline_inventory: dict[str, dict[str, Any]] | None = None,
         source_generation: str | None = None,
         link_id: str | None = None,
+        destination_inventory_scoped: bool = False,
     ) -> dict[str, Any]:
         raw_target = Path(destination).expanduser()
         if raw_target.is_symlink():
@@ -569,6 +609,7 @@ class JobStore:
             "selected_paths": normalized_selections,
             "source_inventory": source_entries,
             "destination_inventory": destination_entries,
+            "destination_inventory_scoped": destination_inventory_scoped,
             "baseline_inventory": baseline_inventory,
             "comparison": comparison,
             "staged_inventory": {},
@@ -616,7 +657,10 @@ class JobStore:
 
     def _revalidate_destination(self, job: dict[str, Any]) -> None:
         destination = Path(job["destination"])
-        current = local_inventory(destination, include_hashes=True) if destination.exists() else {}
+        if job.get("destination_inventory_scoped"):
+            current = local_selected_inventory(destination, job.get("selected_paths") or []) if destination.exists() else {}
+        else:
+            current = local_inventory(destination, include_hashes=True) if destination.exists() else {}
         if not inventories_equal(current, job.get("destination_inventory") or {}):
             job["status"] = "needs_refresh"
             self.save(job)

@@ -149,6 +149,16 @@ const linkList = document.querySelector<HTMLElement>("[data-link-list]");
 const addLinkForm = document.querySelector<HTMLFormElement>("[data-add-link-form]");
 const historyFolder = document.querySelector<HTMLSelectElement>("[data-history-folder]");
 const historyList = document.querySelector<HTMLElement>("[data-history-list]");
+const recoveryRecentFolder = document.querySelector<HTMLSelectElement>("[data-recovery-recent-folder]");
+const recoveryRecentList = document.querySelector<HTMLElement>("[data-recovery-recent-list]");
+const recoveryForm = document.querySelector<HTMLFormElement>("[data-recovery-form]");
+const recoveryPath = document.querySelector<HTMLInputElement>("[data-recovery-path]");
+const recoveryState = document.querySelector<HTMLElement>("[data-recovery-state]");
+const recoveryGuidance = document.querySelector<HTMLElement>("[data-recovery-guidance]");
+const recoveryOutput = document.querySelector<HTMLElement>("[data-recovery-output]");
+const recoveryStagedActions = document.querySelector<HTMLElement>("[data-recovery-staged-actions]");
+const recoveryPauseButton = document.querySelector<HTMLButtonElement>("[data-action='pause-recovery']");
+const recoveryResumeButton = document.querySelector<HTMLButtonElement>("[data-action='resume-recovery']");
 const activityFilterForm = document.querySelector<HTMLFormElement>("[data-activity-filter-form]");
 const logLevelForm = document.querySelector<HTMLFormElement>("[data-log-level-form]");
 const auditEvents = document.querySelector<HTMLElement>("[data-audit-events]");
@@ -178,8 +188,9 @@ let dropboxConnectionKnown = false;
 let dropboxConnected = false;
 let jobsLoaded = false;
 let linksLoaded = false;
-let historyLoaded = false;
 let activityLoaded = false;
+let recoveryRecentLoaded = false;
+let latestRecoveryJob: Record<string, unknown> | null = null;
 let latestJobs: Array<Record<string, unknown>> = [];
 
 function text(value: unknown, fallback = "-"): string {
@@ -229,7 +240,7 @@ function tone(status: SafeSyncStatus): string {
   if (status.health === "warning") return "warning";
   if (status.service_state === "stopped") return "stopped";
   if (status.health === "stale") return "stale";
-  if (["syncing", "transferring", "dirty", "cooldown", "backoff"].includes(syncState(status))) return "active";
+  if (["syncing", "transferring", "dirty", "cooldown", "backoff", "recovery_paused"].includes(syncState(status))) return "active";
   if (status.health === "ok") return "ok";
   return "unknown";
 }
@@ -246,6 +257,7 @@ function headline(status: SafeSyncStatus): string {
   if (currentSyncState === "dirty") return "Changes queued";
   if (currentSyncState === "cooldown") return "Cooling down";
   if (currentSyncState === "backoff") return "Waiting";
+  if (currentSyncState === "recovery_paused") return "Recovery paused";
   if (status.health === "ok") return "Watching";
   return text(status.health, "Unknown");
 }
@@ -406,7 +418,7 @@ function actionNameForButton(button: HTMLButtonElement): string | null {
   if (action === "preview-transfer") return "transfer-preview";
   if (action === "run-transfer") return "transfer";
   if (action === "refresh-transfer") return "transfer";
-  if (["load-jobs", "show-job", "apply-job", "reconcile-job", "rollback-job"].includes(action ?? "")) return "jobs";
+  if (["load-jobs", "show-job", "open-job-staging", "open-job-destination", "apply-job", "reconcile-job", "rollback-job"].includes(action ?? "")) return "jobs";
   if (["load-link-status", "review-link", "remove-link", "add-link"].includes(action ?? "")) return "links";
   if (["load-history", "recover-history"].includes(action ?? "")) return "history";
   if (["load-activity", "filter-activity", "show-recent-warnings", "set-log-level", "debug-two-hours", "sync-audit-logs"].includes(action ?? "")) return "activity";
@@ -716,6 +728,19 @@ function renderLinkAndHistoryOptions(): void {
       historyFolder.append(option);
     }
     if (prior && [...historyFolder.options].some((option) => option.value === prior)) historyFolder.value = prior;
+  }
+  if (recoveryRecentFolder) {
+    const prior = recoveryRecentFolder.value;
+    recoveryRecentFolder.innerHTML = '<option value="">All tracked folders</option>';
+    for (const raw of latestConfig?.folders ?? []) {
+      const folder = raw as FolderView;
+      if (!folder.id) continue;
+      const option = document.createElement("option");
+      option.value = folder.id;
+      option.textContent = text(folder.label, folder.id);
+      recoveryRecentFolder.append(option);
+    }
+    if ([...recoveryRecentFolder.options].some((option) => option.value === prior)) recoveryRecentFolder.value = prior;
   }
   if (!addLinkForm) return;
   const local = formField(addLinkForm, "local_folder") as HTMLSelectElement | null;
@@ -1175,7 +1200,6 @@ async function addFolder(event: SubmitEvent): Promise<void> {
         local_path: localPath,
         label,
         remote_path: "",
-        trash_path: "",
         disabled: false,
       },
     }));
@@ -1481,6 +1505,18 @@ function jobDecisionOptions(category: string): string[] {
   return ["same"];
 }
 
+function jobDecisionLabel(policy: string): string {
+  return ({
+    add: "Restore into watched folder",
+    leave_staged: "Keep only in staging",
+    keep_local: "Keep current local file",
+    keep_both: "Keep both files",
+    replace: "Replace local with this version",
+    delete: "Delete local file",
+    same: "No change needed",
+  } as Record<string, string>)[policy] ?? policy.replace(/_/g, " ");
+}
+
 function renderJobs(): void {
   if (!jobList) return;
   jobList.innerHTML = "";
@@ -1501,23 +1537,49 @@ function renderJobs(): void {
       const path = text(decision.path, "");
       const category = text(decision.category, "different");
       const options = jobDecisionOptions(category)
-        .map((option) => `<option value="${escapeHtml(option)}">${escapeHtml(option.replace(/_/g, " "))}</option>`)
+        .map((option) => `<option value="${escapeHtml(option)}">${escapeHtml(jobDecisionLabel(option))}</option>`)
         .join("");
       return `<label class="job-decision"><span class="path">${escapeHtml(path)}</span><span class="pill">${escapeHtml(category)}</span><select data-job-policy data-path="${escapeHtml(path)}">${options}</select></label>`;
     }).join("");
     const canApply = status === "ready" || status === "needs_review" || status === "interrupted";
     const canRollback = ["complete", "interrupted", "needs_review"].includes(status);
+    const recoveryComparison = (job.recovery_compare ?? {}) as Record<string, unknown>;
+    const isRecovery = job.source_kind === "dropbox_revision";
+    const recoveryPreview = isRecovery
+      ? `<div class="recovery-preview"><p><strong>Staged and verified:</strong> ${escapeHtml(text(recoveryComparison.summary, "Dropbox revision is ready"))}</p>${recoveryComparison.unified_diff ? `<pre>${escapeHtml(text(recoveryComparison.unified_diff, ""))}</pre>` : ""}<p class="reason">Open the staging folder to inspect the downloaded copy. To recover it, choose the destination action below and select Restore Selected Version. Backup remains paused until you resume it from Recovery.</p></div>`
+      : "";
     item.innerHTML = `
       <div class="section-title"><h3>${escapeHtml(text(job.source_label, "Receive"))}</h3><span class="pill">${escapeHtml(status)}</span></div>
       <p class="path">${escapeHtml(text(job.source, "-"))} → ${escapeHtml(text(job.destination, "-"))}</p>
+      ${recoveryPreview}
       <div class="job-decisions">${decisionRows || "<p>No conflict decisions are required.</p>"}</div>
       <div class="actions left">
         <button type="button" class="secondary" data-action="show-job">Details</button>
-        ${canApply ? '<button type="button" class="primary" data-action="apply-job">Apply Reviewed Choices</button>' : ""}
+        ${isRecovery ? '<button type="button" class="secondary" data-action="open-job-staging">Open Staging Folder</button><button type="button" class="secondary" data-action="open-job-destination">Open Watched Folder</button>' : ""}
+        ${canApply ? `<button type="button" class="primary" data-action="apply-job">${isRecovery ? "Restore Selected Version" : "Apply Reviewed Choices"}</button>` : ""}
         ${status === "interrupted" ? '<button type="button" class="secondary" data-action="reconcile-job">Reconcile</button>' : ""}
         ${canRollback ? '<button type="button" class="secondary" data-action="rollback-job">Roll Back</button>' : ""}
       </div>`;
     jobList.append(item);
+  }
+}
+
+async function openJobFolder(button: HTMLElement, kind: "staging" | "destination"): Promise<void> {
+  const jobId = button.closest<HTMLElement>("[data-job-id]")?.dataset.jobId ?? "";
+  const job = latestJobs.find((item) => text(item.id, "") === jobId);
+  const paths = (job?.paths ?? {}) as Record<string, unknown>;
+  const path = kind === "staging" ? text(paths.staging, "") : text(job?.destination, "");
+  if (!path) {
+    setMessage(`${kind === "staging" ? "Staging" : "Destination"} folder is unavailable`, "error");
+    return;
+  }
+  setBusy(kind === "staging" ? "open-job-staging" : "open-job-destination");
+  try {
+    await invoke("open_local_folder", { path });
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
   }
 }
 
@@ -1653,26 +1715,198 @@ async function reviewLink(button: HTMLElement): Promise<void> {
   }
 }
 
-async function loadHistory(): Promise<void> {
-  const folder = historyFolder?.value ?? "";
-  if (!folder || !historyList) return;
+async function refreshRecoveryStatus(): Promise<boolean> {
+  try {
+    const value = await invoke<Record<string, unknown>>("get_recovery_status");
+    const paused = value.paused === true;
+    const daemonState = text(value.daemon_state, "");
+    const draining = paused && ["syncing", "transferring", "publishing", "staging", "applying"].includes(daemonState);
+    if (recoveryState) {
+      recoveryState.textContent = draining ? "Pause requested" : paused ? "Backup paused" : "Backup active";
+      recoveryState.classList.toggle("is-active", paused);
+    }
+    if (recoveryGuidance) {
+      recoveryGuidance.textContent = draining
+        ? "The current folder operation is finishing. Do not stage or restore until status says Backup paused."
+        : paused
+        ? "Safe to inspect and stage revisions. Keep backup paused until your reviewed local choices are complete."
+        : "Pause outbound backup before staging or applying a historical revision.";
+    }
+    if (recoveryPauseButton) recoveryPauseButton.disabled = paused;
+    if (recoveryResumeButton) recoveryResumeButton.disabled = !paused;
+    return paused && !draining;
+  } catch (error) {
+    if (recoveryState) recoveryState.textContent = "Status unavailable";
+    throw error;
+  }
+}
+
+async function controlRecovery(action: "pause" | "resume"): Promise<void> {
+  if (action === "resume" && !window.confirm("Resume outbound backup now? Continue only after the reviewed local folder matches the state you want Dropbox to keep.")) return;
   setBusy("history");
   try {
-    showUiCommand(["history", folder]);
-    const value = await invoke<Record<string, unknown>>("get_history", { folder });
-    const entries = Array.isArray(value.entries) ? value.entries as Array<Record<string, unknown>> : [];
-    historyList.innerHTML = "";
-    for (const entry of entries) {
+    showUiCommand(["recovery", action]);
+    const value = await invoke<Record<string, unknown>>("control_recovery", { action });
+    await refreshRecoveryStatus();
+    const draining = value.current_operation_finishes_before_pause === true;
+    setMessage(
+      action === "pause"
+        ? draining ? "Recovery pause requested; the current folder operation will finish first" : "Backup paused for recovery"
+        : "Backup resumed; pending local changes may now be backed up",
+      "ok",
+    );
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function openRecoveryDropbox(): Promise<void> {
+  const folderId = historyFolder?.value ?? "";
+  const folder = latestConfig?.folders.find((item) => text(item.id, "") === folderId);
+  const remoteRoot = text(folder?.remote_root, "");
+  if (!remoteRoot) {
+    setMessage("Choose a configured backup folder first", "error");
+    return;
+  }
+  try {
+    await invoke("open_dropbox_location", { request: { remoteRoot } });
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+async function loadRecoveryRecent(): Promise<void> {
+  if (!recoveryRecentList) return;
+  setBusy("history");
+  recoveryRecentList.innerHTML = '<p class="empty">Loading recent successful backups…</p>';
+  try {
+    const folder = recoveryRecentFolder?.value || null;
+    showUiCommand(["recovery", "recent", ...(folder ? ["--folder", folder] : [])]);
+    const value = await invoke<Record<string, unknown>>("get_recovery_recent", { folder });
+    const cycles = Array.isArray(value.cycles) ? value.cycles as Array<Record<string, unknown>> : [];
+    recoveryRecentList.innerHTML = "";
+    for (const cycle of cycles) {
       const item = document.createElement("article");
       item.className = "card";
-      const path = text(entry.Path, text(entry.Name, ""));
-      item.dataset.historyPath = path;
-      item.innerHTML = `<h3>${escapeHtml(path || "version")}</h3><p class="path">${escapeHtml(text(entry.ModTime, "unknown time"))} · ${Number(entry.Size ?? 0)} bytes</p>${entry.IsDir === true ? "" : '<button type="button" class="secondary" data-action="recover-history">Stage Recovery</button>'}`;
+      const changes = Array.isArray(cycle.changes) ? cycle.changes as Array<Record<string, unknown>> : [];
+      const completedRaw = text(cycle.completed_at, "");
+      const completed = completedRaw && !Number.isNaN(Date.parse(completedRaw))
+        ? new Date(completedRaw).toLocaleString()
+        : "time unavailable";
+      const rows = changes.map((change) => {
+        const path = text(change.path, "");
+        const operation = text(change.operation, "changed");
+        return `<div class="recovery-path-choice"><span class="pill">${escapeHtml(operation)}</span><span class="path">${escapeHtml(path)}</span></div>`;
+      }).join("");
+      const changeCount = Number(cycle.change_count ?? changes.length);
+      const counts = (cycle.change_counts ?? {}) as Record<string, unknown>;
+      const summary = ["added", "modified", "removed"]
+        .map((kind) => Number(counts[kind] ?? 0) > 0 ? `${Number(counts[kind]).toLocaleString()} ${kind}` : "")
+        .filter(Boolean)
+        .join(" · ") || `${changeCount.toLocaleString()} changed`;
+      const snapshotAvailable = cycle.snapshot_available === true;
+      const folderId = text(cycle.folder_id, "");
+      const generationId = text(cycle.generation_id, "");
+      item.innerHTML = `
+        <div class="section-title"><h3>${escapeHtml(text(cycle.folder_label, folderId || "Folder"))}</h3><span class="pill">${escapeHtml(completed)}</span></div>
+        <p><strong>${escapeHtml(summary)}</strong></p>
+        <p class="reason">${snapshotAvailable ? `${Number(cycle.snapshot_entry_count ?? 0).toLocaleString()} files and folders recorded in this complete snapshot.` : "Change record only — this cycle predates complete snapshot manifests."}</p>
+        <div class="actions left">
+          ${snapshotAvailable ? `<button type="button" class="primary" data-action="stage-recovery-snapshot" data-folder="${escapeHtml(folderId)}" data-generation="${escapeHtml(generationId)}">Stage Complete Folder</button>` : '<button type="button" class="secondary" disabled>Full snapshot unavailable</button>'}
+        </div>
+        <details><summary>Show ${changeCount.toLocaleString()} changed path${changeCount === 1 ? "" : "s"}</summary><div class="recovery-path-list">${rows || '<p class="empty">No changed paths recorded.</p>'}</div>${cycle.paths_truncated ? `<p class="reason">Showing the first ${changes.length.toLocaleString()} paths.</p>` : ""}</details>`;
+      recoveryRecentList.append(item);
+    }
+    if (cycles.length === 0) {
+      recoveryRecentList.innerHTML = '<p class="empty">No successful backup cycles are available yet for this selection.</p>';
+    }
+    recoveryRecentLoaded = true;
+  } catch (error) {
+    recoveryRecentList.innerHTML = `<p class="empty">Could not load recent backup changes: ${escapeHtml(String(error))}</p>`;
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function stageRecoverySnapshot(button: HTMLElement): Promise<void> {
+  const folder = button.dataset.folder ?? "";
+  const generation = button.dataset.generation ?? "";
+  if (!folder || !generation) return;
+  setBusy("history");
+  try {
+    if (!(await refreshRecoveryStatus())) throw new Error("Pause backup before staging a historical folder snapshot");
+    showUiCommand(["recovery", "snapshot", folder, generation]);
+    const snapshot = await invoke<Record<string, unknown>>("stage_recovery_snapshot", { folder, generation });
+    latestRecoveryJob = snapshot;
+    if (recoveryOutput) {
+      recoveryOutput.hidden = false;
+      recoveryOutput.textContent = [
+        "Complete historical folder staged and verified.",
+        `Snapshot: ${text(snapshot.id, "-")}`,
+        `Backup time: ${text(snapshot.snapshot_at, "-")}`,
+        `${Number(snapshot.entry_count ?? 0).toLocaleString()} files and folders`,
+        "Nothing in the watched folder was changed. Open staging to inspect or copy what you need.",
+      ].join("\n");
+    }
+    if (recoveryStagedActions) recoveryStagedActions.hidden = false;
+    setMessage("Historical folder is ready in staging", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  } finally {
+    setBusy(null);
+  }
+}
+
+async function openRecoveryResult(kind: "staging" | "destination"): Promise<void> {
+  const paths = (latestRecoveryJob?.paths ?? {}) as Record<string, unknown>;
+  const path = kind === "staging"
+    ? text(latestRecoveryJob?.payload, text(paths.staging, ""))
+    : text(latestRecoveryJob?.watched_folder, text(latestRecoveryJob?.destination, ""));
+  if (!path) {
+    setMessage("Stage a file or folder snapshot first", "error");
+    return;
+  }
+  try {
+    await invoke("open_local_folder", { path });
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+async function loadHistory(): Promise<void> {
+  const folder = historyFolder?.value ?? "";
+  const path = recoveryPath?.value.trim() ?? "";
+  if (!folder || !path || !historyList) {
+    setMessage("Choose a folder and enter a relative file path", "error");
+    return;
+  }
+  setBusy("history");
+  try {
+    showUiCommand(["recovery", "revisions", folder, path]);
+    const value = await invoke<Record<string, unknown>>("get_recovery_revisions", { folder, path });
+    const entries = Array.isArray(value.entries) ? value.entries as Array<Record<string, unknown>> : [];
+    historyList.innerHTML = "";
+    if (entries.length > 0) {
+      const item = document.createElement("article");
+      item.className = "card recovery-version-list";
+      item.innerHTML = `<div class="section-title"><h3>${entries.length} available version${entries.length === 1 ? "" : "s"}</h3><span class="pill">Dropbox</span></div>`;
+      entries.forEach((entry, index) => {
+      const revision = text(entry.rev, "");
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "recovery-version-row";
+        row.dataset.action = "recover-history";
+        row.dataset.recoveryRevision = revision;
+        row.innerHTML = `<span>${index === 0 ? "Current" : `Version ${index + 1}`}</span><span>${escapeHtml(text(entry.server_modified, "unknown time"))}</span><span>${formatBytes(Number(entry.size ?? 0))}</span><span>Stage</span>`;
+        item.append(row);
+      });
       historyList.append(item);
     }
-    if (entries.length === 0) historyList.textContent = "No retained replacement/deletion versions found.";
-    historyLoaded = true;
-    setMessage("Recovery history loaded", "ok");
+    if (entries.length === 0) historyList.textContent = "No Dropbox revisions are available for this path within the account retention window.";
+    setMessage(`Found ${entries.length} Dropbox version${entries.length === 1 ? "" : "s"}`, "ok");
   } catch (error) {
     setMessage(String(error), "error");
   } finally {
@@ -1682,13 +1916,28 @@ async function loadHistory(): Promise<void> {
 
 async function recoverHistory(button: HTMLElement): Promise<void> {
   const folder = historyFolder?.value ?? "";
-  const path = button.closest<HTMLElement>("[data-history-path]")?.dataset.historyPath ?? "";
-  if (!folder || !path) return;
+  const path = recoveryPath?.value.trim() ?? "";
+  const revision = button.closest<HTMLElement>("[data-recovery-revision]")?.dataset.recoveryRevision ?? "";
+  if (!folder || !path || !revision) return;
   setBusy("history");
   try {
-    showUiCommand(["history", folder, "--receive", path]);
-    const result = await invoke<CommandResult>("recover_history", { folder, path });
-    setMessage(result.output || "History recovery job queued", "ok");
+    const paused = await refreshRecoveryStatus();
+    if (!paused) throw new Error("Pause backup for recovery before staging a revision");
+    showUiCommand(["recovery", "stage", folder, path, revision]);
+    const job = await invoke<Record<string, unknown>>("stage_recovery_revision", { folder, path, revision });
+    latestRecoveryJob = job;
+    const comparison = (job.recovery_compare ?? {}) as Record<string, unknown>;
+    if (recoveryOutput) {
+      recoveryOutput.hidden = false;
+      recoveryOutput.textContent = [
+        comparison.kind === "missing_local" ? "The selected file is absent from the watched folder. Its historical version is staged and verified." : text(comparison.summary, "Revision staged and verified."),
+        text(comparison.unified_diff, ""),
+        `Job: ${text(job.id, "-")}`,
+        "Nothing was restored. Open staging to inspect the downloaded file.",
+      ].filter(Boolean).join("\n\n");
+    }
+    if (recoveryStagedActions) recoveryStagedActions.hidden = false;
+    setMessage("Dropbox revision staged and ready to inspect", "ok");
     jobsLoaded = false;
   } catch (error) {
     setMessage(String(error), "error");
@@ -2078,7 +2327,8 @@ function activateTab(tab: string): void {
   }
   if (tab === "history") {
     if (!configLoaded) void loadConfig();
-    if (!historyLoaded && historyFolder?.value) void loadHistory();
+    void refreshRecoveryStatus().catch((error) => setMessage(String(error), "error"));
+    if (!recoveryRecentLoaded) void loadRecoveryRecent();
   }
   if (tab === "activity" && !activityLoaded) void loadActivity();
 }
@@ -2138,6 +2388,8 @@ window.addEventListener("DOMContentLoaded", () => {
   jobList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "show-job") showJob(target);
+    if (target?.dataset.action === "open-job-staging") void openJobFolder(target, "staging");
+    if (target?.dataset.action === "open-job-destination") void openJobFolder(target, "destination");
     if (target?.dataset.action === "apply-job") void runJobAction(target, "apply");
     if (target?.dataset.action === "reconcile-job") void runJobAction(target, "reconcile");
     if (target?.dataset.action === "rollback-job") void runJobAction(target, "rollback");
@@ -2169,8 +2421,21 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   document.querySelector("[data-action='load-jobs']")?.addEventListener("click", () => void loadJobs());
   document.querySelector("[data-action='load-link-status']")?.addEventListener("click", () => void loadLinks(true));
-  document.querySelector("[data-action='load-history']")?.addEventListener("click", () => void loadHistory());
-  historyFolder?.addEventListener("change", () => void loadHistory());
+  recoveryForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void loadHistory();
+  });
+  document.querySelector("[data-action='pause-recovery']")?.addEventListener("click", () => void controlRecovery("pause"));
+  document.querySelector("[data-action='resume-recovery']")?.addEventListener("click", () => void controlRecovery("resume"));
+  document.querySelector("[data-action='open-recovery-dropbox']")?.addEventListener("click", () => void openRecoveryDropbox());
+  document.querySelector("[data-action='load-recovery-recent']")?.addEventListener("click", () => void loadRecoveryRecent());
+  recoveryRecentFolder?.addEventListener("change", () => void loadRecoveryRecent());
+  recoveryRecentList?.addEventListener("click", (event) => {
+    const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-action='stage-recovery-snapshot']");
+    if (target) void stageRecoverySnapshot(target);
+  });
+  document.querySelector("[data-action='open-recovery-staging']")?.addEventListener("click", () => void openRecoveryResult("staging"));
+  document.querySelector("[data-action='open-recovery-destination']")?.addEventListener("click", () => void openRecoveryResult("destination"));
   historyList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (target?.dataset.action === "recover-history") void recoverHistory(target);

@@ -91,12 +91,19 @@ protocol in `docs/operations/test-plan.md`.
 - [x] Granular linked folders reject unsafe/overlapping scopes, installation or
   filter mismatches, detect local watcher changes and relevant peer generations,
   and require Review & Sync before staging/apply.
-- [x] Remote-trash history can stage a selected retained version into the same
-  safe receive pipeline.
+- [x] Dropbox-native recovery can durably pause backup and stage a selected,
+  hash-verified immutable revision into the same safe receive pipeline.
+- [x] Complete recovery snapshots use one full provider-revision baseline plus
+  compact deltas, stage into an excluded folder, remove later additions,
+  recover changed/deleted historical revisions, and verify the full inventory
+  without modifying the watched folder.
+- [ ] Real-provider validation proves overwrite/delete history, records rename
+  presentation, stages and opens a complete folder snapshot, and exercises the
+  advanced Keep Both/Replace/rollback/resume path.
 - [x] `.safe-sync-work` is excluded by a separate mandatory internal rclone
   filter plus watcher/inventory rules, independent of the user's existing
   filter file.
-- [x] Backups, Jobs, Linked Folders, History, CLI commands, and the canonical
+- [x] Backups, Jobs, Linked Folders, Recovery, CLI commands, and the canonical
   repository/UI/headless guide expose the same workflow.
 
 Verification on 2026-08-08: backend `81 passed`, including simulated apply

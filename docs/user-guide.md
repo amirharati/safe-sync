@@ -298,21 +298,61 @@ safe-sync links remove LINK_ID
 common baseline. It distinguishes local changes, peer changes, matching edits
 on both sides, and real conflicts including delete-versus-modify.
 
-## 9. History and Recovery
+## 9. Dropbox History and Recovery
 
-History lists older or deleted files retained in Safe Sync's dated remote
-trash. Select Stage Recovery in the control panel, or use the CLI. Recovery
-creates a normal receive job, so it is compared, reviewed, checkpointed, and
-rollback-capable rather than restored directly over a local file.
+Safe Sync does not retain duplicate file payloads in app-owned remote trash.
+Dropbox version/deleted-file history is the recovery payload for the account's
+plan window. New successful backup cycles record a complete revision manifest:
+one full baseline followed by compact deltas. This metadata lets Safe Sync
+reconstruct the complete folder at a chosen cycle without duplicating file
+contents in its own cloud storage.
+
+Recovery presents one compact card per successful backup cycle. Choose **Stage
+Complete Folder** to download and verify that historical folder under the
+excluded `.safe-sync-work/recovery-snapshots` area. **Open Staging Folder** and
+**Open Watched Folder** support side-by-side inspection. Staging never modifies
+the watched folder; copy or move selected content only after review. Cycles
+created before snapshot manifests are labeled **Change record only** and cannot
+be represented as complete folders. Exact-path file history remains under the
+Advanced section. The matching headless commands are:
 
 ```bash
-safe-sync history FOLDER_ID
-safe-sync history FOLDER_ID --receive TIMESTAMP/path/to/file
+safe-sync recovery pause
+safe-sync recovery status
+safe-sync recovery recent
+# Or restrict the activity picker: safe-sync recovery recent --folder FOLDER_ID
+safe-sync recovery snapshot FOLDER_ID GENERATION_ID
+# Advanced single-file recovery:
+safe-sync recovery revisions FOLDER_ID path/to/file
+safe-sync recovery stage FOLDER_ID path/to/file DROPBOX_REVISION
+safe-sync jobs list
+safe-sync jobs apply JOB_ID --policy path/to/file=keep_both
+# Or, after review: --policy path/to/file=replace
+safe-sync recovery resume
 ```
 
-Successful backups now publish immutable changed-path generation records plus
-an updated `latest.json` pointer. These support linked-folder change detection;
-they are not yet advertised as complete whole-folder point-in-time snapshots.
+Pausing is durable across daemon restarts. If a backup is already transferring,
+its current folder operation finishes safely, then no new folder backup begins.
+Watcher events continue to accumulate for the later resume.
+
+Complete-folder staging starts from the current remote folder, removes items
+that did not exist at the chosen cycle, and replaces changed/deleted items by
+immutable Dropbox revision identity. A full content-hash inventory must match
+the selected manifest before the snapshot is marked ready. Renames therefore
+appear at their historical path even when Dropbox currently stores the item at
+its new path. Advanced single-file staging continues to offer reviewed Jobs,
+Keep Both, Replace, checkpoints, and conditional rollback.
+
+Resume only after the reviewed local state is correct. The next normal backup
+publishes that local choice as a new forward Dropbox version. For broad damage,
+keep Safe Sync paused, use Dropbox Rewind on the website, stage/reconcile the
+rewound remote state back into the local source, and only then resume. A
+remote-only rewind can otherwise be overwritten by the still-current local
+source.
+
+Successful backups publish immutable changed-path generation records, compact
+snapshot manifests, and an updated `latest.json` pointer. Snapshot metadata is
+not file content and remains bounded by deltas after its first full baseline.
 
 ## 10. Profiles and Settings
 
@@ -345,8 +385,11 @@ which is an optional administrator-level system setting.
 ## 11. Understand Safety and Deletions
 
 - Automatic backup is one-way: local folder to that computer's remote folder.
-- A local deletion can remove the corresponding remote item, but rclone moves
-  the prior remote version into Safe Sync's dated remote trash.
+- A local deletion can remove the corresponding remote item. Recovery relies
+  on Dropbox's plan-bounded deleted-file/version history, not app-owned trash.
+- Safe Sync asks rclone to preserve provable same-content renames as Dropbox
+  server-side moves, retaining file identity when the provider supports it;
+  otherwise current-state mirroring safely falls back to add/delete behavior.
 - Safe Sync never automatically pulls another computer's files.
 - Receive staging, checkpoints, and journals are excluded from backup and
   watcher events even when an older user filter file is still installed.
@@ -406,9 +449,9 @@ Sealed segments copy automatically to the owning profile's remote base below
 happens to become active later. Backup traffic has priority over log copying.
 
 This journal records what happened; it does not contain file contents and is
-not a recovery database. Remote trash, backup generations, and receive-job
-checkpoints remain the recovery mechanisms. A future durable recovery-event
-store will be separate from this bounded diagnostic journal.
+not a recovery database. Dropbox revisions supply historical file contents;
+backup generations provide changed-path context; receive-job staging and
+checkpoints provide safe local review, apply, and rollback.
 
 ## 13. Troubleshooting
 
@@ -496,7 +539,8 @@ explicitly confirmed purge:
 ./uninstall.sh --purge
 ```
 
-Neither form deletes Dropbox backups or Safe Sync's remote trash.
+Neither form deletes Dropbox backups, Dropbox version history, or any legacy
+Safe Sync trash left by an older installation.
 
 ## 16. Command Summary
 
@@ -518,7 +562,8 @@ Neither form deletes Dropbox backups or Safe Sync's remote trash.
 - `safe-sync pull` is a compatibility alias for staged receive.
 - `safe-sync jobs` reviews, applies, reconciles, and rolls back receive jobs.
 - `safe-sync links` manages granular linked-folder declarations and status.
-- `safe-sync history` lists retained versions and stages selected recovery.
+- `safe-sync recovery` pauses/resumes backup and lists/stages immutable Dropbox
+  revisions for safe local review.
 - `safe-sync config show` displays effective local settings.
 - `safe-sync autostart backend` controls login startup.
 - `safe-sync rclone` runs the Safe Sync-managed rclone when advanced recovery

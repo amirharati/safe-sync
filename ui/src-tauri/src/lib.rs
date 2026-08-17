@@ -66,7 +66,6 @@ struct AddFolderRequest {
     local_path: String,
     label: Option<String>,
     remote_path: Option<String>,
-    trash_path: Option<String>,
     disabled: bool,
 }
 
@@ -418,6 +417,7 @@ fn status_label(status: &SafeSyncStatus) -> String {
             Some("backoff") => "Safe Sync: Backoff".to_string(),
             Some("cooldown") => "Safe Sync: Cooling down".to_string(),
             Some("dirty") => "Safe Sync: Changes queued".to_string(),
+            Some("recovery_paused") => "Safe Sync: Recovery paused".to_string(),
             Some("watching") => "Safe Sync: Watching".to_string(),
             Some(other) => format!("Safe Sync: Running ({other})"),
             None => "Safe Sync: Running".to_string(),
@@ -633,10 +633,6 @@ async fn add_folder(request: AddFolderRequest) -> Result<SafeSyncConfigView, Str
     if let Some(remote_path) = request.remote_path.filter(|value| !value.trim().is_empty()) {
         args.push("--remote-path".to_string());
         args.push(remote_path);
-    }
-    if let Some(trash_path) = request.trash_path.filter(|value| !value.trim().is_empty()) {
-        args.push("--trash-path".to_string());
-        args.push(trash_path);
     }
     if request.disabled {
         args.push("--disabled".to_string());
@@ -858,12 +854,58 @@ async fn review_link(link_id: String) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
-async fn get_history(folder: String) -> Result<Value, String> {
-    if folder.trim().is_empty() {
-        return Err("choose a local backup folder".to_string());
+async fn get_recovery_status() -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["recovery".to_string(), "status".to_string()]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery status returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn control_recovery(action: String) -> Result<Value, String> {
+    if !matches!(action.as_str(), "pause" | "resume") {
+        return Err("recovery action must be pause or resume".to_string());
     }
-    let stdout = run_safe_sync_blocking(vec!["history".to_string(), folder]).await?;
-    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync history returned invalid JSON: {err}"))
+    let stdout = run_safe_sync_blocking(vec!["recovery".to_string(), action]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery control returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn get_recovery_recent(folder: Option<String>) -> Result<Value, String> {
+    let mut args = vec!["recovery".to_string(), "recent".to_string()];
+    if let Some(folder_id) = folder.filter(|value| !value.trim().is_empty()) {
+        args.extend(["--folder".to_string(), folder_id]);
+    }
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery recent returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn stage_recovery_snapshot(folder: String, generation: String) -> Result<Value, String> {
+    if folder.trim().is_empty() || generation.trim().is_empty() {
+        return Err("folder and backup cycle are required".to_string());
+    }
+    let stdout = run_safe_sync_blocking(vec![
+        "recovery".to_string(),
+        "snapshot".to_string(),
+        folder,
+        generation,
+    ])
+    .await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery snapshot returned invalid JSON: {err}"))
+}
+
+#[tauri::command]
+async fn get_recovery_revisions(folder: String, path: String) -> Result<Value, String> {
+    if folder.trim().is_empty() || path.trim().is_empty() {
+        return Err("choose a local backup folder and enter a relative file path".to_string());
+    }
+    let stdout = run_safe_sync_blocking(vec![
+        "recovery".to_string(),
+        "revisions".to_string(),
+        folder,
+        path,
+    ])
+    .await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery revisions returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
@@ -917,18 +959,19 @@ async fn sync_audit_logs() -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn recover_history(folder: String, path: String) -> Result<CommandResult, String> {
-    if folder.trim().is_empty() || path.trim().is_empty() {
-        return Err("folder and retained version path are required".to_string());
+async fn stage_recovery_revision(folder: String, path: String, revision: String) -> Result<Value, String> {
+    if folder.trim().is_empty() || path.trim().is_empty() || revision.trim().is_empty() {
+        return Err("folder, relative path, and Dropbox revision are required".to_string());
     }
-    let output = run_safe_sync_blocking(vec![
-        "history".to_string(),
+    let stdout = run_safe_sync_blocking(vec![
+        "recovery".to_string(),
+        "stage".to_string(),
         folder,
-        "--receive".to_string(),
         path,
+        revision,
     ])
     .await?;
-    Ok(CommandResult { ok: true, output })
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery stage returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
@@ -1174,8 +1217,12 @@ pub fn run() {
             add_link,
             remove_link,
             review_link,
-            get_history,
-            recover_history,
+            get_recovery_status,
+            control_recovery,
+            get_recovery_recent,
+            stage_recovery_snapshot,
+            get_recovery_revisions,
+            stage_recovery_revision,
             get_log_status,
             get_activity,
             set_log_level,

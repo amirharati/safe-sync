@@ -386,8 +386,8 @@ preserving config and Dropbox authorization:
 ```
 
 `./uninstall.sh --purge` asks for an explicit confirmation before removing
-local configuration. Neither uninstall mode changes remote Dropbox backups or
-remote trash.
+local configuration. Neither uninstall mode changes remote Dropbox backups,
+Dropbox version history, or legacy Safe Sync trash created by older releases.
 
 Start the daemon explicitly when needed:
 

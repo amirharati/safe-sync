@@ -54,7 +54,10 @@ Automatic live two-way sync is reserved only for small folders that truly need i
 
 - Do not sync `.git/`.
 - Do not delete files across computers automatically.
-- Automatic backup may mirror local deletes into that machine's remote backup, but only with `--backup-dir` trash.
+- Automatic backup may mirror local deletes into that machine's remote backup.
+  Safe Sync keeps no app-owned trash; Dropbox's plan-bounded version/deleted-file
+  history is the recovery payload. Recovery pauses outbound backup and stages a
+  selected immutable revision locally before any explicit replacement.
 - Pull/copy operations do not delete destination files by default.
 - Conflicts produce renamed files rather than overwriting silently.
 - Rclone remains the sync/copy engine; Safe Sync only provides guardrails, status, registry, and workflow commands.

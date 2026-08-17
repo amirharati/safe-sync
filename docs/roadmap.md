@@ -25,6 +25,17 @@ separate future path for allowlisted durable recovery events.
 
 ## Open Issues
 
+### Current gate: Dropbox-native recovery before further feature dogfooding
+
+The 2026-08-16 incremental test proved current-state mirroring, selected-file
+trash recovery, and changed-path generation publication, but also established
+that app-owned remote trash is unbounded. `RECOVERY-001` is now implemented in
+source using Dropbox-native revisions and no new app trash; pause the move into
+broader Stage 2 and Stage 3 workflows until this build is installed and retested
+on the disposable `temp` fixture. `ACTIVITY-001` and `SCHED-002` remain in the
+same next maintenance release, but real-provider recovery validation is the
+primary product/data-volume gate.
+
 ### Immediate next-fix order
 
 1. Preserve the completed 2026-08-14 run before changing or reinstalling
@@ -50,6 +61,133 @@ separate future path for allowlisted durable recovery events.
    `RETRY-001`, and the Stage 1 acceptance evidence pass. Later product issues
    such as remote purge, profile import, notifications, and Dock polish are not
    blockers for this rerun.
+
+### RECOVERY-001: Bound app trash and use Dropbox-native recovery
+
+**Priority:** critical; review and implement before the next recovery or
+multi-machine dogfood stage.
+
+**Status:** implemented in source on 2026-08-17; automated backend, UI, and
+native verification pass. Installation and disposable real-Dropbox validation
+are pending; no runtime, configuration, existing trash, or remote data changed.
+
+Dropbox already provides plan-bounded file/folder version history for edits,
+renames, uploads, deletes, and moves, and eligible plans provide Rewind for a
+folder/account point-in-time rollback. Native version history does not consume
+the account's live storage quota. Safe Sync therefore should not duplicate a
+long-lived version store unless a provider capability gap is demonstrated.
+
+Accepted first implementation:
+
+- Remove app-owned trash from normal mirroring. Do not retain a latest snapshot
+  or emergency payload copy: either can be arbitrarily large and recreates
+  retention, cleanup, quota, and recovery-state complexity.
+- Keep Safe Sync generations and structured audit as the app-owned record of
+  what each cycle changed; do not turn that record into a second payload store.
+- Add an explicit recovery workflow that pauses outbound backup, directs the
+  user to Dropbox version history/Rewind, and safely stages restored remote
+  content back to local before backup resumes. A remote-only rewind is not
+  sufficient while local remains the source of truth: the next backup could
+  otherwise reapply the local state.
+- Make selected-file recovery non-destructive by default: download the chosen
+  Dropbox revision into an excluded per-job local staging directory, compare it
+  with the current local path, then offer `Keep current`, `Keep both`, or
+  explicit `Replace local`. Replacing local creates a normal new forward backup
+  version; it does not rewrite Safe Sync or Dropbox history.
+- Reserve Dropbox Rewind for broad multi-file recovery. Rewind restores content
+  only at its existing Dropbox location, so Safe Sync must remain paused until
+  that state has been staged/reconciled back into the local source of truth.
+- State the active Dropbox plan's retention/Rewind limitation clearly. Basic
+  still has its plan-bounded version/deleted-file history but not Rewind.
+- Test delete, overwrite, and rename semantics before installation. The prior
+  `rclone sync --backup-dir` path represented a local rename as a new live path
+  plus movement of the old path into Safe Sync trash. The new source enables
+  hash-proven server-side rename tracking; real Dropbox acceptance must confirm
+  how Dropbox presents both proven renames and add/delete fallbacks.
+
+Implemented scope removes `--backup-dir` and new trash configuration, enables
+hash-proven server-side rename tracking, adds a durable recovery pause that
+stops between folder operations, queries/downloads Dropbox revisions using the
+existing refreshed rclone authorization without logging tokens, hash-verifies
+each staged revision, shows bounded text diffs or binary metadata, and reuses
+the checkpointed receive-job engine for Keep Both, explicit Replace, reconcile,
+and rollback. It now also records one complete provider revision baseline plus
+compact per-cycle metadata deltas, presents one compact card per successful
+backup cycle, and can reconstruct a complete historical folder in excluded
+local staging without modifying the watched source. Pre-feature cycles are
+truthfully labeled change-only. The control panel and canonical
+repository/UI/headless guide use the same CLI operations. Existing legacy trash
+is deliberately untouched.
+
+The transaction-aware app-owned design below is retained as a fallback only if
+provider-native recovery cannot satisfy the disposable acceptance tests. It is
+not the default implementation direction.
+
+Current Safe Sync keeps every replaced/deleted remote object indefinitely in a
+timestamped app-owned trash tree. There is no byte, age, or version limit and
+no cleanup scheduler. Immutable generations accurately identify added,
+modified, and removed paths, while History can stage a selected retained file
+through the safe receive-job engine. However, a generation does not carry
+before/after fingerprints or an explicit reference to the exact retained
+object. A rename is an unlinked add-plus-remove pair. The UI therefore cannot
+state whether a cycle is fully undoable, create one safe reverse plan, or show
+when required recovery data will expire.
+
+Treat retention and undo as one feature rather than pruning timestamp folders
+blindly:
+
+- Persist each backup attempt's exact trash location before rclone starts so
+  retry/report recovery cannot lose the before-version reference.
+- Publish an immutable recovery transaction with each successful generation.
+  Each path records before/after existence and strong fingerprints plus the
+  retained-object reference needed for a reverse operation. Preserve metadata
+  even after payload expiry and mark availability explicitly.
+- Represent a uniquely proven same-content move as a rename relation; ambiguous
+  matches remain independent add/remove operations or non-authoritative
+  candidates. Undo correctness must not depend on rename inference.
+- Build `Undo this cycle` as a normal staged job against the local source of
+  truth: restore prior modified/deleted content, conditionally remove files
+  added by the cycle, and reverse proven renames only when current fingerprints
+  still match the recorded after-state. Later local edits become visible
+  conflicts. Apply remains checkpointed and rollback-capable; successful undo
+  produces a new forward backup generation rather than rewriting history.
+- Add an app-owned retention policy with an explicit total-byte cap, maximum
+  age, maximum versions per path, and a short no-prune safety window. Active
+  jobs/checkpoints and in-flight transactions are protected. Define and expose
+  precedence when the byte cap conflicts with protected recovery guarantees;
+  never claim an item is recoverable after its payload is pruned.
+- Maintain a verified recovery catalog with current bytes, versions, oldest
+  item, per-folder usage, `fully/partially/metadata-only` transaction state,
+  and projected expiry. The UI and CLI use this catalog as one source.
+- Automatic cleanup runs only in the serialized remote lane, produces a stable
+  preview/plan, records every deletion in the structured audit, is idempotent
+  across interruption, and can never target the current mirror, generation
+  chain, another profile, or unrelated remote data. Provide `Preview cleanup`
+  and explicit `Clean now` controls in addition to scheduled enforcement.
+- Migrate/index existing trash without deleting it. Do not enable automatic
+  pruning until the catalog matches direct remote inventory and the owner has
+  reviewed the first cleanup plan.
+
+Recommended initial policy for review, not yet accepted as product defaults:
+10 GiB total app-trash per profile, 30-day maximum age, at most three retained
+versions per path, and a 24-hour no-prune window. The byte cap becomes the
+eventual hard bound after the safety window; oversized/protected pressure is a
+visible `Needs attention` state rather than silent loss or unlimited growth.
+Allow per-profile defaults and optional per-folder overrides.
+
+Required disposable acceptance:
+
+- Modify one file repeatedly, add, rename, and delete files plus empty
+  directories; prove exact before/after transactions and recovery references.
+- Undo add/modify/delete/proven-rename cycles, verify local checkpoints and the
+  resulting forward backup, then prove a later local edit blocks unsafe undo.
+- Exceed version, age, and byte limits with deterministic fixtures; preview and
+  apply the same stable cleanup plan, retain protected data, and show expired
+  transactions honestly.
+- Interrupt cleanup before, during, and after remote deletion; restart to one
+  converged catalog without touching current payload or unrelated namespaces.
+- Exercise provider throttle/offline recovery and macOS/Linux parity before
+  enabling scheduled cleanup outside the disposable profile.
 
 ### GEN-001: Retry generation publication without aborting the backup set
 
@@ -504,6 +642,89 @@ scoped to `1/1`, and logging-level-only configuration changes are reloadable.
 Installed acceptance must establish a quiet baseline, add a few files under
 the disposable `temp` folder, and confirm that no unrelated folder comparison
 runs before the new generation is published.
+
+### ACTIVITY-001: Show complete durable backup activity, including directories
+
+**Priority:** include in the next maintenance pass before Stage 2.
+
+**Status:** tracked from the installed `SCHED-001` incremental dogfood on
+2026-08-15; not yet implemented. A native watcher event for the new empty
+`temp/incremental-test-2026-08-15/test2` directory correctly triggered only
+`temp (1/1)`, and rclone logged `Making directory` and created it remotely.
+However, the combined file report contained zero changes, generation
+publication was skipped as `no_changes`, and Recent Activity stayed empty.
+A later file addition correctly appeared as `xxx: Copied (new)`, proving the
+current projection recognizes copied/updated/deleted files but not directory
+operations or completed-cycle summaries.
+
+Required behavior for the next fix:
+
+- Treat empty-directory creation/removal as logical backup results and include
+  them in the structured audit and generation chain, rather than relying only
+  on transient rclone display lines.
+- Build the UI's latest activity from the structured source of truth and show a
+  timestamped completed-cycle summary with folder, added/modified/removed
+  counts, and bounded recent paths. It must remain understandable after the
+  live transfer line disappears and after a UI refresh or backend restart.
+- Surface folder changes captured by the native watcher while another folder is
+  being scanned as pending immediately. A long active full reconciliation must
+  not leave the UI looking as though a later delete was never detected; after
+  the active child finishes, the pending folder must become the next targeted
+  cycle without waiting for the fallback timer.
+- Keep ordinary file activity, directory activity, generation publication, and
+  final completion correlated without inventing duplicate changes.
+- Clear expired `cooldown_remaining_seconds` when a cycle begins or completes;
+  the same run retained `2.8` seconds in otherwise healthy completed status.
+- Add regression coverage for directory-only create/remove, file add/modify/
+  delete during an unrelated long-running scan, rename as add-plus-remove,
+  restart projection, pending-folder visibility, and targeted `1/1` status.
+  The existing remote-correct behavior must remain unchanged.
+
+The configured 120-second minimum interval is separate from this defect. It
+currently works as designed to limit Dropbox request bursts; reassess whether
+30-60 seconds is safe now that watcher runs are targeted, but do not silently
+change a user's configured value.
+
+### SCHED-002: Prioritize dirty folders during an active reconciliation
+
+**Priority:** include in the next scheduling/activity maintenance pass before
+Stage 2.
+
+**Status:** tracked from the 2026-08-16 delete test; not yet implemented.
+`SCHED-001` correctly limits newly scheduled watcher cycles to dirty folders,
+but the daemon still executes an already-started full queue synchronously. The
+native watcher thread retains events during rclone work, while the main loop
+does not consume them, publish pending state, or reorder the remaining queue
+until the entire full-profile cycle returns.
+
+Observed sequence: the 30-minute safety fallback checked `temp` at 18:57:48,
+then began large folder 5 at 18:58:03. `delete.txt` was removed locally at
+18:59:31, after `temp` had already been checked. The main loop consumed that
+event only at 19:13:06 after folder 5 finished, then the 120-second minimum
+interval held the targeted `temp (1/1)` run until 19:14:56. The removal and its
+generation published successfully, so correctness and eventual convergence
+passed, but the latency and invisible pending state are unnecessarily poor.
+A second full fallback began around 19:45, demonstrating that a fixed 30-minute
+whole-profile cadence spends substantial time rescanning the large profile.
+
+Required behavior:
+
+- Never terminate or preempt the active rclone child; preserve its durable
+  report/generation boundary.
+- Ingest watcher events into a thread-safe dirty-folder scheduler while rclone
+  is active and expose them immediately as pending in status.
+- At safe between-folder boundaries, prioritize debounce-ready dirty folders
+  ahead of untouched fallback work. If a dirty folder was already checked in
+  that reconciliation, append one targeted recheck without waiting for the
+  entire fallback queue or a fresh 120-second cooldown.
+- Resume non-dirty fallback work afterward without starvation, keeping durable
+  retry/generation items first.
+- Replace or tune the fixed whole-profile fallback for large profiles using an
+  evidence-based staggered/per-folder or adaptive reconciliation policy. Keep
+  eventual missed-event recovery, sleep/wake safety, and an explicit Backup Now
+  full reconciliation. Do not silently change the current user's setting.
+- Regression-test a change before its folder, after its folder, and during the
+  last large folder of a full cycle, plus restart and provider-backoff cases.
 
 ### PERF-001: Make Dropbox small-file backups practical
 

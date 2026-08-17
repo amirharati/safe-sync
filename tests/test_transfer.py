@@ -459,7 +459,7 @@ def test_parser_exposes_safe_transfer_surfaces():
     assert apply.policy == ["a.txt=replace"]
     assert cli.parser().parse_args(["links", "status"]).func is cli.cmd_links
     assert cli.parser().parse_args(["links", "review", "link-1"]).func is cli.cmd_links
-    assert cli.parser().parse_args(["history", "folder-a"]).func is cli.cmd_history
+    assert cli.parser().parse_args(["recovery", "revisions", "folder-a", "file.txt"]).func is cli.cmd_recovery
 
 
 def test_generation_publication_writes_immutable_before_latest(tmp_path, monkeypatch):

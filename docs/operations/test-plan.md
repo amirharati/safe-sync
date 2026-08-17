@@ -26,6 +26,33 @@ dropbox:computer-backups/.trash/test/macbook/<timestamp>
 
 ## Staged Dogfood Progression
 
+### Dropbox-native recovery acceptance
+
+The accepted `RECOVERY-001` design keeps no Safe Sync-owned trash or duplicate
+snapshot payload. Dropbox's native version/deleted-file history is the recovery
+payload. Safe Sync records one full revision-metadata baseline followed by
+compact deltas so complete historical folders can be reconstructed in excluded
+local staging. Existing trash is not deleted during implementation or migration.
+
+Before resuming recovery dogfooding, use only disposable files to prove that a
+normal backup without `--backup-dir` preserves recoverable Dropbox history for
+an overwrite and deletion, and record how Dropbox presents a local rename.
+First confirm that the post-update reconciliation publishes a complete baseline
+even when no payload changed. Then choose a later cycle, stage its complete
+folder, and verify unchanged, modified, deleted, renamed, and later-added paths
+against the manifest before opening the staging folder. Confirm the watched
+folder is untouched. For advanced selected-file recovery, download a chosen Dropbox
+revision into excluded per-job local staging without changing the live remote,
+compare it with the current local path, and exercise both `Keep both` and
+explicit `Replace local`. Resume backup and prove replacement creates a new
+forward Dropbox version. Separately test broad Dropbox Rewind, which restores
+only to the existing remote location; stage/reconcile that state back to local
+before resuming. Prove that the daemon cannot silently overwrite a remote-only
+restoration while recovery is paused.
+
+Older trash-path checks below document tests of the currently installed
+implementation and remain applicable only until `RECOVERY-001` is deployed.
+
 Do not combine all workflows in one test period. Complete and review each
 stage's structured logs before moving to the next stage.
 
@@ -61,6 +88,19 @@ chain from `watcher.change_detected` through a targeted `backup.queued`, payload
 result, generation publication, audit replication, and healthy completion.
 After that passes, separately exercise modify, delete, rename, nested-directory,
 and empty-directory behavior.
+
+**Incremental mutation sequence:** use the established
+`~/temp/incremental-test-2026-08-15` baseline and allow each targeted cycle to
+return to `Watching` before starting the next action. First append unique
+content to `modify.txt`; then rename `rename-old.txt` to `rename-new.txt`; then
+delete `delete.txt`. Keep `unchanged.txt` untouched as a control. Verify the
+first generation reports one modification and retains the prior remote version
+in timestamped trash; the second reports the rename as one addition plus one
+removal and retains the removed remote name; the third reports one removal and
+retains the deleted remote file. Every cycle must target only `temp`, leave the
+local tree untouched except for the owner's action, publish exactly once, and
+end healthy. Directory-only activity remains a known acceptance gap tracked as
+`ACTIVITY-001` and should be repeated after that fix.
 
 **Overnight result, 2026-08-13:** payload behavior passed on the disposable
 five-folder profile. Status is healthy and watching with `5/5` complete, an

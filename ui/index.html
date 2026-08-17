@@ -33,7 +33,7 @@
           <button type="button" class="tab" data-tab="transfer">Receive</button>
           <button type="button" class="tab" data-tab="jobs">Jobs</button>
           <button type="button" class="tab" data-tab="links">Linked Folders</button>
-          <button type="button" class="tab" data-tab="history">History</button>
+          <button type="button" class="tab" data-tab="history">Recovery</button>
           <button type="button" class="tab" data-tab="activity">Activity</button>
           <button type="button" class="tab" data-tab="help">Help</button>
         </nav>
@@ -303,12 +303,44 @@
 
         <section class="view" data-view="history">
           <div class="section-title">
-            <h2>Recovery History</h2>
-            <button type="button" class="secondary" data-action="load-history">Refresh</button>
+            <h2>Dropbox Recovery</h2>
+            <span class="pill" data-recovery-state>Checking</span>
           </div>
-          <p class="reason section-copy">Browse versions retained by Safe Sync remote trash. Recovery creates a staged receive job; it never restores directly over a local file.</p>
-          <label>Local backup folder <select data-history-folder></select></label>
-          <div class="list" data-history-list></div>
+          <p class="reason section-copy">Choose one successful backup cycle and build a complete historical folder in isolated staging. Inspect or copy from it in Finder; your watched folder is never changed automatically.</p>
+          <div class="actions left">
+            <button type="button" class="secondary" data-action="pause-recovery">Pause Backup for Recovery</button>
+            <button type="button" class="primary" data-action="resume-recovery">Resume Backup</button>
+          </div>
+          <p class="reason" data-recovery-guidance>Keep backup paused until restored Dropbox content and the local source agree.</p>
+          <div class="section-title lower">
+            <h3>Backup snapshots</h3>
+            <button type="button" class="secondary" data-action="load-recovery-recent">Refresh</button>
+          </div>
+          <label>Tracked folder
+            <select data-recovery-recent-folder>
+              <option value="">All tracked folders</option>
+            </select>
+          </label>
+          <p class="reason">Each card is one successful backup cycle. New cycles include a complete revision manifest and can be staged as a full folder. Older records remain visible but are clearly marked as change-only.</p>
+          <div class="list" data-recovery-recent-list><p class="empty">Loading backup snapshots…</p></div>
+          <pre class="output" data-recovery-output hidden></pre>
+          <div class="actions left" data-recovery-staged-actions hidden>
+            <button type="button" class="secondary" data-action="open-recovery-staging">Open Staging Folder</button>
+            <button type="button" class="secondary" data-action="open-recovery-destination">Open Watched Folder</button>
+          </div>
+          <details class="recovery-advanced">
+            <summary>Advanced: inspect or recover one file</summary>
+            <p class="reason">Use this when you know the exact path and do not need a complete folder snapshot.</p>
+            <form class="stacked-form" data-recovery-form>
+              <label>Local backup folder <select data-history-folder></select></label>
+              <label>Relative file path <input data-recovery-path name="path" placeholder="project/file.txt" autocomplete="off" required /></label>
+              <button type="submit" class="secondary" data-action="load-history">Find File Versions</button>
+            </form>
+            <div class="list" data-history-list></div>
+            <div class="actions left">
+              <button type="button" class="secondary" data-action="open-recovery-dropbox">Open Dropbox Website (optional)</button>
+            </div>
+          </details>
         </section>
 
         <section class="view" data-view="activity">

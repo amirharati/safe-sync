@@ -517,6 +517,78 @@ dd[data-value="stopped"] { color: #9a6400; }
   gap: 6px;
 }
 
+.recovery-preview {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #dbe1e7;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.recovery-path-list {
+  display: grid;
+  gap: 6px;
+}
+
+.recovery-path-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #dfe5eb;
+  border-radius: 7px;
+  background: #fff;
+  color: #26323f;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.recovery-path-choice .path {
+  overflow-wrap: anywhere;
+}
+
+.recovery-version-list {
+  gap: 6px;
+}
+
+.recovery-version-row {
+  display: grid;
+  grid-template-columns: 80px minmax(170px, 1fr) 80px auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #dfe5eb;
+  border-radius: 7px;
+  background: #fff;
+  color: #26323f;
+  text-align: left;
+}
+
+.recovery-version-row:hover {
+  border-color: #9aa9b8;
+  background: #f5f8fa;
+}
+
+.recovery-advanced {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid #dfe5eb;
+}
+
+.recovery-advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.recovery-preview pre,
+[data-recovery-output] {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .job-decision {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto minmax(120px, auto);

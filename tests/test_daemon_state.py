@@ -116,6 +116,7 @@ def test_daemon_runs_manual_backup_immediately_and_preserves_request_during_run(
     config["folders"] = [folder]
     config["socket_path"] = str(tmp_path / "daemon.sock")
     config["status_path"] = str(tmp_path / "status.json")
+    config["state_root"] = str(tmp_path / "state")
     config["log_dir"] = str(tmp_path / "logs")
     config["lock_file"] = str(tmp_path / "safe-sync.lock")
     config_path.write_text(json.dumps(config))
@@ -174,6 +175,7 @@ def test_daemon_runs_retry_immediately_when_backoff_expires(monkeypatch, tmp_pat
     config["folders"] = [folder]
     config["socket_path"] = str(tmp_path / "daemon.sock")
     config["status_path"] = str(tmp_path / "status.json")
+    config["state_root"] = str(tmp_path / "state")
     config["log_dir"] = str(tmp_path / "logs")
     config["lock_file"] = str(tmp_path / "safe-sync.lock")
     config["debounce_seconds"] = 0
@@ -1512,7 +1514,8 @@ def test_normalized_config_migrates_legacy_single_folder():
     assert config["remote_base"] == "dropbox:computer-backups/test"
     assert config["folders"][0]["id"] == "test_sync"
     assert config["folders"][0]["remote_root"] == "dropbox:computer-backups/test/macbook/test_sync"
-    assert config["folders"][0]["trash_root"] == "dropbox:computer-backups/test/.trash/macbook/test_sync"
+    assert "trash_root" not in config["folders"][0]
+    assert "trash_path" not in config["folders"][0]
 
 
 def test_selected_folders_respects_enabled_state():

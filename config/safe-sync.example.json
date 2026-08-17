@@ -10,8 +10,7 @@
       "id": "safe-sync-test",
       "label": "Safe Sync Test",
       "local_path": "~/safe-sync-test",
-      "remote_path": "macbook/safe-sync-test",
-      "trash_path": ".trash/macbook/safe-sync-test"
+      "remote_path": "macbook/safe-sync-test"
     },
     {
       "enabled": false,
@@ -19,8 +18,7 @@
       "id": "data",
       "label": "Data",
       "local_path": "~/data_to_backup",
-      "remote_path": "macbook/data",
-      "trash_path": ".trash/macbook/data"
+      "remote_path": "macbook/data"
     }
   ],
   "install_id": "replace-with-generated-uuid",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import difflib
 import fcntl
 import hashlib
 import json
@@ -22,10 +23,19 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from safe_sync.api import DaemonApiServer, DaemonApiState, api_request
+from safe_sync.dropbox_history import (
+    DropboxHistoryError,
+    credentials_from_rclone,
+    download_revision,
+    dropbox_path,
+    dropbox_root_path,
+    list_folder_snapshot,
+    list_revisions,
+)
 from safe_sync.daemon import DaemonState, WatchDaemon, WatchSettings, scan_tree
 from safe_sync.event_journal import (
     EventJournal,
@@ -45,6 +55,7 @@ from safe_sync.transfer import (
     generation_remote_dir,
     join_remote_scope,
     local_inventory,
+    local_selected_inventory,
     inventories_equal,
     normalize_subpath,
     parse_combined_report,
@@ -113,6 +124,7 @@ AUTH_FAILURE_PATTERNS = (
     "unauthorized",
 )
 RATE_LIMIT_EXIT = 75
+RECOVERY_PAUSED_EXIT = 76
 LAST_COMMAND_OUTPUT = ""
 PROCESS_RUN_ID = f"run_{uuid.uuid4().hex}"
 _EVENT_JOURNALS: dict[tuple[str, str, str, str], EventJournal] = {}
@@ -148,10 +160,6 @@ class TemporaryRemoteError(RuntimeError):
 
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
-
-
-def stamp() -> str:
-    return dt.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
 
 def machine_name() -> str:
@@ -747,15 +755,12 @@ def legacy_folder(config: dict[str, Any]) -> dict[str, Any]:
     folder_id = safe_id(config.get("folder_id") or Path(local_path).expanduser().name or "default")
     remote_base = str(config.get("remote_base", "dropbox:computer-backups/test"))
     remote_root = str(config.get("remote_root", remote_join(remote_base, f"{machine_id}/{folder_id}")))
-    trash_root = str(config.get("trash_root", remote_join(remote_base, f".trash/{machine_id}/{folder_id}")))
     return {
         "id": folder_id,
         "label": config.get("folder_label", folder_id),
         "local_path": local_path,
         "remote_root": remote_root,
-        "trash_root": trash_root,
         "remote_path": remote_root.split(":", 1)[1].lstrip("/") if ":" in remote_root else remote_root,
-        "trash_path": trash_root.split(":", 1)[1].lstrip("/") if ":" in trash_root else trash_root,
         "filter_file": str(config.get("filter_file", DEFAULT_FILTER)),
         "enabled": True,
     }
@@ -796,9 +801,7 @@ def normalized_profile(profile: dict[str, Any], config_defaults: dict[str, Any])
         folder.setdefault("enabled", True)
         folder.setdefault("filter_file", str(folder.get("filter_file") or normalized.get("filter_file", DEFAULT_FILTER)))
         folder.setdefault("remote_path", f"{machine_id}/{folder['id']}")
-        folder.setdefault("trash_path", f".trash/{machine_id}/{folder['id']}")
         folder.setdefault("remote_root", remote_join(str(normalized["remote_base"]), str(folder["remote_path"])))
-        folder.setdefault("trash_root", remote_join(str(normalized["remote_base"]), str(folder["trash_path"])))
     return normalized
 
 
@@ -905,7 +908,6 @@ def folder_config(config: dict[str, Any], folder: dict[str, Any]) -> dict[str, A
         "folder_id": folder["id"],
         "local_path": folder["local_path"],
         "remote_root": folder["remote_root"],
-        "trash_root": folder["trash_root"],
         "filter_file": folder.get("filter_file", merged.get("filter_file", str(DEFAULT_FILTER))),
     })
     return merged
@@ -950,7 +952,6 @@ def registry_doc(config: dict[str, Any]) -> dict[str, Any]:
                 "id": folder["id"],
                 "label": folder.get("label", folder["id"]),
                 "remote_path": folder["remote_path"],
-                "trash_path": folder["trash_path"],
                 "enabled": bool(folder.get("enabled", True)),
                 "filter_fingerprint": effective_filter_fingerprint(folder_config(cfg, folder)),
             }
@@ -1063,12 +1064,16 @@ def dropbox_transfer_count(config: dict[str, Any]) -> int:
 def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None = None) -> list[str]:
     remote = config["remote_root"].rstrip("/")
     local = str(Path(config["local_path"]).expanduser())
-    trash = f"{config['trash_root'].rstrip('/')}/{stamp()}"
     cmd = [
         rclone_bin(config), "sync", local, remote,
         *filter_args(config),
-        "--backup-dir", trash,
         "--create-empty-src-dirs",
+        # Preserve same-content local renames as Dropbox server-side moves when
+        # possible. This avoids a redundant re-upload and lets Dropbox retain
+        # file identity/history across a rename. Rclone falls back to ordinary
+        # transfer/delete behavior if it cannot prove a hash match.
+        "--track-renames",
+        "--track-renames-strategy", "hash",
         # Finish the comparison before uploading so rclone's transfer totals
         # are stable. This lets the UI show an honest completion percentage
         # instead of a denominator that grows while the tree is discovered.
@@ -1254,7 +1259,6 @@ def set_active_remote_base(config: dict[str, Any], remote_base: str) -> None:
     config["remote_base"] = remote_base.rstrip("/")
     for folder in config["folders"]:
         folder["remote_root"] = remote_join(config["remote_base"], str(folder["remote_path"]))
-        folder["trash_root"] = remote_join(config["remote_base"], str(folder["trash_path"]))
     for profile in config["profiles"]:
         if profile["id"] == config["active_profile_id"]:
             profile["remote_base"] = config["remote_base"]
@@ -1280,14 +1284,12 @@ def add_setup_folder(config: dict[str, Any], local_path: str, allow_unsafe_local
         "label": path.name,
         "local_path": str(path),
         "remote_path": f"{config['machine_id']}/{folder_id}",
-        "trash_path": f".trash/{config['machine_id']}/{folder_id}",
         "filter_file": str(config.get("filter_file", DEFAULT_FILTER)),
         "enabled": True,
     }
     if allow_unsafe_local_path:
         folder["allow_unsafe_local_path"] = True
     folder["remote_root"] = remote_join(str(config["remote_base"]), str(folder["remote_path"]))
-    folder["trash_root"] = remote_join(str(config["remote_base"]), str(folder["trash_path"]))
     validate_local_path({**config, "folders": [folder]})
     config["folders"].append(folder)
     for profile in config["profiles"]:
@@ -1593,6 +1595,8 @@ def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
 def cmd_backup(args: argparse.Namespace) -> int:
     config = normalized_config(load_config(Path(args.config).expanduser()))
     validate_local_path(config)
+    if recovery_is_paused(config) and not args.dry_run:
+        raise SystemExit("backup is paused for recovery; run 'safe-sync recovery resume' after local and Dropbox state are reconciled")
     if args.dry_run or args.folder or args.all:
         folders = selected_folders(config, args.folder, args.all)
         last_code = 0
@@ -1727,7 +1731,10 @@ def status_health(config: dict[str, Any], service_state: str, sync_state: dict[s
     last_error = sync_state.get("last_error")
     last_warning = sync_state.get("last_warning")
     sync_status = sync_state.get("state")
-    if sync_status in {"backoff", "cooldown"} and (last_warning or sync_state.get("backoff_until")):
+    if sync_status == "recovery_paused":
+        health = "ok"
+        reason = "Outbound backup is intentionally paused for Dropbox recovery"
+    elif sync_status in {"backoff", "cooldown"} and (last_warning or sync_state.get("backoff_until")):
         health = "warning"
         reason = str(last_warning or "Dropbox cooldown is active")
     elif last_error and text_looks_rate_limited(str(last_error)):
@@ -1867,7 +1874,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "folders": ", ".join(folder["id"] for folder in folders),
         "local_path": str(Path(first_folder["local_path"]).expanduser()),
         "remote_root": first_folder["remote_root"],
-        "trash_root": first_folder["trash_root"],
         "poll_interval_seconds": str(config.get("poll_interval_seconds", 5)),
         "debounce_seconds": str(config.get("debounce_seconds", 20)),
         "fallback_interval_seconds": str(config.get("fallback_interval_seconds", 1800)),
@@ -2379,6 +2385,20 @@ def run_all_backups_runtime(
     completed_this_run = [folder_id for folder_id in scheduled_folder_ids if folder_id not in pending_at_start]
 
     for item in list(queue["items"]):
+        if not dry_run and (recovery_is_paused(config) or api_state.recovery_paused()):
+            pending_ids = [str(pending["folder_id"]) for pending in queue["items"]]
+            publish_runtime_status(
+                api_state,
+                config,
+                state="recovery_paused",
+                recovery_paused=True,
+                queued_backup=False,
+                pending_folders=pending_ids,
+                completed_folders=completed_this_run,
+                last_progress=f"Recovery pause active; {len(pending_ids)} scheduled folder(s) retained for later",
+                note="Current folder operation finished; no new folder backup was started",
+            )
+            return RECOVERY_PAUSED_EXIT, pending_ids[0] if pending_ids else None
         folder_id = str(item["folder_id"])
         folder = folder_by_id.get(folder_id)
         if folder is None:
@@ -2996,6 +3016,93 @@ def run_query_runtime(config: dict[str, Any], ticket: dict[str, Any], api_state:
                 audit_last_cloud_sync=(result.get("replication") or {}).get("last_success_at"),
             )
             return
+        if query == "recovery_revisions":
+            publish_runtime_status(
+                api_state,
+                config,
+                state="recovery_paused" if api_state.recovery_paused() else "comparing",
+                last_command="recovery revisions",
+                last_progress="Reading Dropbox version history",
+            )
+            result = recovery_revisions(
+                config,
+                str(payload["folder"]),
+                str(payload["path"]),
+                int(payload.get("limit") or 30),
+            )
+            api_state.complete_query(ticket, {"ok": True, "history": result})
+            publish_runtime_status(
+                api_state,
+                config,
+                state="recovery_paused" if api_state.recovery_paused() else "watching",
+                last_progress=f"Found {len(result.get('entries') or [])} Dropbox revisions",
+            )
+            return
+        if query == "recovery_stage":
+            if not api_state.recovery_paused() or not recovery_is_paused(config):
+                raise TransferError("pause backup before staging a Dropbox revision")
+            publish_runtime_status(
+                api_state,
+                config,
+                state="staging",
+                last_command="recovery stage",
+                last_progress="Downloading selected Dropbox revision into safe local staging",
+            )
+            job = create_recovery_job(
+                config,
+                str(payload["folder"]),
+                str(payload["path"]),
+                str(payload["revision"]),
+            )
+            api_state.complete_query(ticket, {"ok": True, "job": job})
+            publish_runtime_status(
+                api_state,
+                config,
+                state="recovery_paused",
+                recovery_paused=True,
+                receive_job_id=job["id"],
+                receive_job_status=job["status"],
+                last_progress="Dropbox revision staged and ready for comparison",
+                _activity_event=f"Recovery revision staged: {job['id']}",
+            )
+            return
+        if query == "recovery_snapshot_stage":
+            if not api_state.recovery_paused() or not recovery_is_paused(config):
+                raise TransferError("pause backup before staging a historical folder snapshot")
+            publish_runtime_status(
+                api_state,
+                config,
+                state="staging",
+                last_command="recovery snapshot",
+                last_progress="Building and verifying the selected historical folder snapshot",
+            )
+            def on_snapshot_progress(line: str) -> None:
+                summary = summarize_progress_line(line) or line.strip()
+                if summary:
+                    publish_runtime_status(
+                        api_state,
+                        config,
+                        state="staging",
+                        last_progress=summary,
+                        current_file=current_file_from_progress(summary),
+                    )
+
+            result = create_recovery_snapshot(
+                config,
+                str(payload["folder"]),
+                str(payload["generation"]),
+                progress_callback=on_snapshot_progress,
+            )
+            api_state.complete_query(ticket, {"ok": True, "snapshot": result})
+            publish_runtime_status(
+                api_state,
+                config,
+                state="recovery_paused",
+                recovery_paused=True,
+                last_progress="Historical folder snapshot is ready to inspect",
+                _activity_event=f"Recovery snapshot staged: {result['id']}",
+            )
+            return
         if query != "compare":
             raise TransferError(f"unknown remote query: {query}")
         publish_runtime_status(
@@ -3012,10 +3119,20 @@ def run_query_runtime(config: dict[str, Any], ticket: dict[str, Any], api_state:
             [str(path) for path in payload.get("selected_paths") or []],
         )
         api_state.complete_query(ticket, {"ok": True, "comparison": result})
-        publish_runtime_status(api_state, config, state="watching", last_progress="Comparison complete")
+        publish_runtime_status(
+            api_state,
+            config,
+            state="recovery_paused" if api_state.recovery_paused() else "watching",
+            last_progress="Comparison complete",
+        )
     except BaseException as exc:
         api_state.complete_query(ticket, {"ok": False, "error": str(exc)})
-        publish_runtime_status(api_state, config, state="watching", last_warning=str(exc))
+        publish_runtime_status(
+            api_state,
+            config,
+            state="recovery_paused" if api_state.recovery_paused() else "watching",
+            last_warning=str(exc),
+        )
 
 
 def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], api_state: DaemonApiState) -> int:
@@ -3045,8 +3162,10 @@ def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], a
         _activity_event=f"Job {operation} started: {job_id}",
     )
     try:
+        job = store.load(job_id)
+        if job.get("source_kind") == "dropbox_revision" and not recovery_is_paused(config):
+            raise TransferError("pause backup for recovery before changing a Dropbox revision job")
         if operation == "apply":
-            job = store.load(job_id)
             revalidate_remote_job_source(config, job)
             result = store.commit_clone(job_id) if job.get("mode") == "clone" else store.apply(job_id, request.get("policies") or {})
         elif operation == "reconcile":
@@ -3075,7 +3194,7 @@ def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], a
         publish_runtime_status(
             api_state,
             config,
-            state="watching",
+            state="recovery_paused" if api_state.recovery_paused() else "watching",
             last_error=None,
             last_warning=str(exc),
             last_finish=now_iso(),
@@ -3103,7 +3222,7 @@ def run_job_operation_runtime(config: dict[str, Any], request: dict[str, Any], a
     publish_runtime_status(
         api_state,
         config,
-        state="watching",
+        state="recovery_paused" if api_state.recovery_paused() else "watching",
         last_error=None,
         last_warning=None,
         last_finish=now_iso(),
@@ -3139,6 +3258,11 @@ def backup_blocking_jobs(config: dict[str, Any]) -> list[str]:
 
 
 def revalidate_remote_job_source(config: dict[str, Any], job: dict[str, Any]) -> None:
+    if job.get("source_kind") == "dropbox_revision":
+        # A Dropbox revision identity is immutable. The staged payload was
+        # content-hash verified when downloaded, so the live remote path may
+        # change without invalidating this reviewed recovery job.
+        return
     current = select_inventory(fetch_remote_inventory(config, str(job["source"])), job.get("selected_paths") or [])
     if inventories_equal(current, job.get("source_inventory") or {}):
         return
@@ -3146,6 +3270,425 @@ def revalidate_remote_job_source(config: dict[str, Any], job: dict[str, Any]) ->
     job["source_changed_at"] = now_iso()
     JobStore(state_root_path(config)).save(job)
     raise JobConflictError("remote source changed after staging; create a refreshed receive job")
+
+
+def dropbox_history_credentials(config: dict[str, Any], remote_root: str) -> dict[str, str]:
+    return credentials_from_rclone(rclone_bin(config), rclone_env(config), remote_root)
+
+
+def capture_recovery_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    remote_root = str(config["remote_root"])
+    result = list_folder_snapshot(
+        dropbox_history_credentials(config, remote_root),
+        dropbox_root_path(remote_root),
+    )
+    return {
+        "schema_version": 1,
+        "provider": "dropbox",
+        "kind": "full",
+        "captured_at": now_iso(),
+        "root": result["path"],
+        "cursor": result.get("cursor"),
+        "entry_count": len(result["entries"]),
+        "entries": result["entries"],
+    }
+
+
+def resolve_recovery_snapshot(
+    config: dict[str, Any],
+    folder_id: str,
+    generation: dict[str, Any],
+    *,
+    seen: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    snapshot = generation.get("snapshot") if isinstance(generation.get("snapshot"), dict) else None
+    if snapshot is None or not isinstance(snapshot.get("entries"), dict):
+        raise TransferError("backup cycle does not contain a complete snapshot manifest")
+    kind = str(snapshot.get("kind") or "full")
+    if kind == "full":
+        return {str(path): dict(entry) for path, entry in snapshot["entries"].items() if isinstance(entry, dict)}
+    if kind != "delta":
+        raise TransferError("backup cycle uses an unsupported snapshot format")
+    base_id = str(snapshot.get("base_generation") or generation.get("parent_generation") or "")
+    visited = set(seen or ())
+    generation_id = str(generation.get("generation_id") or "")
+    if not base_id or base_id in visited or len(visited) >= 1000:
+        raise TransferError("backup snapshot chain is incomplete or cyclic")
+    visited.add(generation_id)
+    base = recovery_generation(config, folder_id, base_id)
+    entries = resolve_recovery_snapshot(config, folder_id, base, seen=visited)
+    for path in snapshot.get("removed") or []:
+        entries.pop(str(path), None)
+    for path, entry in snapshot["entries"].items():
+        if isinstance(entry, dict):
+            entries[str(path)] = dict(entry)
+    return {path: entries[path] for path in sorted(entries)}
+
+
+def compact_recovery_snapshot(
+    config: dict[str, Any],
+    folder_id: str,
+    parent_generation: str | None,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    current = snapshot.get("entries") if isinstance(snapshot.get("entries"), dict) else {}
+    if not parent_generation:
+        return snapshot
+    try:
+        parent = recovery_generation(config, folder_id, parent_generation)
+        previous = resolve_recovery_snapshot(config, folder_id, parent)
+    except TransferError:
+        return snapshot
+    changed = {path: entry for path, entry in current.items() if previous.get(path) != entry}
+    removed = sorted(set(previous) - set(current))
+    return {
+        "schema_version": 1,
+        "provider": "dropbox",
+        "kind": "delta",
+        "captured_at": snapshot.get("captured_at"),
+        "root": snapshot.get("root"),
+        "cursor": snapshot.get("cursor"),
+        "entry_count": len(current),
+        "base_generation": parent_generation,
+        "entries": changed,
+        "removed": removed,
+    }
+
+
+def recent_recovery_changes(
+    config: dict[str, Any],
+    folder_id: str | None = None,
+    *,
+    limit: int = 20,
+    paths_per_cycle: int = 50,
+) -> dict[str, Any]:
+    """Return bounded local generation history as a path picker for recovery."""
+    folders = enabled_folders(config)
+    if folder_id:
+        folders = [local_folder_by_id(config, folder_id)]
+    cycles: list[dict[str, Any]] = []
+    for folder in folders:
+        folder_id_value = str(folder["id"])
+        generation_dir = generation_local_dir({**config, "folder_id": folder_id_value}) / "generations"
+        if not generation_dir.exists():
+            continue
+        for path in generation_dir.glob("*.json"):
+            try:
+                value = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(value, dict)
+                or not value.get("complete")
+                or str(value.get("folder_id") or "") != folder_id_value
+            ):
+                continue
+            changes = [
+                {"path": str(change.get("path") or ""), "operation": str(change.get("operation") or "changed")}
+                for change in value.get("changes") or []
+                if isinstance(change, dict) and change.get("path")
+            ]
+            counts: dict[str, int] = {}
+            for change in changes:
+                counts[change["operation"]] = counts.get(change["operation"], 0) + 1
+            snapshot = value.get("snapshot") if isinstance(value.get("snapshot"), dict) else None
+            cycles.append(
+                {
+                    "generation_id": str(value.get("generation_id") or path.stem),
+                    "completed_at": value.get("completed_at"),
+                    "folder_id": folder_id_value,
+                    "folder_label": str(folder.get("label") or folder_id_value),
+                    "change_count": len(changes),
+                    "change_counts": counts,
+                    "changes": changes[: max(1, min(int(paths_per_cycle), 200))],
+                    "paths_truncated": len(changes) > paths_per_cycle,
+                    "snapshot_available": snapshot is not None and isinstance(snapshot.get("entries"), dict),
+                    "snapshot_entry_count": int((snapshot or {}).get("entry_count") or 0),
+                }
+            )
+    cycles.sort(key=lambda item: (str(item.get("completed_at") or ""), str(item["generation_id"])), reverse=True)
+    bounded_limit = max(1, min(int(limit), 100))
+    return {
+        "provider": "safe-sync-generations",
+        "folder_id": folder_id,
+        "cycles": cycles[:bounded_limit],
+        "cycle_count": min(len(cycles), bounded_limit),
+        "has_more": len(cycles) > bounded_limit,
+        "instructions": "Choose a backup cycle with a complete manifest to stage and inspect the full historical folder.",
+    }
+
+
+def recovery_revisions(config: dict[str, Any], folder_id: str, relative_path: str, limit: int = 30) -> dict[str, Any]:
+    folder = local_folder_by_id(config, folder_id)
+    relative = normalize_subpath(relative_path)
+    if not relative:
+        raise TransferError("recovery requires a relative file path")
+    provider_path = dropbox_path(str(folder["remote_root"]), relative)
+    result = list_revisions(
+        dropbox_history_credentials(config, str(folder["remote_root"])),
+        provider_path,
+        limit=limit,
+    )
+    result.update(
+        {
+            "folder_id": folder_id,
+            "relative_path": relative,
+            "provider": "dropbox",
+            "retention_note": "Dropbox plan-bounded history (30 days on Basic/Plus/Family)",
+        }
+    )
+    record_event(
+        config,
+        "recovery.revisions_listed",
+        component="recovery",
+        data={"path": relative, "revision_count": len(result.get("entries") or []), "is_deleted": result.get("is_deleted")},
+        correlation={"folder_id": folder_id},
+        effect="none",
+    )
+    return result
+
+
+def recovery_generation(config: dict[str, Any], folder_id: str, generation_id: str) -> dict[str, Any]:
+    if not generation_id or safe_id(generation_id) != generation_id:
+        raise TransferError("invalid backup cycle identity")
+    folder = local_folder_by_id(config, folder_id)
+    path = generation_local_dir({**config, "folder_id": folder["id"]}) / "generations" / f"{generation_id}.json"
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise TransferError("backup cycle is unavailable on this computer") from exc
+    except json.JSONDecodeError as exc:
+        raise TransferError("backup cycle metadata is invalid") from exc
+    if not isinstance(value, dict) or value.get("complete") is not True or value.get("folder_id") != folder_id:
+        raise TransferError("backup cycle metadata does not match the selected folder")
+    return value
+
+
+def create_recovery_snapshot(
+    config: dict[str, Any],
+    folder_id: str,
+    generation_id: str,
+    *,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Materialize one complete historical folder into isolated local staging."""
+    if not recovery_is_paused(config):
+        raise TransferError("pause backup before staging a historical folder snapshot")
+    folder = local_folder_by_id(config, folder_id)
+    generation = recovery_generation(config, folder_id, generation_id)
+    snapshot = generation.get("snapshot") if isinstance(generation.get("snapshot"), dict) else None
+    if snapshot is None:
+        raise TransferError("this older backup cycle is a change record only; complete snapshots begin after the snapshot update")
+    expected = resolve_recovery_snapshot(config, folder_id, generation)
+    snapshot_id = f"snapshot_{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:10]}"
+    watched_root = Path(folder["local_path"]).expanduser().resolve(strict=False)
+    work_root = watched_root.parent / ".safe-sync-work" / "recovery-snapshots" / snapshot_id
+    payload_root = work_root / "payload" / safe_id(str(folder.get("label") or folder_id))
+    record_path = state_root_path(config) / "recovery-snapshots" / f"{snapshot_id}.json"
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "id": snapshot_id,
+        "status": "staging",
+        "folder_id": folder_id,
+        "folder_label": str(folder.get("label") or folder_id),
+        "generation_id": generation_id,
+        "snapshot_at": generation.get("completed_at"),
+        "change_count": len(generation.get("changes") or []),
+        "entry_count": len(expected),
+        "payload": str(payload_root),
+        "work_root": str(work_root),
+        "watched_folder": str(watched_root),
+        "created_at": now_iso(),
+    }
+    atomic_write_text(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    payload_root.mkdir(parents=True, exist_ok=False)
+    folder_cfg = folder_config(config, folder)
+    try:
+        code = run_command(
+            folder_cfg,
+            copy_cmd(folder_cfg, str(folder["remote_root"]), str(payload_root), False),
+            dry_run=False,
+            progress_callback=progress_callback,
+        )
+        if code != 0:
+            raise TransferError(f"current Dropbox folder download failed with rclone exit {code}")
+        current = capture_recovery_snapshot(folder_cfg)["entries"]
+        credentials = dropbox_history_credentials(folder_cfg, str(folder["remote_root"]))
+
+        staged = local_inventory(payload_root, include_hashes=True)
+        for relative in sorted(set(staged) - set(expected), key=lambda value: (len(PurePosixPath(value).parts), value), reverse=True):
+            target = payload_root.joinpath(*PurePosixPath(relative).parts)
+            if target.is_dir() and not target.is_symlink():
+                try:
+                    target.rmdir()
+                except OSError:
+                    pass
+            else:
+                target.unlink(missing_ok=True)
+
+        for relative, entry in sorted(expected.items()):
+            if not isinstance(entry, dict):
+                raise TransferError(f"snapshot entry is invalid: {relative}")
+            target = payload_root.joinpath(*PurePosixPath(relative).parts)
+            if entry.get("type") == "directory":
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            current_entry = current.get(relative) if isinstance(current, dict) else None
+            expected_hash = str(((entry.get("hashes") or {}).get("dropboxhash")) or "")
+            current_hash = str((((current_entry or {}).get("hashes") or {}).get("dropboxhash")) or "")
+            if target.exists() and expected_hash and current_hash == expected_hash:
+                continue
+            revision = str(entry.get("revision") or "")
+            if not revision:
+                raise TransferError(f"snapshot has no downloadable revision for {relative}")
+            if progress_callback is not None:
+                progress_callback(f"Restoring historical revision: {relative}")
+            download_revision(credentials, revision, target)
+
+        actual = local_inventory(payload_root, include_hashes=True)
+        if not inventories_equal(actual, expected):
+            raise TransferError("staged folder verification did not match the selected backup snapshot")
+        record.update({"status": "ready", "verified_at": now_iso()})
+        atomic_write_text(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+        record_event(
+            config,
+            "recovery.snapshot_staged",
+            component="recovery",
+            data={"entry_count": len(expected), "payload": str(payload_root)},
+            correlation={"folder_id": folder_id, "generation_id": generation_id, "job_id": snapshot_id},
+        )
+        return record
+    except BaseException as exc:
+        record.update({"status": "failed", "failed_at": now_iso(), "error": str(exc)})
+        atomic_write_text(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+        raise
+
+
+def _revision_source_inventory(relative: str, metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    inventory: dict[str, dict[str, Any]] = {}
+    parent = PurePosixPath(relative).parent
+    parents: list[str] = []
+    while parent.as_posix() not in {"", "."}:
+        parents.append(parent.as_posix())
+        parent = parent.parent
+    for path in reversed(parents):
+        inventory[path] = {"type": "directory", "size": 0, "mtime": None}
+    content_hash = str(metadata.get("content_hash") or "")
+    inventory[relative] = {
+        "type": "file",
+        "size": int(metadata.get("size") or 0),
+        "mtime": metadata.get("server_modified"),
+        "hashes": {"dropboxhash": content_hash} if content_hash else {},
+        "id": str(metadata.get("id") or ""),
+        "revision": str(metadata.get("rev") or ""),
+    }
+    return inventory
+
+
+def _recovery_diff(current: Path, staged: Path, *, max_bytes: int = 1024 * 1024, max_lines: int = 400) -> dict[str, Any]:
+    if not current.exists():
+        return {"kind": "missing_local", "summary": "The local file is missing; this revision can be added."}
+    if not current.is_file() or not staged.is_file():
+        return {"kind": "metadata", "summary": "Content diff is available only for regular files."}
+    if current.stat().st_size > max_bytes or staged.stat().st_size > max_bytes:
+        return {
+            "kind": "metadata",
+            "summary": "File is larger than the 1 MiB text-preview limit; compare hashes and sizes.",
+            "local_bytes": current.stat().st_size,
+            "revision_bytes": staged.stat().st_size,
+        }
+    try:
+        current_text = current.read_text(encoding="utf-8")
+        staged_text = staged.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {
+            "kind": "binary",
+            "summary": "Binary/non-UTF-8 file; compare hashes and sizes.",
+            "local_bytes": current.stat().st_size,
+            "revision_bytes": staged.stat().st_size,
+        }
+    lines = list(
+        difflib.unified_diff(
+            current_text.splitlines(),
+            staged_text.splitlines(),
+            fromfile="current-local",
+            tofile="selected-dropbox-revision",
+            lineterm="",
+        )
+    )
+    truncated = len(lines) > max_lines
+    return {
+        "kind": "text",
+        "summary": "No text differences." if not lines else f"{len(lines)} unified-diff lines" + (" (preview truncated)" if truncated else ""),
+        "unified_diff": "\n".join(lines[:max_lines]),
+        "truncated": truncated,
+    }
+
+
+def create_recovery_job(config: dict[str, Any], folder_id: str, relative_path: str, revision: str) -> dict[str, Any]:
+    if not recovery_is_paused(config):
+        raise TransferError("pause backup with 'safe-sync recovery pause' before staging a Dropbox revision")
+    folder = local_folder_by_id(config, folder_id)
+    relative = normalize_subpath(relative_path)
+    revisions = recovery_revisions(config, folder_id, relative, 100)
+    metadata = next((entry for entry in revisions.get("entries") or [] if entry.get("rev") == revision), None)
+    if metadata is None:
+        raise TransferError("Dropbox revision is unavailable or outside the retention window")
+    if not metadata.get("is_downloadable", True):
+        raise TransferError("Dropbox reports that this revision is not downloadable")
+    source_inventory = _revision_source_inventory(relative, metadata)
+    store = JobStore(state_root_path(config))
+    job = store.create(
+        source=f"dropbox-revision:{revision}",
+        destination=str(Path(folder["local_path"]).expanduser()),
+        selected_paths=[relative],
+        source_label="dropbox-history",
+        mode="receive",
+        source_inventory=source_inventory,
+        destination_inventory=local_selected_inventory(folder["local_path"], [relative]),
+        destination_inventory_scoped=True,
+    )
+    job.update(
+        {
+            "source_kind": "dropbox_revision",
+            "source_revision": revision,
+            "source_provider_path": revisions["path"],
+            "recovery_folder_id": folder_id,
+        }
+    )
+    store.save(job)
+    staged_path = Path(job["paths"]["staging"]).joinpath(*PurePosixPath(relative).parts)
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        downloaded = download_revision(
+            dropbox_history_credentials(config, str(folder["remote_root"])),
+            revision,
+            staged_path,
+        )
+        downloaded_hash = str(downloaded.get("content_hash") or "")
+        expected_hash = str(metadata.get("content_hash") or "")
+        if expected_hash and downloaded_hash and downloaded_hash != expected_hash:
+            raise TransferError("Dropbox returned different metadata for the selected revision")
+        job = store.mark_staged(job["id"])
+        current_path = Path(folder["local_path"]).expanduser().resolve().joinpath(*PurePosixPath(relative).parts)
+        job["recovery_compare"] = _recovery_diff(current_path, staged_path)
+        job["recovery_pause_required"] = True
+        store.save(job)
+    except BaseException as exc:
+        job = store.load(job["id"])
+        job["status"] = "staging_failed"
+        job["error"] = str(exc)
+        store.save(job)
+        raise
+    record_event(
+        config,
+        "recovery.revision_staged",
+        component="recovery",
+        data={"path": relative, "revision": revision, "status": job.get("status")},
+        correlation={"folder_id": folder_id, "job_id": job["id"]},
+    )
+    return job
 
 
 def run_pull_runtime(config: dict[str, Any], request: dict[str, Any], api_state: DaemonApiState) -> int:
@@ -3483,6 +4026,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
     settings = watch_settings_from_config(config, args)
     daemon = WatchDaemon(settings)
     api_state = DaemonApiState()
+    api_state.set_recovery_paused(recovery_is_paused(config))
     api_server = DaemonApiServer(socket_path(config), api_state)
     folders = enabled_folders(config)
     if not folders:
@@ -3507,10 +4051,11 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
     daemon.mark_dirty(startup_now)
     ensure_local_profiles_registered(config)
     reconciled_jobs = reconcile_interrupted_jobs(config)
+    initial_recovery_pause = recovery_is_paused(config)
     publish_runtime_status(
         api_state,
         config,
-        state="dirty",
+        state="recovery_paused" if initial_recovery_pause else "dirty",
         watcher=watcher_mode,
         folders=[{"id": folder["id"], "local_path": str(Path(folder["local_path"]).expanduser())} for folder in folders],
         dry_run=args.dry_run,
@@ -3528,7 +4073,8 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         retry_after_seconds=None,
         retry_attempt=None,
         retry_kind=None,
-        note="startup reconcile queued",
+        note="Backup paused for Dropbox recovery" if initial_recovery_pause else "startup reconcile queued",
+        recovery_paused=initial_recovery_pause,
         reconciled_jobs=reconciled_jobs,
     )
     record_event(
@@ -3625,6 +4171,20 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     "backup.queued",
                     component="scheduler",
                     data={"trigger": "manual", "folder_ids": [folder["id"] for folder in enabled_folders(config)]},
+                )
+
+            marker_paused = recovery_is_paused(config)
+            if marker_paused != api_state.recovery_paused():
+                api_state.set_recovery_paused(marker_paused)
+            if marker_paused and api_state.snapshot().get("state") not in {"staging", "applying", "reconcile", "rollback"}:
+                manual_backup_pending = False
+                publish_runtime_status(
+                    api_state,
+                    config,
+                    state="recovery_paused",
+                    recovery_paused=True,
+                    queued_backup=False,
+                    note="Backup paused for Dropbox recovery",
                 )
 
             job_operation = api_state.consume_job_operation()
@@ -3739,14 +4299,19 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 publish_runtime_status(
                     api_state,
                     config,
-                    state="dirty",
+                    state="recovery_paused" if api_state.recovery_paused() else "dirty",
                     changed_folders=changed,
                     changed_links=local_link_changes,
                     last_change=now_iso(),
                     watcher=watcher_mode,
                 )
             elif daemon.state.state not in {DaemonState.SYNCING, DaemonState.BACKOFF}:
-                publish_runtime_status(api_state, config, state="watching", watcher=watcher_mode)
+                publish_runtime_status(
+                    api_state,
+                    config,
+                    state="recovery_paused" if api_state.recovery_paused() else "watching",
+                    watcher=watcher_mode,
+                )
 
             if daemon.state.state == DaemonState.BACKOFF:
                 if daemon.backoff_expired(now):
@@ -3771,6 +4336,8 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
             fallback_run = daemon.should_run_fallback(now)
             automatic_due = retry_run or daemon.should_sync_after_debounce(now) or fallback_run
             should_run = daemon.should_run_backup(now, manual=manual_run, retry=retry_run)
+            if api_state.recovery_paused() or recovery_is_paused(config):
+                should_run = False
             blocking_jobs = backup_blocking_jobs(config)
             if should_run and blocking_jobs:
                 should_run = False
@@ -3781,7 +4348,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     last_warning=f"Backup paused until interrupted receive jobs are reconciled: {', '.join(blocking_jobs)}",
                     blocking_receive_jobs=blocking_jobs,
                 )
-            if automatic_due and not manual_run and daemon.in_min_interval(now):
+            if automatic_due and not manual_run and daemon.in_min_interval(now) and not api_state.recovery_paused():
                 publish_runtime_status(api_state, config, state="cooldown", cooldown_remaining_seconds=round(daemon.min_interval_remaining(now), 1))
 
             if should_run:
@@ -3831,6 +4398,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     error_text = str(exc) or "backup failed"
                 after = time.monotonic()
                 rate_limited = code == RATE_LIMIT_EXIT
+                recovery_paused = code == RECOVERY_PAUSED_EXIT
                 requested_backoff = api_state.snapshot().get("backoff_seconds") if rate_limited else None
                 try:
                     backoff_seconds = float(requested_backoff) if requested_backoff is not None else None
@@ -3841,7 +4409,18 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     rate_limited=rate_limited,
                     backoff_seconds=backoff_seconds,
                 )
-                if code == 0:
+                if recovery_paused:
+                    publish_runtime_status(
+                        api_state,
+                        config,
+                        state="recovery_paused",
+                        recovery_paused=True,
+                        queued_backup=False,
+                        last_error=None,
+                        last_warning=None,
+                        note="Backup paused for Dropbox recovery",
+                    )
+                elif code == 0:
                     publish_runtime_status(
                         api_state,
                         config,
@@ -3920,12 +4499,10 @@ def cmd_folders(args: argparse.Namespace) -> int:
             "label": args.label or folder_id,
             "local_path": args.local_path,
             "remote_path": args.remote_path or f"{machine_id}/{folder_id}",
-            "trash_path": args.trash_path or f".trash/{machine_id}/{folder_id}",
             "filter_file": args.filter_file or str(config.get("filter_file", DEFAULT_FILTER)),
             "enabled": not args.disabled,
         }
         folder.setdefault("remote_root", remote_join(str(config["remote_base"]), str(folder["remote_path"])))
-        folder.setdefault("trash_root", remote_join(str(config["remote_base"]), str(folder["trash_path"])))
         validate_local_path({**config, "folders": [folder]})
         config["folders"].append(folder)
         for profile in config["profiles"]:
@@ -4039,7 +4616,6 @@ def cmd_config(args: argparse.Namespace) -> int:
             config["remote_base"] = args.remote_base
             for folder in config["folders"]:
                 folder["remote_root"] = remote_join(args.remote_base, str(folder["remote_path"]))
-                folder["trash_root"] = remote_join(args.remote_base, str(folder["trash_path"]))
         config["poll_interval_seconds"] = bounded_seconds("poll interval", int(args.poll_interval_seconds), 1, 3600)
         config["debounce_seconds"] = bounded_seconds("debounce", int(args.debounce_seconds), 1, 3600)
         config["min_interval_seconds"] = bounded_seconds("minimum interval", int(args.min_interval_seconds), 0, 86400)
@@ -4215,6 +4791,38 @@ def state_root_path(config: dict[str, Any]) -> Path:
     return Path(normalized_config(config)["state_root"]).expanduser()
 
 
+def recovery_pause_path(config: dict[str, Any]) -> Path:
+    return state_root_path(config) / "recovery-pause.json"
+
+
+def recovery_is_paused(config: dict[str, Any]) -> bool:
+    return recovery_pause_path(config).exists()
+
+
+def set_recovery_paused(config: dict[str, Any], paused: bool, *, actor: str = "cli") -> dict[str, Any]:
+    path = recovery_pause_path(config)
+    if paused:
+        document = {
+            "schema_version": 1,
+            "paused": True,
+            "paused_at": now_iso(),
+            "profile_id": config.get("profile_id"),
+            "actor": actor,
+            "reason": "Dropbox history recovery",
+        }
+        atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+    else:
+        path.unlink(missing_ok=True)
+        document = {"schema_version": 1, "paused": False, "resumed_at": now_iso(), "actor": actor}
+    record_event(
+        config,
+        "recovery.paused" if paused else "recovery.resumed",
+        component="recovery",
+        data=document,
+    )
+    return document
+
+
 def backup_report_path(config: dict[str, Any]) -> Path:
     root = state_root_path(config) / "backup-reports"
     root.mkdir(parents=True, exist_ok=True)
@@ -4348,6 +4956,8 @@ def publish_generation(
         pending_code = _publish_pending_generation(config, pending_body, operation_id=operation_id)
         if pending_code != 0:
             return pending_code
+        if not supplied_changes:
+            return 0
         canonical_supplied = sorted(supplied_changes, key=lambda change: (str(change.get("path")), str(change.get("operation"))))
         canonical_pending = sorted(
             list(pending_record.get("changes") or []),
@@ -4356,7 +4966,14 @@ def publish_generation(
         if canonical_supplied == canonical_pending:
             return 0
 
-    if not supplied_changes:
+    latest_local_path = generation_local_dir(config) / "latest.json"
+    has_snapshot_baseline = False
+    try:
+        latest_local = json.loads(latest_local_path.read_text())
+        has_snapshot_baseline = isinstance(latest_local.get("snapshot"), dict)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    if not supplied_changes and (has_snapshot_baseline or not config.get("remote_root")):
         record_event(
             cfg,
             "generation.skipped",
@@ -4397,6 +5014,20 @@ def publish_generation(
             correlation={"operation_id": operation_id, "folder_id": folder_id},
         )
         return int(previous.returncode or 1)
+    snapshot: dict[str, Any] | None = None
+    try:
+        snapshot = capture_recovery_snapshot(config) if config.get("remote_root") else None
+    except DropboxHistoryError as exc:
+        record_event(
+            cfg,
+            "generation.snapshot_unavailable",
+            component="generation",
+            severity="warning",
+            data={"error": str(exc)},
+            correlation={"operation_id": operation_id, "folder_id": folder_id},
+        )
+    if snapshot is not None:
+        snapshot = compact_recovery_snapshot(config, folder_id, parent_generation, snapshot)
     record = generation_record(
         machine_id=str(cfg["machine_id"]),
         install_id=str(cfg["install_id"]),
@@ -4405,6 +5036,7 @@ def publish_generation(
         filter_policy=effective_filter_fingerprint(config),
         changes=supplied_changes,
         parent_generation=parent_generation,
+        snapshot=snapshot,
     )
     correlation = {
         "operation_id": operation_id,
@@ -4723,8 +5355,10 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             )
             with Lock(lock_file(config)):
                 try:
+                    job = store.load(args.job_id)
+                    if job.get("source_kind") == "dropbox_revision" and not recovery_is_paused(config):
+                        raise TransferError("pause backup for recovery before changing a Dropbox revision job")
                     if args.jobs_cmd == "apply":
-                        job = store.load(args.job_id)
                         revalidate_remote_job_source(config, job)
                         value = store.commit_clone(args.job_id) if job.get("mode") == "clone" else store.apply(args.job_id, policies)
                     elif args.jobs_cmd == "reconcile":
@@ -4896,36 +5530,93 @@ def cmd_links(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_history(args: argparse.Namespace) -> int:
+def cmd_recovery(args: argparse.Namespace) -> int:
     config = normalized_config(load_config(Path(args.config).expanduser()))
-    folder = local_folder_by_id(config, args.folder)
-    if args.receive:
-        retained_path = normalize_subpath(args.receive)
-        if "/" not in retained_path:
-            raise TransferError("history recovery path must include its timestamp and relative file path")
-        timestamp, relative_path = retained_path.split("/", 1)
-        payload = {
-            "source": join_remote_scope(str(folder["trash_root"]), timestamp),
-            "destination": str(Path(folder["local_path"]).expanduser()),
-            "selected_paths": [normalize_subpath(relative_path)],
-            "source_label": "history",
-            "mode": "receive",
-        }
+    if args.recovery_cmd == "status":
+        daemon_status: dict[str, Any] | None = None
         try:
-            response = daemon_api(config, "receive", **payload)
+            daemon_status = dict(daemon_api(config, "status").get("status") or {})
         except OSError:
-            return run_receive_direct(config, **payload)
-        if not response.get("ok"):
-            raise SystemExit(str(response.get("error") or "history recovery queue failed"))
-        print("history recovery job queued; review it with 'safe-sync jobs list'")
+            pass
+        value = {
+            "paused": recovery_is_paused(config),
+            "pause_path": str(recovery_pause_path(config)),
+            "daemon_state": (daemon_status or {}).get("state"),
+            "active_operation": (daemon_status or {}).get("last_command"),
+            "instructions": "Keep backup paused until restored Dropbox content is reconciled into the local source.",
+        }
+        print(json.dumps(value, indent=2, sort_keys=True))
         return 0
-    target = join_remote_scope(str(folder["trash_root"]), args.subpath)
-    result = rclone_capture(config, ["lsjson", target, "--recursive", "--hash"])
-    if result.returncode != 0:
-        print(result.stdout or "", end="")
-        return int(result.returncode)
-    print(json.dumps({"folder_id": args.folder, "remote_trash": target, "entries": json.loads(result.stdout or "[]")}, indent=2, sort_keys=True))
-    return 0
+
+    if args.recovery_cmd in {"pause", "resume"}:
+        paused = args.recovery_cmd == "pause"
+        document = set_recovery_paused(config, paused)
+        try:
+            response = daemon_api(config, "recovery_pause" if paused else "recovery_resume")
+        except OSError:
+            response = {"ok": True, "daemon_running": False}
+        if not response.get("ok"):
+            if paused:
+                # The durable marker remains the safer state if notification
+                # fails; the daemon observes it on its next loop/restart.
+                raise SystemExit(str(response.get("error") or "could not notify daemon of recovery pause"))
+            set_recovery_paused(config, True, actor="resume-notification-failed")
+            raise SystemExit(str(response.get("error") or "could not notify daemon of recovery resume"))
+        status = response.get("status") if isinstance(response.get("status"), dict) else {}
+        value = {
+            **document,
+            "daemon_running": response.get("daemon_running", True),
+            "daemon_state": status.get("state"),
+            "current_operation_finishes_before_pause": paused and status.get("state") in {"syncing", "transferring", "staging", "applying"},
+        }
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+
+    if args.recovery_cmd == "recent":
+        value = recent_recovery_changes(config, args.folder, limit=args.limit, paths_per_cycle=args.paths_per_cycle)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+
+    if args.recovery_cmd == "snapshot":
+        payload = {"folder": args.folder, "generation": args.generation}
+        try:
+            response = daemon_api(config, "recovery_snapshot_stage", _timeout_seconds=7200, **payload)
+            if not response.get("ok"):
+                raise SystemExit(str(response.get("error") or "historical folder staging failed"))
+            value = response.get("snapshot")
+        except OSError:
+            with Lock(lock_file(config)):
+                value = create_recovery_snapshot(config, args.folder, args.generation)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+
+    payload = {"folder": args.folder, "path": args.path}
+    if args.recovery_cmd == "revisions":
+        payload["limit"] = args.limit
+        try:
+            response = daemon_api(config, "recovery_revisions", _timeout_seconds=610, **payload)
+            if not response.get("ok"):
+                raise SystemExit(str(response.get("error") or "Dropbox revision lookup failed"))
+            value = response.get("history")
+        except OSError:
+            with Lock(lock_file(config)):
+                value = recovery_revisions(config, args.folder, args.path, args.limit)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+
+    if args.recovery_cmd == "stage":
+        payload["revision"] = args.revision
+        try:
+            response = daemon_api(config, "recovery_stage", _timeout_seconds=610, **payload)
+            if not response.get("ok"):
+                raise SystemExit(str(response.get("error") or "Dropbox revision staging failed"))
+            value = response.get("job")
+        except OSError:
+            with Lock(lock_file(config)):
+                value = create_recovery_job(config, args.folder, args.path, args.revision)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
+    raise SystemExit(f"Unknown recovery command: {args.recovery_cmd}")
 
 
 def cmd_registry(args: argparse.Namespace) -> int:
@@ -5007,7 +5698,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="cmd",
         required=True,
-        metavar="{help,setup,connect-dropbox,backup,start,stop,restart,status,logs,doctor,folders,profiles,computers,compare,receive,jobs,links,history,pull,list,config,autostart,rclone,init-config,migrate-config}",
+        metavar="{help,setup,connect-dropbox,backup,start,stop,restart,status,logs,doctor,folders,profiles,computers,compare,receive,jobs,links,recovery,pull,list,config,autostart,rclone,init-config,migrate-config}",
     )
 
     help_cmd = sub.add_parser("help", help="Print the complete user guide")
@@ -5119,11 +5810,30 @@ def parser() -> argparse.ArgumentParser:
     links_remove.add_argument("link_id")
     links_remove.set_defaults(func=cmd_links)
 
-    history = sub.add_parser("history", help="List recoverable Safe Sync remote-trash versions")
-    history.add_argument("folder", help="Local configured folder id")
-    history.add_argument("--subpath", default="", help="Optional path below that folder's remote trash")
-    history.add_argument("--receive", metavar="TIMESTAMP/PATH", help="Stage one retained version as a receive job for review")
-    history.set_defaults(func=cmd_history)
+    recovery = sub.add_parser("recovery", help="Pause backup and safely inspect/stage Dropbox file revisions")
+    recovery_sub = recovery.add_subparsers(dest="recovery_cmd", required=True)
+    recovery_sub.add_parser("status", help="Show whether outbound backup is paused for recovery").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("pause", help="Durably pause new outbound backups before recovery").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("resume", help="Resume backup after local/Dropbox reconciliation").set_defaults(func=cmd_recovery)
+    recovery_recent_cmd = recovery_sub.add_parser("recent", help="List recent backed-up path changes as an in-app recovery picker")
+    recovery_recent_cmd.add_argument("--folder", help="Restrict results to one configured folder id")
+    recovery_recent_cmd.add_argument("--limit", type=int, default=20, help="Maximum backup cycles to return (1-100)")
+    recovery_recent_cmd.add_argument("--paths-per-cycle", type=int, default=50, help="Maximum changed paths per cycle (1-200)")
+    recovery_recent_cmd.set_defaults(func=cmd_recovery)
+    recovery_snapshot_cmd = recovery_sub.add_parser("snapshot", help="Stage a complete historical folder snapshot for inspection")
+    recovery_snapshot_cmd.add_argument("folder", help="Local configured folder id")
+    recovery_snapshot_cmd.add_argument("generation", help="Backup cycle identity returned by recovery recent")
+    recovery_snapshot_cmd.set_defaults(func=cmd_recovery)
+    recovery_revisions_cmd = recovery_sub.add_parser("revisions", help="List Dropbox versions for one configured file path")
+    recovery_revisions_cmd.add_argument("folder", help="Local configured folder id")
+    recovery_revisions_cmd.add_argument("path", help="Relative file path inside the configured folder")
+    recovery_revisions_cmd.add_argument("--limit", type=int, default=30, help="Maximum revisions to return (1-100)")
+    recovery_revisions_cmd.set_defaults(func=cmd_recovery)
+    recovery_stage_cmd = recovery_sub.add_parser("stage", help="Download one immutable Dropbox revision into safe local staging")
+    recovery_stage_cmd.add_argument("folder", help="Local configured folder id")
+    recovery_stage_cmd.add_argument("path", help="Relative file path inside the configured folder")
+    recovery_stage_cmd.add_argument("revision", help="Dropbox revision identity returned by recovery revisions")
+    recovery_stage_cmd.set_defaults(func=cmd_recovery)
 
     pull = sub.add_parser("pull", help="Compatibility alias that now creates a safe staged receive job")
     pull.add_argument("source", help="Full rclone source path, e.g. dropbox:computer-backups/test/linux/test_sync/data")
@@ -5171,7 +5881,6 @@ def parser() -> argparse.ArgumentParser:
     folders_add.add_argument("local_path", help="Existing local directory")
     folders_add.add_argument("--label", help="Human-readable folder label")
     folders_add.add_argument("--remote-path", help="Override the owned path below the remote base")
-    folders_add.add_argument("--trash-path", help="Override the recoverable remote-trash path")
     folders_add.add_argument("--filter-file", help="Override the rclone filter file")
     folders_add.add_argument("--disabled", action="store_true", help="Add without enabling backups")
     folders_add.set_defaults(func=cmd_folders)
