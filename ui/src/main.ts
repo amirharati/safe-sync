@@ -148,17 +148,34 @@ const jobOutput = document.querySelector<HTMLElement>("[data-job-output]");
 const linkList = document.querySelector<HTMLElement>("[data-link-list]");
 const addLinkForm = document.querySelector<HTMLFormElement>("[data-add-link-form]");
 const historyFolder = document.querySelector<HTMLSelectElement>("[data-history-folder]");
-const historyList = document.querySelector<HTMLElement>("[data-history-list]");
-const recoveryRecentFolder = document.querySelector<HTMLSelectElement>("[data-recovery-recent-folder]");
-const recoveryRecentList = document.querySelector<HTMLElement>("[data-recovery-recent-list]");
-const recoveryForm = document.querySelector<HTMLFormElement>("[data-recovery-form]");
-const recoveryPath = document.querySelector<HTMLInputElement>("[data-recovery-path]");
 const recoveryState = document.querySelector<HTMLElement>("[data-recovery-state]");
 const recoveryGuidance = document.querySelector<HTMLElement>("[data-recovery-guidance]");
-const recoveryOutput = document.querySelector<HTMLElement>("[data-recovery-output]");
-const recoveryStagedActions = document.querySelector<HTMLElement>("[data-recovery-staged-actions]");
-const recoveryPauseButton = document.querySelector<HTMLButtonElement>("[data-action='pause-recovery']");
-const recoveryResumeButton = document.querySelector<HTMLButtonElement>("[data-action='resume-recovery']");
+const recoveryLegacyActions = document.querySelector<HTMLElement>("[data-recovery-legacy-actions]");
+const recoveryClearLegacyButton = document.querySelector<HTMLButtonElement>("[data-action='clear-legacy-recovery']");
+const recoveryEnterButton = document.querySelector<HTMLButtonElement>("[data-action='enter-recovery']");
+const recoveryRewoundButton = document.querySelector<HTMLButtonElement>("[data-action='mark-recovery-rewound']");
+const recoveryExportButton = document.querySelector<HTMLButtonElement>("[data-action='export-recovery']");
+const recoveryOpenExportButton = document.querySelector<HTMLButtonElement>("[data-action='open-recovery-export']");
+const recoveryUndoButton = document.querySelector<HTMLButtonElement>("[data-action='mark-recovery-undo']");
+const recoveryVerifyButton = document.querySelector<HTMLButtonElement>("[data-action='verify-recovery']");
+const recoveryExitButton = document.querySelector<HTMLButtonElement>("[data-action='exit-recovery']");
+const restoreLocal = document.querySelector<HTMLElement>("[data-restore-local]");
+const restoreRemote = document.querySelector<HTMLElement>("[data-restore-remote]");
+const restoreDestination = document.querySelector<HTMLElement>("[data-restore-destination]");
+const recoveryVerification = document.querySelector<HTMLElement>("[data-recovery-verification]");
+const recoveryOperationModal = document.querySelector<HTMLElement>("[data-recovery-operation-modal]");
+const recoveryOperationTitle = document.querySelector<HTMLElement>("[data-recovery-operation-title]");
+const recoveryOperationDetail = document.querySelector<HTMLElement>("[data-recovery-operation-detail]");
+const recoveryStatusNotice = document.querySelector<HTMLElement>("[data-recovery-status-notice]");
+const recoveryStatusSummary = document.querySelector<HTMLElement>("[data-recovery-status-summary]");
+const recoveryEntryProgress = document.querySelectorAll<HTMLElement>("[data-recovery-entry-progress]");
+const recoveryEntryProgressText = document.querySelectorAll<HTMLElement>("[data-recovery-entry-progress-text]");
+const recoveryCancelActions = document.querySelector<HTMLElement>("[data-recovery-cancel-actions]");
+const cancelRemoteCopyFact = document.querySelector<HTMLElement>("[data-cancel-remote-copy-fact]");
+const cancelRemoteCopyDestination = document.querySelector<HTMLElement>("[data-cancel-remote-copy-destination]");
+const recoveryDownloadList = document.querySelector<HTMLElement>("[data-recovery-download-list]");
+const recoveryDownloadSort = document.querySelector<HTMLSelectElement>("[data-recovery-download-sort]");
+const recoveryRemoveAllButton = document.querySelector<HTMLButtonElement>("[data-action='remove-all-recovery-downloads']");
 const activityFilterForm = document.querySelector<HTMLFormElement>("[data-activity-filter-form]");
 const logLevelForm = document.querySelector<HTMLFormElement>("[data-log-level-form]");
 const auditEvents = document.querySelector<HTMLElement>("[data-audit-events]");
@@ -170,11 +187,15 @@ const auditCloudTime = document.querySelector<HTMLElement>("[data-audit-cloud-ti
 const auditGaps = document.querySelector<HTMLElement>("[data-audit-gaps]");
 
 let latestStatus: SafeSyncStatus | null = null;
+let latestRecovery: Record<string, unknown> | null = null;
+let latestRecoveryDownloads: Array<Record<string, unknown>> = [];
 let busyAction: string | null = null;
 let feedbackAction: string | null = null;
 let feedbackTimer: number | null = null;
 let refreshTimer: number | null = null;
 let statusRefreshInFlight = false;
+let recoveryActionInFlight = false;
+let recoveryOperationTrigger: HTMLElement | null = null;
 let configLoaded = false;
 let computersLoaded = false;
 let latestConfig: SafeSyncConfig | null = null;
@@ -189,8 +210,6 @@ let dropboxConnected = false;
 let jobsLoaded = false;
 let linksLoaded = false;
 let activityLoaded = false;
-let recoveryRecentLoaded = false;
-let latestRecoveryJob: Record<string, unknown> | null = null;
 let latestJobs: Array<Record<string, unknown>> = [];
 
 function text(value: unknown, fallback = "-"): string {
@@ -251,13 +270,14 @@ function headline(status: SafeSyncStatus): string {
   if (status.health === "error") return "Needs attention";
   if (status.health === "warning") return syncState(status) === "backoff" ? "Waiting" : "Warning";
   if (status.service_state === "stopped") return "Stopped";
+  if (status.sync_state?.recovery_resume_pending === true) return "Preparing backup";
   const currentSyncState = syncState(status);
   if (currentSyncState === "syncing") return "Syncing";
   if (currentSyncState === "transferring") return "Transferring";
   if (currentSyncState === "dirty") return "Changes queued";
   if (currentSyncState === "cooldown") return "Cooling down";
   if (currentSyncState === "backoff") return "Waiting";
-  if (currentSyncState === "recovery_paused") return "Recovery paused";
+  if (currentSyncState === "recovery_paused") return "Recovery Mode locked";
   if (status.health === "ok") return "Watching";
   return text(status.health, "Unknown");
 }
@@ -443,6 +463,7 @@ function isHeld(action: string): boolean {
 function setBusy(action: string | null): void {
   busyAction = action;
   for (const button of document.querySelectorAll<HTMLButtonElement>("button")) {
+    if (button.hasAttribute("data-recovery-control")) continue;
     const isFeedback = feedbackAction !== null && actionNameForButton(button) === feedbackAction;
     const isCurrentAction = action !== null && actionNameForButton(button) === action;
     button.disabled = isCurrentAction || isFeedback;
@@ -460,6 +481,40 @@ function setBusy(action: string | null): void {
   if (completeSetupButton) completeSetupButton.disabled = action === "setup" || isHeld("setup") || !dropboxConnected;
 }
 
+function showRecoveryOperation(action: RecoveryAction | "remove-downloads"): void {
+  const copy: Record<RecoveryAction | "remove-downloads", [string, string]> = {
+    enter: ["Entering Recovery Mode", "Waiting for any current folder operation to finish, then locking every outbound backup."],
+    "clear-legacy": ["Clearing the Old Pause", "Waiting for the backup safety barrier, updating the backend, and resuming queued work."],
+    "mark-rewound": ["Recording Dropbox Rewind", "Saving the completed Rewind step while every outbound backup remains locked."],
+    export: ["Creating the Historical Copy", "Downloading and verifying the rewound Dropbox folder. This can take time; do not change Dropbox."],
+    "mark-undo-complete": ["Recording Undo-Rewind", "Saving the completed Dropbox step while backups remain locked."],
+    verify: ["Verifying Current State", "Comparing Dropbox with the unchanged local folder. The lock remains active until they match."],
+    exit: ["Exiting Recovery Mode", "Running the final safety verification before queued backups are allowed to resume."],
+    cancel: ["Cancelling Recovery Safely", "Checking Dropbox against local. If they differ, Safe Sync will restore Dropbox from the current local folder, verify equality, and then resume backups."],
+    "save-remote-copy": ["Saving the Dropbox Copy", "Downloading the current Dropbox folder into isolated local storage and verifying every path and content hash. Recovery Mode remains locked."],
+    "remove-downloads": ["Deleting Local Recovery Copies", "Removing only the selected downloaded recovery folders and their catalog records. Watched folders and Dropbox are never changed."],
+  };
+  if (recoveryOperationTitle) recoveryOperationTitle.textContent = copy[action][0];
+  if (recoveryOperationDetail) recoveryOperationDetail.textContent = copy[action][1];
+  recoveryOperationTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  if (recoveryOperationModal) recoveryOperationModal.hidden = false;
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-recovery-control]")) button.disabled = true;
+  document.querySelector<HTMLElement>("main.shell")?.setAttribute("inert", "");
+  document.body.dataset.operationBusy = "true";
+  recoveryOperationModal?.focus();
+}
+
+function hideRecoveryOperation(): void {
+  if (recoveryOperationModal) recoveryOperationModal.hidden = true;
+  document.querySelector<HTMLElement>("main.shell")?.removeAttribute("inert");
+  delete document.body.dataset.operationBusy;
+  if (latestRecovery) updateRestoreActions(latestRecovery);
+  if (recoveryOperationTrigger && !recoveryOperationTrigger.hidden && !(recoveryOperationTrigger instanceof HTMLButtonElement && recoveryOperationTrigger.disabled)) {
+    recoveryOperationTrigger.focus();
+  }
+  recoveryOperationTrigger = null;
+}
+
 function renderStatus(status: SafeSyncStatus): void {
   latestStatus = status;
   const currentTone = tone(status);
@@ -474,7 +529,11 @@ function renderStatus(status: SafeSyncStatus): void {
     stateLabel.textContent = currentHeadline;
     stateLabel.dataset.health = currentTone;
   }
-  if (reasonLabel) reasonLabel.textContent = text(status.health_reason);
+  if (reasonLabel) {
+    reasonLabel.textContent = status.sync_state?.recovery_resume_pending === true
+      ? text(status.sync_state?.note, "Recovery complete; preparing normal backup")
+      : text(status.health_reason);
+  }
   if (reconnectDropboxButton) reconnectDropboxButton.hidden = !status.health_reason.includes("Dropbox authorization is invalid or revoked");
   if (setupPanel) setupPanel.hidden = status.health !== "setup_required";
   if (status.health === "setup_required" && !dropboxConnectionKnown) void refreshDropboxConnection();
@@ -482,7 +541,7 @@ function renderStatus(status: SafeSyncStatus): void {
     serviceLabel.textContent = text(status.service_state);
     serviceLabel.dataset.value = status.service_state;
   }
-  if (syncLabel) syncLabel.textContent = syncState(status);
+  if (syncLabel) syncLabel.textContent = status.sync_state?.recovery_resume_pending === true ? "resuming" : syncState(status);
   if (configuredFoldersLabel) configuredFoldersLabel.textContent = configuredFoldersSummary(status);
   if (overallProgressLabel) overallProgressLabel.textContent = overallBackupSummary(status);
   if (currentFolderHeading) currentFolderHeading.textContent = currentFolderHeadingText(status);
@@ -728,19 +787,7 @@ function renderLinkAndHistoryOptions(): void {
       historyFolder.append(option);
     }
     if (prior && [...historyFolder.options].some((option) => option.value === prior)) historyFolder.value = prior;
-  }
-  if (recoveryRecentFolder) {
-    const prior = recoveryRecentFolder.value;
-    recoveryRecentFolder.innerHTML = '<option value="">All tracked folders</option>';
-    for (const raw of latestConfig?.folders ?? []) {
-      const folder = raw as FolderView;
-      if (!folder.id) continue;
-      const option = document.createElement("option");
-      option.value = folder.id;
-      option.textContent = text(folder.label, folder.id);
-      recoveryRecentFolder.append(option);
-    }
-    if ([...recoveryRecentFolder.options].some((option) => option.value === prior)) recoveryRecentFolder.value = prior;
+    renderRestoreFolder();
   }
   if (!addLinkForm) return;
   const local = formField(addLinkForm, "local_folder") as HTMLSelectElement | null;
@@ -1715,68 +1762,420 @@ async function reviewLink(button: HTMLElement): Promise<void> {
   }
 }
 
-async function refreshRecoveryStatus(): Promise<boolean> {
+function selectedRestoreFolder(): FolderView | null {
+  if (!latestConfig || !historyFolder) return null;
+  return (latestConfig.folders.find((raw) => text((raw as FolderView).id, "") === historyFolder.value) as FolderView | undefined) ?? null;
+}
+
+function renderRestoreFolder(): void {
+  const target = (latestRecovery?.target ?? {}) as Record<string, unknown>;
+  const remoteCopy = (latestRecovery?.cancel_remote_copy ?? {}) as Record<string, unknown>;
+  const folder = selectedRestoreFolder();
+  const active = latestRecovery?.active === true;
+  const hasTarget = active && text(target.folder_id, "") !== "";
+  if (restoreLocal) restoreLocal.textContent = hasTarget ? text(target.local_path, "-") : text(folder?.local_path, "Choose a tracked folder");
+  if (restoreRemote) restoreRemote.textContent = hasTarget ? text(target.remote_root, "-") : text(folder?.remote_root, "Choose a tracked folder");
+  if (restoreDestination) restoreDestination.textContent = hasTarget ? text(latestRecovery?.destination, "-") : "Created after Recovery Mode starts";
+  const hasRemoteCopy = active && text(remoteCopy.destination, "") !== "";
+  if (cancelRemoteCopyFact) cancelRemoteCopyFact.hidden = !hasRemoteCopy;
+  if (cancelRemoteCopyDestination) cancelRemoteCopyDestination.textContent = hasRemoteCopy ? text(remoteCopy.destination, "-") : "-";
+  if (historyFolder) historyFolder.disabled = hasTarget;
+}
+
+function updateRestoreActions(status: Record<string, unknown>): void {
+  const active = status.active === true;
+  const phase = text(status.phase, "inactive");
+  const locked = status.locked === true;
+  const hasFolder = selectedRestoreFolder() !== null;
+  const isLegacy = phase === "legacy_locked";
+  const canCancel = active && Number(status.schema_version ?? 0) >= 2 && !["legacy_locked", "invalid_locked"].includes(phase);
+  const waitingForLock = phase === "entering" || status.draining === true;
+  const remoteCopy = (status.cancel_remote_copy ?? {}) as Record<string, unknown>;
+  const remoteCopyStatus = text(remoteCopy.status, "");
+  if (recoveryStatusNotice) recoveryStatusNotice.hidden = !canCancel;
+  if (recoveryCancelActions) recoveryCancelActions.hidden = !canCancel;
+  if (recoveryStatusSummary && canCancel) {
+    const target = (status.target ?? {}) as Record<string, unknown>;
+    const targetLabel = text(target.label, text(target.folder_id, "Selected backup"));
+    const lastError = text(status.last_error, "");
+    recoveryStatusSummary.textContent = waitingForLock
+      ? `${targetLabel} is entering Recovery Mode. Safe Sync is finishing the current folder operation before locking every outbound backup; these safety actions become available after the lock completes.`
+      : remoteCopyStatus === "failed"
+      ? `Dropbox safety copy failed: ${text(remoteCopy.last_error, "unknown error")}. Recovery Mode remains locked; review the destination and retry.`
+      : phase === "cancel_failed" && lastError
+      ? `Cancel failed: ${lastError}. Backups remain locked; retry Cancel after reviewing the problem.`
+      : remoteCopyStatus === "verified"
+        ? `${targetLabel} is locked. Its Dropbox state was saved and verified locally (${Number(remoteCopy.entry_count ?? 0).toLocaleString()} entries, ${formatBytes(Number(remoteCopy.byte_count ?? 0))}); inspect it or replace Dropbox from local and resume.`
+        : `${targetLabel} is locked. Save Dropbox locally first if you may need its current state, or explicitly replace it from local and resume.`;
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='cancel-recovery']")) {
+    // The barrier reports a live cancellation as draining. Persisted
+    // cancel_* phases with no barrier holder indicate an interrupted attempt
+    // and must remain retryable after restart.
+    button.disabled = !canCancel || waitingForLock;
+    button.title = waitingForLock ? "Available after the current folder operation finishes and Recovery Mode is locked." : "";
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='save-recovery-remote-copy']")) {
+    button.disabled = !canCancel || waitingForLock || remoteCopyStatus === "verified";
+    button.title = waitingForLock ? "Available after the current folder operation finishes and Recovery Mode is locked." : "";
+    button.textContent = remoteCopyStatus === "failed" ? "Retry Saving Dropbox Copy" : remoteCopyStatus === "exporting" ? "Saving Dropbox Copy" : "Save Dropbox Copy Locally";
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='open-recovery-remote-copy']")) {
+    button.hidden = remoteCopyStatus !== "verified";
+    button.disabled = remoteCopyStatus !== "verified";
+  }
+  if (recoveryLegacyActions) recoveryLegacyActions.hidden = !isLegacy;
+  if (recoveryClearLegacyButton) recoveryClearLegacyButton.disabled = !isLegacy || !locked;
+  if (recoveryEnterButton) recoveryEnterButton.disabled = active || !hasFolder;
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='open-recovery-dropbox']")) {
+    const stage = button.dataset.recoveryDropboxStage;
+    button.disabled = !active || !locked || (stage === "rewind" ? phase !== "locked" : phase !== "exported");
+  }
+  if (recoveryRewoundButton) recoveryRewoundButton.disabled = phase !== "locked";
+  if (recoveryExportButton) recoveryExportButton.disabled = !["rewound", "export_failed", "exporting"].includes(phase);
+  if (recoveryOpenExportButton) recoveryOpenExportButton.disabled = !["exported", "undo_complete", "verification_failed", "verified"].includes(phase);
+  if (recoveryUndoButton) recoveryUndoButton.disabled = !["exported", "undo_complete", "verification_failed"].includes(phase);
+  if (recoveryVerifyButton) recoveryVerifyButton.disabled = !["undo_complete", "verification_failed", "verified"].includes(phase);
+  if (recoveryExitButton) recoveryExitButton.disabled = phase !== "verified";
+  if (recoveryRemoveAllButton) {
+    const removableCount = latestRecoveryDownloads.filter((item) => item.available !== true || item.deletable === true).length;
+    recoveryRemoveAllButton.disabled = active || removableCount === 0;
+    recoveryRemoveAllButton.title = active ? "Finish or safely cancel Recovery Mode before deleting downloaded copies." : "";
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-action='remove-recovery-download']")) {
+    const available = button.dataset.recoveryDownloadAvailable === "true";
+    const deletable = button.dataset.recoveryDownloadDeletable === "true";
+    button.disabled = active || (available && !deletable);
+    button.title = active
+      ? "Finish or safely cancel Recovery Mode before deleting downloaded copies."
+      : available && !deletable
+        ? "This custom location must be deleted manually."
+        : "";
+  }
+}
+
+function renderRecoveryStatus(value: Record<string, unknown>): Record<string, unknown> {
+  latestRecovery = value;
+  const phase = text(value.phase, "inactive");
+  const labels: Record<string, string> = {
+    inactive: "Backup active",
+    entering: "Locking backups",
+    locked: "Recovery locked",
+    rewound: "Ready to export",
+    exporting: "Exporting history",
+    export_failed: "Export needs attention",
+    exported: "Historical copy ready",
+    undo_complete: "Ready to verify",
+    verification_failed: "Current state differs",
+    verified: "Verified — safe to exit",
+      legacy_locked: "Legacy recovery lock",
+      invalid_locked: "Recovery state damaged — locked",
+      cancel_checking: "Checking before cancel",
+      canceling: "Restoring Dropbox from local",
+      cancel_failed: "Cancel needs attention — locked",
+      cancel_verified: "Cancel verified",
+  };
+  const entering = value.active === true && phase === "entering";
+  const enteredAt = Date.parse(text(value.entered_at, ""));
+  const elapsedSeconds = Number.isFinite(enteredAt) ? Math.max(0, Math.floor((Date.now() - enteredAt) / 1000)) : null;
+  const activeFolder = text(latestStatus?.sync_state?.current_folder_label, "the current folder");
+  const entryProgressMessage = `Finishing ${activeFolder} before Recovery Mode locks${elapsedSeconds === null ? "" : ` · waiting ${elapsedSeconds.toLocaleString()}s`}`;
+  for (const progress of recoveryEntryProgress) progress.hidden = !entering;
+  for (const progressText of recoveryEntryProgressText) progressText.textContent = entryProgressMessage;
+  if (recoveryState) {
+    recoveryState.textContent = labels[phase] ?? phase;
+    recoveryState.classList.toggle("is-active", value.active === true);
+  }
+  if (value.active === true) {
+    const target = (value.target ?? {}) as Record<string, unknown>;
+    const targetLabel = text(target.label, text(target.folder_id, "Selected backup"));
+    if (phase === "entering") {
+      if (stateLabel) stateLabel.textContent = "Entering Recovery Mode";
+      if (reasonLabel) reasonLabel.textContent = `Finishing ${activeFolder} before locking every outbound backup`;
+      if (syncLabel) syncLabel.textContent = "finishing current sync";
+      statusDot?.setAttribute("aria-label", "Entering Recovery Mode");
+    } else if (value.locked === true) {
+      if (stateLabel) stateLabel.textContent = "Recovery Mode locked";
+      if (reasonLabel) reasonLabel.textContent = `${targetLabel}: ${labels[phase] ?? phase}`;
+      if (syncLabel) syncLabel.textContent = "blocked";
+      statusDot?.setAttribute("aria-label", "Recovery Mode locked");
+    }
+  }
+  if (recoveryGuidance) {
+    const guidance: Record<string, string> = {
+      inactive: "Choose a folder and enter Recovery Mode before changing Dropbox history.",
+      entering: "A current folder operation is finishing. Do not use Dropbox Rewind until this says Recovery locked.",
+      locked: "All Safe Sync outbound backups are locked. Rewind only the selected Dropbox folder, then wait for its completion email.",
+      rewound: "Dropbox Rewind is confirmed complete. Create the isolated historical copy now.",
+      exporting: "The historical folder is being copied and verified. Keep Dropbox unchanged.",
+      export_failed: "The isolated export did not verify. Keep Recovery Mode active, wait for Dropbox to stabilize, and retry.",
+      exported: "The historical copy is safe locally. Undo the Dropbox Rewind and wait for its completion email.",
+      undo_complete: "Dropbox reports that undo-Rewind finished. Verify current Dropbox against the unchanged local folder.",
+      verification_failed: "Dropbox is still changing or differs from local. Keep Recovery Mode locked and resolve or retry verification.",
+      verified: "Current Dropbox and local state match. Exit will run the same verification once more before unlocking backups.",
+        legacy_locked: "An old-format pause is safely blocking backups. If Dropbox was not rewound and no recovery is underway, clear it here to resume normal backups.",
+        invalid_locked: "Recovery state is damaged. Backups remain safely locked; inspect logs and use the headless emergency force-exit only after manually proving safety.",
+        cancel_checking: "Safe Sync is checking whether Dropbox already matches local before cancelling.",
+        canceling: "Safe Sync is restoring the selected Dropbox backup from the current local folder. Recovery Mode remains locked.",
+        cancel_failed: value.last_error ? `Cancel failed: ${text(value.last_error)}. Backups remain safely locked; retry after reviewing the problem.` : "Cancellation did not complete. Backups remain safely locked; review the error and retry.",
+        cancel_verified: "Dropbox matches local. Safe Sync is completing the guarded unlock.",
+    };
+    recoveryGuidance.textContent = guidance[phase] ?? text(value.instructions, "Recovery Mode remains locked.");
+  }
+  const verification = (value.verification ?? {}) as Record<string, unknown>;
+  if (recoveryVerification) {
+    const counts = (verification.counts ?? {}) as Record<string, unknown>;
+    recoveryVerification.textContent = verification.checked_at
+      ? verification.equal === true
+        ? `Verified ${Number(verification.local_entries ?? 0).toLocaleString()} entries; Dropbox is stable and matches local.`
+        : `Not equal: ${Number(counts.local_only ?? 0).toLocaleString()} local-only, ${Number(counts.peer_only ?? 0).toLocaleString()} Dropbox-only, ${Number(counts.different ?? 0).toLocaleString()} different.`
+      : "";
+  }
+  renderRestoreFolder();
+  updateRestoreActions(value);
+  return value;
+}
+
+async function refreshRecoveryStatus(): Promise<Record<string, unknown>> {
+  if (recoveryActionInFlight) return latestRecovery ?? {};
   try {
     const value = await invoke<Record<string, unknown>>("get_recovery_status");
-    const paused = value.paused === true;
-    const daemonState = text(value.daemon_state, "");
-    const draining = paused && ["syncing", "transferring", "publishing", "staging", "applying"].includes(daemonState);
-    if (recoveryState) {
-      recoveryState.textContent = draining ? "Pause requested" : paused ? "Backup paused" : "Backup active";
-      recoveryState.classList.toggle("is-active", paused);
-    }
-    if (recoveryGuidance) {
-      recoveryGuidance.textContent = draining
-        ? "The current folder operation is finishing. Do not stage or restore until status says Backup paused."
-        : paused
-        ? "Safe to inspect and stage revisions. Keep backup paused until your reviewed local choices are complete."
-        : "Pause outbound backup before staging or applying a historical revision.";
-    }
-    if (recoveryPauseButton) recoveryPauseButton.disabled = paused;
-    if (recoveryResumeButton) recoveryResumeButton.disabled = !paused;
-    return paused && !draining;
+    if (recoveryActionInFlight) return latestRecovery ?? value;
+    return renderRecoveryStatus(value);
   } catch (error) {
     if (recoveryState) recoveryState.textContent = "Status unavailable";
     throw error;
   }
 }
 
-async function controlRecovery(action: "pause" | "resume"): Promise<void> {
-  if (action === "resume" && !window.confirm("Resume outbound backup now? Continue only after the reviewed local folder matches the state you want Dropbox to keep.")) return;
+function renderRecoveryDownloads(downloads: Array<Record<string, unknown>>): void {
+  if (!recoveryDownloadList) return;
+  latestRecoveryDownloads = [...downloads];
+  const direction = recoveryDownloadSort?.value === "oldest" ? 1 : -1;
+  const sorted = [...downloads].sort((left, right) => {
+    const leftTime = Date.parse(text(left.completed_at, text(left.created_at, ""))) || 0;
+    const rightTime = Date.parse(text(right.completed_at, text(right.created_at, ""))) || 0;
+    return (leftTime - rightTime) * direction;
+  });
+  if (recoveryRemoveAllButton) {
+    const removableCount = downloads.filter((item) => item.available !== true || item.deletable === true).length;
+    recoveryRemoveAllButton.disabled = latestRecovery?.active === true || removableCount === 0;
+  }
+  if (sorted.length === 0) {
+    recoveryDownloadList.innerHTML = '<p class="empty">No verified recovery copies have been downloaded yet.</p>';
+    return;
+  }
+  recoveryDownloadList.innerHTML = sorted.map((download) => {
+    const kind = text(download.kind, "") === "historical_recovery_copy" ? "Historical recovery copy" : "Dropbox safety copy";
+    const completedRaw = text(download.completed_at, "");
+    const completed = completedRaw ? new Date(completedRaw).toLocaleString() : "Time unavailable";
+    const available = download.available === true;
+    const entryCount = download.entry_count === null || download.entry_count === undefined ? null : Number(download.entry_count);
+    const byteCount = download.byte_count === null || download.byte_count === undefined ? null : Number(download.byte_count);
+    const copyFacts = [
+      entryCount !== null && Number.isFinite(entryCount) ? `${entryCount.toLocaleString()} entries` : "entry count unavailable",
+      byteCount !== null && Number.isFinite(byteCount) ? formatBytes(byteCount) : "size unavailable",
+    ].join(" · ");
+    const destination = text(download.destination, "-");
+    const folder = text(download.folder_label, text(download.folder_id, "Unknown folder"));
+    const deletable = download.deletable === true;
+    const removalLabel = available ? deletable ? "Delete Local Copy" : "Delete Manually" : "Remove Record";
+    const removalDisabled = (available && !deletable) || latestRecovery?.active === true;
+    return `<article class="recovery-download" data-recovery-download-id="${escapeHtml(text(download.id, ""))}" data-recovery-download-path="${escapeHtml(destination)}">
+      <div class="recovery-download-summary">
+        <div><h4>${escapeHtml(folder)}</h4><p class="reason">${escapeHtml(completed)} · ${escapeHtml(copyFacts)}</p></div>
+        <span class="pill">${escapeHtml(kind)}</span>
+      </div>
+      <details><summary>Location and Dropbox source</summary><p class="path">${escapeHtml(destination)}</p><p class="reason">Dropbox source: ${escapeHtml(text(download.remote_root, "-"))}</p></details>
+      <div class="actions left recovery-download-actions">
+        <button type="button" class="secondary" data-action="open-recovery-download" ${available ? "" : "disabled"}>${available ? "Open Folder" : "Folder Missing"}</button>
+        <button type="button" class="secondary danger" data-action="remove-recovery-download" data-recovery-download-available="${available}" data-recovery-download-deletable="${deletable}" data-recovery-control ${removalDisabled ? "disabled" : ""}>${removalLabel}</button>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+async function loadRecoveryDownloads(): Promise<void> {
+  if (!recoveryDownloadList) return;
+  recoveryDownloadList.innerHTML = '<p class="empty">Loading downloaded copies…</p>';
+  try {
+    renderRecoveryDownloads(await invoke<Array<Record<string, unknown>>>("get_recovery_downloads"));
+  } catch (error) {
+    recoveryDownloadList.innerHTML = `<p class="empty">Could not load downloaded copies: ${escapeHtml(String(error))}</p>`;
+  }
+}
+
+async function openRecoveryDownload(button: HTMLElement): Promise<void> {
+  const destination = button.closest<HTMLElement>("[data-recovery-download-path]")?.dataset.recoveryDownloadPath ?? "";
+  if (!destination) return;
+  try {
+    await invoke("open_local_folder", { path: destination });
+    setMessage("Opened downloaded recovery copy", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+    await loadRecoveryDownloads();
+  }
+}
+
+async function removeRecoveryDownload(button: HTMLElement | null, removeAll = false): Promise<void> {
+  if (latestRecovery?.active === true) {
+    setMessage("Finish or safely cancel Recovery Mode before deleting downloaded copies", "error");
+    return;
+  }
+  const card = button?.closest<HTMLElement>("[data-recovery-download-id]");
+  const downloadId = card?.dataset.recoveryDownloadId ?? "";
+  const destination = card?.dataset.recoveryDownloadPath ?? "";
+  const candidates = latestRecoveryDownloads.filter((item) => item.available !== true || item.deletable === true);
+  if (removeAll && candidates.length === 0) {
+    setMessage("There are no managed local recovery copies to delete", "error");
+    return;
+  }
+  const prompt = removeAll
+    ? `Permanently delete all ${candidates.length.toLocaleString()} managed local recovery copies and clear their list records? Watched folders and Dropbox will not be changed. This cannot be undone by Safe Sync.`
+    : `Permanently delete this local recovery copy and remove its list record?\n\n${destination}\n\nWatched folders and Dropbox will not be changed. This cannot be undone by Safe Sync.`;
+  if (!window.confirm(prompt)) return;
+  showRecoveryOperation("remove-downloads");
   setBusy("history");
   try {
-    showUiCommand(["recovery", action]);
-    const value = await invoke<Record<string, unknown>>("control_recovery", { action });
-    await refreshRecoveryStatus();
-    const draining = value.current_operation_finishes_before_pause === true;
+    const result = await invoke<Record<string, unknown>>("remove_recovery_download", {
+      downloadId: removeAll ? null : downloadId,
+      all: removeAll,
+    });
+    const downloads = Array.isArray(result.downloads) ? result.downloads as Array<Record<string, unknown>> : [];
+    const removed = Array.isArray(result.removed) ? result.removed.length : 0;
+    const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
+    renderRecoveryDownloads(downloads);
     setMessage(
-      action === "pause"
-        ? draining ? "Recovery pause requested; the current folder operation will finish first" : "Backup paused for recovery"
-        : "Backup resumed; pending local changes may now be backed up",
-      "ok",
+      skipped > 0 ? `Deleted ${removed.toLocaleString()} local copies; ${skipped.toLocaleString()} custom locations require manual deletion` : `Deleted ${removed.toLocaleString()} local recovery ${removed === 1 ? "copy" : "copies"}`,
+      skipped > 0 ? "error" : "ok",
     );
   } catch (error) {
     setMessage(String(error), "error");
+    await loadRecoveryDownloads();
   } finally {
+    hideRecoveryOperation();
+    setBusy(null);
+  }
+}
+
+function recoveryStatusNeedsRefresh(status: SafeSyncStatus | null): boolean {
+  const restoreOpen = document.querySelector<HTMLElement>("[data-view='history']")?.classList.contains("is-active") === true;
+  return latestRecovery?.active === true || (status !== null && syncState(status) === "recovery_paused") || restoreOpen;
+}
+
+type RecoveryAction = "enter" | "clear-legacy" | "cancel" | "save-remote-copy" | "mark-rewound" | "export" | "mark-undo-complete" | "verify" | "exit";
+
+async function controlRecovery(action: RecoveryAction): Promise<void> {
+  const confirmations: Partial<Record<RecoveryAction, string>> = {
+    "clear-legacy": "Clear the old recovery pause and allow backups again? Continue only if you did not Rewind Dropbox and no recovery is in progress.",
+    cancel: "Replace Dropbox from the current local folder and resume normal backup? Safe Sync verifies first and writes only if they differ. Any verified Dropbox safety copy shown in this screen remains local; if you skipped it, the current remote state is not downloaded by Safe Sync. Continue?",
+    "save-remote-copy": "Save the CURRENT DROPBOX folder into a separate local recovery folder? Safe Sync will verify the complete download and keep Recovery Mode locked. This may require substantial disk space and time.",
+    "mark-rewound": "Confirm only after Dropbox emailed that the historical Rewind finished. Continue?",
+    "mark-undo-complete": "Confirm only after Dropbox emailed that undo-Rewind finished. Continue?",
+    exit: "Exit Recovery Mode? Safe Sync will verify Dropbox and local again before unlocking every queued backup.",
+  };
+  if (confirmations[action] && !window.confirm(confirmations[action])) return;
+  const folder = action === "enter" ? selectedRestoreFolder()?.id : undefined;
+  if (action === "enter" && !folder) {
+    setMessage("Choose a configured backup folder first", "error");
+    return;
+  }
+  recoveryActionInFlight = true;
+  showRecoveryOperation(action);
+  setBusy("history");
+  try {
+    const cliAction = action === "enter"
+      ? ["recovery", "enter", String(folder)]
+      : action === "clear-legacy"
+        ? ["recovery", "clear-legacy", "--confirm", "CLEAR-OLD-PAUSE"]
+        : action === "cancel"
+          ? ["recovery", "cancel", "--confirm", "REPLACE-DROPBOX-WITH-LOCAL"]
+        : action === "save-remote-copy"
+          ? ["recovery", "save-remote-copy"]
+        : ["recovery", action];
+    showUiCommand(cliAction);
+    const value = await invoke<Record<string, unknown>>("control_recovery", { action, folder: folder ?? null });
+    renderRecoveryStatus(value);
+    if (["save-remote-copy", "export"].includes(action)) await loadRecoveryDownloads();
+    if (["cancel", "clear-legacy", "exit"].includes(action)) await refreshStatusQuietly();
+    const messages: Record<RecoveryAction, string> = {
+      enter: value.current_operation_finishes_before_lock === true ? "Recovery Mode entered; waiting for the current folder operation to finish" : "Recovery Mode locked every outbound backup",
+      "clear-legacy": "Old recovery pause cleared; normal backups may resume",
+      cancel: value.remote_reconciled === true ? "Recovery cancelled after Dropbox was restored from local and verified" : "Recovery cancelled; Dropbox already matched local, so no files were transferred",
+      "save-remote-copy": "Current Dropbox folder downloaded and verified locally; open the saved copy before deciding whether to resume",
+      "mark-rewound": "Dropbox Rewind completion recorded; historical export is now enabled",
+      export: "Historical folder copied and verified in isolated local staging",
+      "mark-undo-complete": "Dropbox undo-Rewind completion recorded; current-state verification is now enabled",
+      verify: value.phase === "verified" ? "Dropbox is stable and matches local" : "Dropbox does not yet match local; Recovery Mode remains locked",
+      exit: "Recovery Mode exited after final verification; queued backup work may resume",
+    };
+    setMessage(messages[action], value.phase === "verification_failed" ? "error" : "ok");
+  } catch (error) {
+    recoveryActionInFlight = false;
+    try {
+      await refreshRecoveryStatus();
+    } catch {
+      // Preserve the original action error when status refresh also fails.
+    }
+    setMessage(String(error), "error");
+  } finally {
+    recoveryActionInFlight = false;
+    hideRecoveryOperation();
     setBusy(null);
   }
 }
 
 async function openRecoveryDropbox(): Promise<void> {
-  const folderId = historyFolder?.value ?? "";
-  const folder = latestConfig?.folders.find((item) => text(item.id, "") === folderId);
-  const remoteRoot = text(folder?.remote_root, "");
+  const status = await refreshRecoveryStatus();
+  if (status.locked !== true) {
+    setMessage("Wait until Recovery Mode says Recovery locked", "error");
+    return;
+  }
+  const target = (status.target ?? {}) as Record<string, unknown>;
+  const remoteRoot = text(target.remote_root, "");
   if (!remoteRoot) {
-    setMessage("Choose a configured backup folder first", "error");
+    setMessage("Recovery Mode has no selected Dropbox folder", "error");
     return;
   }
   try {
     await invoke("open_dropbox_location", { request: { remoteRoot } });
+    setMessage("Dropbox folder opened. Use Folder settings → Rewind this folder, then wait for Dropbox to finish.", "ok");
   } catch (error) {
     setMessage(String(error), "error");
   }
 }
 
+async function openRecoveryExport(): Promise<void> {
+  const status = await refreshRecoveryStatus();
+  const destination = text(status.destination, "");
+  if (!destination || !["exported", "undo_complete", "verification_failed", "verified"].includes(text(status.phase, ""))) {
+    setMessage("Create and verify the historical copy first", "error");
+    return;
+  }
+  try {
+    await invoke("open_local_folder", { path: destination });
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+async function openCancelRemoteCopy(): Promise<void> {
+  const status = await refreshRecoveryStatus();
+  const remoteCopy = (status.cancel_remote_copy ?? {}) as Record<string, unknown>;
+  const destination = text(remoteCopy.destination, "");
+  if (text(remoteCopy.status, "") !== "verified" || !destination) {
+    setMessage("Save and verify the Dropbox copy first", "error");
+    return;
+  }
+  try {
+    await invoke("open_local_folder", { path: destination });
+    setMessage("Opened the verified Dropbox safety copy. Recovery Mode remains locked.", "ok");
+  } catch (error) {
+    setMessage(String(error), "error");
+  }
+}
+
+/* Legacy snapshot-history UI removed in favor of Dropbox-owned Rewind.
 async function loadRecoveryRecent(): Promise<void> {
   if (!recoveryRecentList) return;
   setBusy("history");
@@ -1945,6 +2344,7 @@ async function recoverHistory(button: HTMLElement): Promise<void> {
     setBusy(null);
   }
 }
+*/
 
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "-";
@@ -2156,7 +2556,9 @@ async function refreshStatus(): Promise<void> {
   statusRefreshInFlight = true;
   setBusy("refresh");
   try {
-    renderStatus(await invoke<SafeSyncStatus>("get_status"));
+    const status = await invoke<SafeSyncStatus>("get_status");
+    renderStatus(status);
+    if (recoveryStatusNeedsRefresh(status)) await refreshRecoveryStatus();
     holdAction("refresh");
   } catch (error) {
     renderError(error);
@@ -2171,6 +2573,9 @@ async function refreshStatusQuietly(): Promise<void> {
   statusRefreshInFlight = true;
   try {
     renderStatus(await invoke<SafeSyncStatus>("get_status"));
+    if (recoveryStatusNeedsRefresh(latestStatus)) {
+      await refreshRecoveryStatus();
+    }
   } catch (error) {
     renderError(error);
   } finally {
@@ -2180,7 +2585,7 @@ async function refreshStatusQuietly(): Promise<void> {
 
 function scheduleStatusRefresh(): void {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-  const refreshMs = latestStatus && ["syncing", "transferring", "dirty", "cooldown", "backoff"].includes(syncState(latestStatus))
+  const refreshMs = latestRecovery?.active === true || (latestStatus && ["syncing", "transferring", "dirty", "cooldown", "backoff", "recovery_paused"].includes(syncState(latestStatus)))
     ? ACTIVE_REFRESH_MS
     : IDLE_REFRESH_MS;
   refreshTimer = window.setTimeout(() => {
@@ -2307,6 +2712,9 @@ async function quitTray(): Promise<void> {
 }
 
 function activateTab(tab: string): void {
+  const available = [...document.querySelectorAll<HTMLElement>("[data-view]")].some((view) => view.dataset.view === tab);
+  if (!available || (IS_QUICK_PANEL && tab !== "status")) tab = "status";
+  if (!IS_QUICK_PANEL) window.localStorage.setItem("safe-sync.active-tab", tab);
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
     button.classList.toggle("is-active", button.dataset.tab === tab);
   }
@@ -2328,7 +2736,7 @@ function activateTab(tab: string): void {
   if (tab === "history") {
     if (!configLoaded) void loadConfig();
     void refreshRecoveryStatus().catch((error) => setMessage(String(error), "error"));
-    if (!recoveryRecentLoaded) void loadRecoveryRecent();
+    void loadRecoveryDownloads();
   }
   if (tab === "activity" && !activityLoaded) void loadActivity();
 }
@@ -2421,25 +2829,37 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   document.querySelector("[data-action='load-jobs']")?.addEventListener("click", () => void loadJobs());
   document.querySelector("[data-action='load-link-status']")?.addEventListener("click", () => void loadLinks(true));
-  recoveryForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void loadHistory();
-  });
-  document.querySelector("[data-action='pause-recovery']")?.addEventListener("click", () => void controlRecovery("pause"));
-  document.querySelector("[data-action='resume-recovery']")?.addEventListener("click", () => void controlRecovery("resume"));
-  document.querySelector("[data-action='open-recovery-dropbox']")?.addEventListener("click", () => void openRecoveryDropbox());
-  document.querySelector("[data-action='load-recovery-recent']")?.addEventListener("click", () => void loadRecoveryRecent());
-  recoveryRecentFolder?.addEventListener("change", () => void loadRecoveryRecent());
-  recoveryRecentList?.addEventListener("click", (event) => {
-    const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-action='stage-recovery-snapshot']");
-    if (target) void stageRecoverySnapshot(target);
-  });
-  document.querySelector("[data-action='open-recovery-staging']")?.addEventListener("click", () => void openRecoveryResult("staging"));
-  document.querySelector("[data-action='open-recovery-destination']")?.addEventListener("click", () => void openRecoveryResult("destination"));
-  historyList?.addEventListener("click", (event) => {
+  document.querySelector("[data-action='load-recovery-downloads']")?.addEventListener("click", () => void loadRecoveryDownloads());
+  document.querySelector("[data-action='remove-all-recovery-downloads']")?.addEventListener("click", () => void removeRecoveryDownload(null, true));
+  recoveryDownloadSort?.addEventListener("change", () => renderRecoveryDownloads(latestRecoveryDownloads));
+  recoveryDownloadList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
-    if (target?.dataset.action === "recover-history") void recoverHistory(target);
+    const openButton = target?.closest<HTMLElement>("[data-action='open-recovery-download']");
+    const removeButton = target?.closest<HTMLElement>("[data-action='remove-recovery-download']");
+    if (openButton) void openRecoveryDownload(openButton);
+    if (removeButton) void removeRecoveryDownload(removeButton);
   });
+  document.querySelector("[data-action='enter-recovery']")?.addEventListener("click", () => void controlRecovery("enter"));
+  document.querySelector("[data-action='clear-legacy-recovery']")?.addEventListener("click", () => void controlRecovery("clear-legacy"));
+  for (const button of document.querySelectorAll("[data-action='cancel-recovery']")) {
+    button.addEventListener("click", () => void controlRecovery("cancel"));
+  }
+  for (const button of document.querySelectorAll("[data-action='save-recovery-remote-copy']")) {
+    button.addEventListener("click", () => void controlRecovery("save-remote-copy"));
+  }
+  for (const button of document.querySelectorAll("[data-action='open-recovery-remote-copy']")) {
+    button.addEventListener("click", () => void openCancelRemoteCopy());
+  }
+  document.querySelector("[data-action='mark-recovery-rewound']")?.addEventListener("click", () => void controlRecovery("mark-rewound"));
+  document.querySelector("[data-action='export-recovery']")?.addEventListener("click", () => void controlRecovery("export"));
+  document.querySelector("[data-action='open-recovery-export']")?.addEventListener("click", () => void openRecoveryExport());
+  document.querySelector("[data-action='mark-recovery-undo']")?.addEventListener("click", () => void controlRecovery("mark-undo-complete"));
+  document.querySelector("[data-action='verify-recovery']")?.addEventListener("click", () => void controlRecovery("verify"));
+  document.querySelector("[data-action='exit-recovery']")?.addEventListener("click", () => void controlRecovery("exit"));
+  for (const button of document.querySelectorAll("[data-action='open-recovery-dropbox']")) {
+    button.addEventListener("click", () => void openRecoveryDropbox());
+  }
+  historyFolder?.addEventListener("change", renderRestoreFolder);
   activityFilterForm?.addEventListener("submit", (event) => void loadActivity(event));
   logLevelForm?.addEventListener("submit", (event) => void changeLogLevel(event));
   document.querySelector("[data-action='load-activity']")?.addEventListener("click", () => void loadActivity());
@@ -2449,6 +2869,7 @@ window.addEventListener("DOMContentLoaded", () => {
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
     button.addEventListener("click", () => activateTab(button.dataset.tab ?? "status"));
   }
+  activateTab(IS_QUICK_PANEL ? "status" : window.localStorage.getItem("safe-sync.active-tab") ?? "status");
   void refreshStatus();
   if (!IS_QUICK_PANEL) void loadConfig();
 });

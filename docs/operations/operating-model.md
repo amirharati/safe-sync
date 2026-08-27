@@ -27,9 +27,12 @@ Example shape for Mac:
 Under the hood Safe Sync uses `rclone sync` without an app-owned backup
 directory. Local deletes can be reflected in that machine's backup, while
 Dropbox retains recoverable deleted files and prior versions for the account's
-plan window. Safe Sync's durable recovery pause prevents outbound backup while
-a selected Dropbox revision is staged, compared, and explicitly applied
-locally.
+plan window. Machine-wide Recovery Mode prevents every outbound backup while a
+Dropbox folder is temporarily rewound, copied into isolated local staging,
+returned to the present, and verified against the unchanged watched folder.
+Cancelling Recovery Mode also fails closed: Safe Sync verifies first, mirrors
+the current local folder back to the selected Dropbox backup only if required,
+verifies equality, and then unlocks.
 
 ## Safe Receive
 

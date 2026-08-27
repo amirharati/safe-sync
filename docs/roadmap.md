@@ -67,8 +67,9 @@ primary product/data-volume gate.
 **Priority:** critical; review and implement before the next recovery or
 multi-machine dogfood stage.
 
-**Status:** implemented in source on 2026-08-17; automated backend, UI, and
-native verification pass. Installation and disposable real-Dropbox validation
+**Status:** simplified in source on 2026-08-20 after product review. Safe Sync
+no longer creates complete-folder revision manifests or presents an app-owned
+snapshot timeline. Installation and disposable real-Dropbox Rewind validation
 are pending; no runtime, configuration, existing trash, or remote data changed.
 
 Dropbox already provides plan-bounded file/folder version history for edits,
@@ -82,21 +83,21 @@ Accepted first implementation:
 - Remove app-owned trash from normal mirroring. Do not retain a latest snapshot
   or emergency payload copy: either can be arbitrarily large and recreates
   retention, cleanup, quota, and recovery-state complexity.
-- Keep Safe Sync generations and structured audit as the app-owned record of
-  what each cycle changed; do not turn that record into a second payload store.
-- Add an explicit recovery workflow that pauses outbound backup, directs the
-  user to Dropbox version history/Rewind, and safely stages restored remote
-  content back to local before backup resumes. A remote-only rewind is not
-  sufficient while local remains the source of truth: the next backup could
-  otherwise reapply the local state.
-- Make selected-file recovery non-destructive by default: download the chosen
-  Dropbox revision into an excluded per-job local staging directory, compare it
-  with the current local path, then offer `Keep current`, `Keep both`, or
-  explicit `Replace local`. Replacing local creates a normal new forward backup
-  version; it does not rewrite Safe Sync or Dropbox history.
-- Reserve Dropbox Rewind for broad multi-file recovery. Rewind restores content
-  only at its existing Dropbox location, so Safe Sync must remain paused until
-  that state has been staged/reconciled back into the local source of truth.
+- Keep bounded structured audit for operational diagnosis and the minimum
+  generation metadata currently required by linked-folder notification; do not
+  treat either as recovery history or a second snapshot database.
+- Use a durable machine-wide Recovery Mode that blocks every outbound backup,
+  guides Dropbox Rewind, exports and verifies the temporary historical remote
+  state into a new local folder outside watched trees, guides undo-Rewind, and
+  requires a fresh current remote-vs-local content-hash verification before
+  unlocking. The watched source is never modified by recovery.
+- Provide guarded cancellation from Restore, Status, and tray. Cancellation
+  verifies first; if the selected Dropbox backup differs, current local state
+  is mirrored to it and verified before the machine-wide lock is removed. An
+  optional pre-cancel action first downloads and verifies the current remote
+  state into a generated local folder outside all watched trees; this explicit
+  user-owned export has no automatic retention lifecycle and does not recreate
+  app-managed trash.
 - State the active Dropbox plan's retention/Rewind limitation clearly. Basic
   still has its plan-bounded version/deleted-file history but not Rewind.
 - Test delete, overwrite, and rename semantics before installation. The prior
@@ -106,18 +107,13 @@ Accepted first implementation:
   how Dropbox presents both proven renames and add/delete fallbacks.
 
 Implemented scope removes `--backup-dir` and new trash configuration, enables
-hash-proven server-side rename tracking, adds a durable recovery pause that
-stops between folder operations, queries/downloads Dropbox revisions using the
-existing refreshed rclone authorization without logging tokens, hash-verifies
-each staged revision, shows bounded text diffs or binary metadata, and reuses
-the checkpointed receive-job engine for Keep Both, explicit Replace, reconcile,
-and rollback. It now also records one complete provider revision baseline plus
-compact per-cycle metadata deltas, presents one compact card per successful
-backup cycle, and can reconstruct a complete historical folder in excluded
-local staging without modifying the watched source. Pre-feature cycles are
-truthfully labeled change-only. The control panel and canonical
-repository/UI/headless guide use the same CLI operations. Existing legacy trash
-is deliberately untouched.
+hash-proven server-side rename tracking, and adds durable machine-wide Recovery
+Mode plus an execution barrier. The Restore tab selects one configured folder,
+opens its exact Dropbox path, verifies an isolated local export of the rewound
+state, guides undo-Rewind, and performs two current remote/local equality checks
+before unlock. New backups do not capture complete revision manifests. Existing
+legacy trash and manifests are deliberately untouched rather than silently
+deleted.
 
 The transaction-aware app-owned design below is retained as a fallback only if
 provider-native recovery cannot satisfy the disposable acceptance tests. It is

@@ -33,7 +33,7 @@
           <button type="button" class="tab" data-tab="transfer">Receive</button>
           <button type="button" class="tab" data-tab="jobs">Jobs</button>
           <button type="button" class="tab" data-tab="links">Linked Folders</button>
-          <button type="button" class="tab" data-tab="history">Recovery</button>
+          <button type="button" class="tab" data-tab="history">Restore</button>
           <button type="button" class="tab" data-tab="activity">Activity</button>
           <button type="button" class="tab" data-tab="help">Help</button>
         </nav>
@@ -62,6 +62,21 @@
                 <span class="path-picker"><input name="local_path" placeholder="Choose a folder" /><button type="button" class="secondary" data-action="pick-setup-folder">Browse...</button></span>
                 <button type="submit" class="primary" data-action="complete-setup" disabled>Finish Setup</button>
               </form>
+            </div>
+          </section>
+          <section class="recovery-status-notice" data-recovery-status-notice hidden>
+            <div>
+              <strong>Recovery Mode is blocking backups</strong>
+              <p data-recovery-status-summary>Safe Sync remains locked until recovery finishes or is safely cancelled.</p>
+              <div class="recovery-entry-progress" data-recovery-entry-progress hidden>
+                <span class="inline-spinner" aria-hidden="true"></span>
+                <span data-recovery-entry-progress-text>Finishing the current backup before locking Recovery Mode.</span>
+              </div>
+            </div>
+            <div class="actions recovery-status-actions">
+              <button type="button" class="primary" data-action="save-recovery-remote-copy" data-recovery-control>Save Dropbox Copy</button>
+              <button type="button" class="secondary" data-action="open-recovery-remote-copy" data-recovery-control hidden>Open Saved Copy</button>
+              <button type="button" class="danger" data-action="cancel-recovery" data-recovery-control>Replace Dropbox &amp; Resume</button>
             </div>
           </section>
           <dl class="facts">
@@ -303,44 +318,117 @@
 
         <section class="view" data-view="history">
           <div class="section-title">
-            <h2>Dropbox Recovery</h2>
+            <h2>Recovery Mode</h2>
             <span class="pill" data-recovery-state>Checking</span>
           </div>
-          <p class="reason section-copy">Choose one successful backup cycle and build a complete historical folder in isolated staging. Inspect or copy from it in Finder; your watched folder is never changed automatically.</p>
-          <div class="actions left">
-            <button type="button" class="secondary" data-action="pause-recovery">Pause Backup for Recovery</button>
-            <button type="button" class="primary" data-action="resume-recovery">Resume Backup</button>
-          </div>
-          <p class="reason" data-recovery-guidance>Keep backup paused until restored Dropbox content and the local source agree.</p>
-          <div class="section-title lower">
-            <h3>Backup snapshots</h3>
-            <button type="button" class="secondary" data-action="load-recovery-recent">Refresh</button>
-          </div>
-          <label>Tracked folder
-            <select data-recovery-recent-folder>
-              <option value="">All tracked folders</option>
-            </select>
+          <p class="reason section-copy">Recovery Mode locks every outbound backup on this machine. Dropbox temporarily rewinds the selected backup, Safe Sync exports that historical state into a separate local folder, and the lock remains until Dropbox is returned to the present and verified against the unchanged watched folder.</p>
+          <label>Folder to restore
+            <select data-history-folder></select>
           </label>
-          <p class="reason">Each card is one successful backup cycle. New cycles include a complete revision manifest and can be staged as a full folder. Older records remain visible but are clearly marked as change-only.</p>
-          <div class="list" data-recovery-recent-list><p class="empty">Loading backup snapshots…</p></div>
-          <pre class="output" data-recovery-output hidden></pre>
-          <div class="actions left" data-recovery-staged-actions hidden>
-            <button type="button" class="secondary" data-action="open-recovery-staging">Open Staging Folder</button>
-            <button type="button" class="secondary" data-action="open-recovery-destination">Open Watched Folder</button>
-          </div>
-          <details class="recovery-advanced">
-            <summary>Advanced: inspect or recover one file</summary>
-            <p class="reason">Use this when you know the exact path and do not need a complete folder snapshot.</p>
-            <form class="stacked-form" data-recovery-form>
-              <label>Local backup folder <select data-history-folder></select></label>
-              <label>Relative file path <input data-recovery-path name="path" placeholder="project/file.txt" autocomplete="off" required /></label>
-              <button type="submit" class="secondary" data-action="load-history">Find File Versions</button>
-            </form>
-            <div class="list" data-history-list></div>
-            <div class="actions left">
-              <button type="button" class="secondary" data-action="open-recovery-dropbox">Open Dropbox Website (optional)</button>
+          <dl class="facts compact restore-locations">
+            <div><dt>Local folder</dt><dd class="path" data-restore-local>-</dd></div>
+            <div><dt>Dropbox backup</dt><dd class="path" data-restore-remote>-</dd></div>
+            <div><dt>Historical copy</dt><dd class="path" data-restore-destination>Created after Recovery Mode starts</dd></div>
+            <div data-cancel-remote-copy-fact hidden><dt>Dropbox safety copy</dt><dd class="path" data-cancel-remote-copy-destination>-</dd></div>
+          </dl>
+          <section class="card recovery-downloads">
+            <div class="section-title">
+              <div>
+                <h3>Downloaded Recovery Copies</h3>
+                <p class="reason">Verified historical and Dropbox safety copies remain listed here after Recovery Mode ends.</p>
+              </div>
             </div>
-          </details>
+            <div class="recovery-download-toolbar">
+              <label>Sort by time
+                <select data-recovery-download-sort>
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                </select>
+              </label>
+              <div class="actions">
+                <button type="button" class="secondary" data-action="load-recovery-downloads">Refresh</button>
+                <button type="button" class="secondary danger" data-action="remove-all-recovery-downloads" data-recovery-control>Delete All Local Copies</button>
+              </div>
+            </div>
+            <div class="recovery-download-list" data-recovery-download-list><p class="empty">Loading downloaded copies…</p></div>
+          </section>
+          <p class="reason recovery-banner" data-recovery-guidance>Enter Recovery Mode before changing Dropbox history.</p>
+          <div class="recovery-entry-progress" data-recovery-entry-progress hidden>
+            <span class="inline-spinner" aria-hidden="true"></span>
+            <span data-recovery-entry-progress-text>Finishing the current backup before locking Recovery Mode.</span>
+          </div>
+          <div class="recovery-cancel-actions" data-recovery-cancel-actions hidden>
+            <p class="reason">Changed your mind? If Dropbox differs, first save and verify its current state in a separate local folder. Inspect that copy, then explicitly replace Dropbox from the current local folder and resume. You may skip the safety copy if you intentionally do not need it.</p>
+            <div class="actions left">
+              <button type="button" class="primary" data-action="save-recovery-remote-copy" data-recovery-control>Save Dropbox Copy Locally</button>
+              <button type="button" class="secondary" data-action="open-recovery-remote-copy" data-recovery-control hidden>Open Saved Copy</button>
+              <button type="button" class="danger" data-action="cancel-recovery" data-recovery-control>Replace Dropbox from Local &amp; Resume</button>
+            </div>
+          </div>
+          <div class="recovery-legacy-actions" data-recovery-legacy-actions hidden>
+            <p class="reason">This is an old-format pause, not an active guided recovery. Clear it only if you did not Rewind Dropbox and no recovery work is in progress.</p>
+            <button type="button" class="primary" data-action="clear-legacy-recovery" data-recovery-control>Clear Old Pause and Resume Backups</button>
+          </div>
+          <ol class="restore-steps">
+            <li class="restore-step">
+              <div class="restore-step-number">1</div>
+              <div>
+                <h3>Enter machine-wide Recovery Mode</h3>
+                <p class="reason">Safe Sync blocks automatic, scheduled, startup, and manual outbound backups across every profile. A running folder operation finishes first; continue only when the status says <strong>Recovery locked</strong>.</p>
+                <button type="button" class="primary" data-action="enter-recovery" data-recovery-control>Enter Recovery Mode</button>
+              </div>
+            </li>
+            <li class="restore-step">
+              <div class="restore-step-number">2</div>
+              <div>
+                <h3>Rewind this folder in Dropbox</h3>
+                <p class="reason">Safe Sync opens the exact backup folder. In Dropbox, choose <strong>Settings → Folder settings → Rewind this folder</strong>, select the point immediately before the unwanted changes, fine-tune the first change to undo, and confirm. Wait for Dropbox's completion email.</p>
+                <div class="actions left">
+                  <button type="button" class="secondary" data-action="open-recovery-dropbox" data-recovery-dropbox-stage="rewind" data-recovery-control>Open Selected Folder in Dropbox</button>
+                  <button type="button" class="primary" data-action="mark-recovery-rewound" data-recovery-control>Dropbox says Rewind finished</button>
+                </div>
+              </div>
+            </li>
+            <li class="restore-step">
+              <div class="restore-step-number">3</div>
+              <div>
+                <h3>Export and verify the historical copy</h3>
+                <p class="reason">Safe Sync copies the rewound Dropbox folder into the separate path shown above. It reads Dropbox before and after the copy and verifies every staged path and content hash. The watched local folder is never modified.</p>
+                <div class="actions left">
+                  <button type="button" class="primary" data-action="export-recovery" data-recovery-control>Create Historical Copy</button>
+                  <button type="button" class="secondary" data-action="open-recovery-export" data-recovery-control>Open Historical Copy</button>
+                </div>
+              </div>
+            </li>
+            <li class="restore-step">
+              <div class="restore-step-number">4</div>
+              <div>
+                <h3>Return Dropbox to the present</h3>
+                <p class="reason">Open the same Dropbox folder and use Rewind again, selecting the point immediately before the first Rewind. Wait for Dropbox's completion email before confirming.</p>
+                <div class="actions left">
+                  <button type="button" class="secondary" data-action="open-recovery-dropbox" data-recovery-dropbox-stage="undo" data-recovery-control>Open Folder to Undo Rewind</button>
+                  <button type="button" class="primary" data-action="mark-recovery-undo" data-recovery-control>Dropbox says undo finished</button>
+                </div>
+              </div>
+            </li>
+            <li class="restore-step">
+              <div class="restore-step-number">5</div>
+              <div>
+                <h3>Verify current Dropbox against local</h3>
+                <p class="reason">Safe Sync performs a fresh filtered path, size, and Dropbox content-hash comparison. Recovery Mode cannot be unlocked if Dropbox is still changing or differs from the watched local folder.</p>
+                <button type="button" class="primary" data-action="verify-recovery" data-recovery-control>Verify Current State</button>
+                <p class="reason" data-recovery-verification></p>
+              </div>
+            </li>
+            <li class="restore-step">
+              <div class="restore-step-number">6</div>
+              <div>
+                <h3>Exit Recovery Mode</h3>
+                <p class="reason">Exit runs the full verification once more while holding the backup barrier. Only then are queued watcher changes allowed to resume.</p>
+                <button type="button" class="primary" data-action="exit-recovery" data-recovery-control>Exit Recovery Mode</button>
+              </div>
+            </li>
+          </ol>
         </section>
 
         <section class="view" data-view="activity">
@@ -409,5 +497,14 @@
         <p class="message" data-message></p>
       </section>
     </main>
+    <div class="operation-modal" data-recovery-operation-modal role="alertdialog" aria-modal="true" aria-labelledby="recovery-operation-title" aria-describedby="recovery-operation-detail" tabindex="-1" hidden>
+      <div class="operation-modal-card">
+        <span class="operation-spinner" aria-hidden="true"></span>
+        <div>
+          <h2 id="recovery-operation-title" data-recovery-operation-title>Working on Recovery Mode</h2>
+          <p id="recovery-operation-detail" data-recovery-operation-detail>Please wait. Safe Sync is keeping backups safely controlled.</p>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

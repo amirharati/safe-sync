@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -51,6 +51,7 @@ from safe_sync.transfer import (
     LinkStore,
     TransferError,
     compare_inventories,
+    dropbox_content_hash,
     generation_record,
     generation_remote_dir,
     join_remote_scope,
@@ -452,7 +453,7 @@ def future_iso(seconds: int) -> str:
     return (dt.datetime.now(dt.timezone.utc).astimezone() + dt.timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
 
-def run_command(
+def _run_command_unlocked(
     config: dict[str, Any],
     cmd: list[str],
     dry_run: bool = False,
@@ -617,7 +618,49 @@ def run_command(
                 current = {}
             if int(current.get("pid", -1)) == process.pid:
                 metadata_path.unlink(missing_ok=True)
-            _ACTIVE_CHILD_METADATA = None
+        _ACTIVE_CHILD_METADATA = None
+
+
+def _is_outbound_sync_command(config: dict[str, Any], cmd: list[str], dry_run: bool) -> bool:
+    if dry_run or len(cmd) < 4 or cmd[1] != "sync":
+        return False
+    try:
+        return cmd[2] == str(Path(str(config["local_path"])).expanduser()) and cmd[3] == str(config["remote_root"]).rstrip("/")
+    except KeyError:
+        return False
+
+
+def run_command(
+    config: dict[str, Any],
+    cmd: list[str],
+    dry_run: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
+) -> int:
+    """Run rclone, placing every outbound sync behind the Recovery Mode barrier."""
+    if not _is_outbound_sync_command(config, cmd, dry_run):
+        return _run_command_unlocked(config, cmd, dry_run, progress_callback)
+
+    barrier = recovery_barrier_path(config)
+    barrier.parent.mkdir(parents=True, exist_ok=True)
+    with barrier.open("a+b") as handle:
+        # Recovery Mode writes its durable marker before checking this lock.
+        # Existing backups retain the shared lock until their current folder
+        # operation finishes; future backups observe the marker while holding
+        # the lock and cannot cross the final check/spawn boundary.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            if recovery_is_paused(config):
+                record_event(
+                    config,
+                    "backup.blocked_by_recovery_mode",
+                    component="recovery",
+                    severity="warning",
+                    data={"argv": cmd},
+                )
+                return RECOVERY_PAUSED_EXIT
+            return _run_command_unlocked(config, cmd, dry_run, progress_callback)
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def rclone_bin(config: dict[str, Any]) -> str:
@@ -1105,9 +1148,17 @@ def backup_cmd(config: dict[str, Any], dry_run: bool, report_path: Path | None =
     return cmd
 
 
-def copy_cmd(config: dict[str, Any], src: str, dst: str, dry_run: bool, selected_paths: list[str] | None = None) -> list[str]:
+def copy_cmd(
+    config: dict[str, Any],
+    src: str,
+    dst: str,
+    dry_run: bool,
+    selected_paths: list[str] | None = None,
+    *,
+    exact: bool = False,
+) -> list[str]:
     cmd = [
-        rclone_bin(config), "copy", src, dst,
+        rclone_bin(config), "sync" if exact else "copy", src, dst,
         *filter_args(config),
         "--create-empty-src-dirs",
         "--stats", "10s",
@@ -1530,6 +1581,25 @@ def run_backup_with_config(config: dict[str, Any], dry_run: bool) -> int:
             )
             save_status(config, state="error", folder_id=config.get("folder_id"), last_error=str(exc), last_finish=now_iso())
             raise
+        if code == RECOVERY_PAUSED_EXIT:
+            record_event(
+                config,
+                "backup.blocked_by_recovery_mode",
+                component="recovery",
+                data={"folder_id": config.get("folder_id"), "trigger": "direct"},
+                correlation=correlation,
+            )
+            save_status(
+                config,
+                state="recovery_paused",
+                folder_id=config.get("folder_id"),
+                recovery_paused=True,
+                last_error=None,
+                last_warning=None,
+                last_finish=now_iso(),
+                note="Machine-wide Recovery Mode is active",
+            )
+            return code
         counts = record_backup_report(config, report_path, operation_id, dry_run=dry_run)
         if code == 0:
             if text_looks_rate_limited(LAST_COMMAND_OUTPUT):
@@ -1596,7 +1666,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
     config = normalized_config(load_config(Path(args.config).expanduser()))
     validate_local_path(config)
     if recovery_is_paused(config) and not args.dry_run:
-        raise SystemExit("backup is paused for recovery; run 'safe-sync recovery resume' after local and Dropbox state are reconciled")
+        raise SystemExit("Recovery Mode blocks outbound backup; complete its guarded export, undo-Rewind, verification, and exit workflow")
     if args.dry_run or args.folder or args.all:
         folders = selected_folders(config, args.folder, args.all)
         last_code = 0
@@ -1665,6 +1735,14 @@ def cmd_rclone(args: argparse.Namespace) -> int:
     config = load_config(config_path)
     if not args.rclone_args:
         raise SystemExit("Usage: safe-sync rclone <rclone command>")
+    if recovery_is_paused(config):
+        read_only = {
+            "about", "cat", "check", "checksum", "cryptcheck", "hashsum",
+            "help", "listremotes", "ls", "lsd", "lsf", "lsjson", "md5sum",
+            "sha1sum", "size", "version",
+        }
+        if args.rclone_args[0] not in read_only:
+            raise SystemExit("Recovery Mode blocks direct managed rclone mutations; use the guided recovery export or a read-only inspection command")
     if args.rclone_args[0] == "config" and not config.get("rclone_config"):
         config["rclone_config"] = str(DEFAULT_RCLONE_CONFIG)
         config = write_config(config_path, config)
@@ -1733,7 +1811,7 @@ def status_health(config: dict[str, Any], service_state: str, sync_state: dict[s
     sync_status = sync_state.get("state")
     if sync_status == "recovery_paused":
         health = "ok"
-        reason = "Outbound backup is intentionally paused for Dropbox recovery"
+        reason = "Machine-wide Recovery Mode is blocking every outbound backup"
     elif sync_status in {"backoff", "cooldown"} and (last_warning or sync_state.get("backoff_until")):
         health = "warning"
         reason = str(last_warning or "Dropbox cooldown is active")
@@ -2395,8 +2473,8 @@ def run_all_backups_runtime(
                 queued_backup=False,
                 pending_folders=pending_ids,
                 completed_folders=completed_this_run,
-                last_progress=f"Recovery pause active; {len(pending_ids)} scheduled folder(s) retained for later",
-                note="Current folder operation finished; no new folder backup was started",
+                last_progress=f"Recovery Mode active; {len(pending_ids)} scheduled folder(s) retained for later",
+                note="Recovery Mode locked; no new outbound folder backup was started",
             )
             return RECOVERY_PAUSED_EXIT, pending_ids[0] if pending_ids else None
         folder_id = str(item["folder_id"])
@@ -2653,6 +2731,25 @@ def run_all_backups_runtime(
             )
             raise
 
+        if code == RECOVERY_PAUSED_EXIT:
+            item.pop("attempt", None)
+            if not dry_run:
+                save_backup_queue(config, queue)
+            pending_ids = [str(pending["folder_id"]) for pending in queue["items"]]
+            publish_runtime_status(
+                api_state,
+                config,
+                state="recovery_paused",
+                recovery_paused=True,
+                queued_backup=False,
+                pending_folders=pending_ids,
+                completed_folders=completed_this_run,
+                last_error=None,
+                last_warning=None,
+                last_progress=f"Recovery Mode locked before folder {index} of {scheduled_folder_count}; queued work retained",
+            )
+            return RECOVERY_PAUSED_EXIT, folder_id
+
         report_details = backup_report_details(report_path)
         attempt_changes, counts, report_hash, report_bytes = report_details
         item["changes"] = merge_backup_changes(list(item.get("changes") or []), attempt_changes)
@@ -2867,6 +2964,7 @@ def run_all_backups_runtime(
         failed_folder=None,
         interrupted_folder=None,
         recovery_pending=False,
+        recovery_resume_pending=False,
         backoff_seconds=None,
         backoff_until=None,
         backoff_remaining_seconds=0,
@@ -3014,93 +3112,6 @@ def run_query_runtime(config: dict[str, Any], ticket: dict[str, Any], api_state:
                 audit_health=result.get("health"),
                 audit_pending_cloud_segments=result.get("pending_cloud_segments"),
                 audit_last_cloud_sync=(result.get("replication") or {}).get("last_success_at"),
-            )
-            return
-        if query == "recovery_revisions":
-            publish_runtime_status(
-                api_state,
-                config,
-                state="recovery_paused" if api_state.recovery_paused() else "comparing",
-                last_command="recovery revisions",
-                last_progress="Reading Dropbox version history",
-            )
-            result = recovery_revisions(
-                config,
-                str(payload["folder"]),
-                str(payload["path"]),
-                int(payload.get("limit") or 30),
-            )
-            api_state.complete_query(ticket, {"ok": True, "history": result})
-            publish_runtime_status(
-                api_state,
-                config,
-                state="recovery_paused" if api_state.recovery_paused() else "watching",
-                last_progress=f"Found {len(result.get('entries') or [])} Dropbox revisions",
-            )
-            return
-        if query == "recovery_stage":
-            if not api_state.recovery_paused() or not recovery_is_paused(config):
-                raise TransferError("pause backup before staging a Dropbox revision")
-            publish_runtime_status(
-                api_state,
-                config,
-                state="staging",
-                last_command="recovery stage",
-                last_progress="Downloading selected Dropbox revision into safe local staging",
-            )
-            job = create_recovery_job(
-                config,
-                str(payload["folder"]),
-                str(payload["path"]),
-                str(payload["revision"]),
-            )
-            api_state.complete_query(ticket, {"ok": True, "job": job})
-            publish_runtime_status(
-                api_state,
-                config,
-                state="recovery_paused",
-                recovery_paused=True,
-                receive_job_id=job["id"],
-                receive_job_status=job["status"],
-                last_progress="Dropbox revision staged and ready for comparison",
-                _activity_event=f"Recovery revision staged: {job['id']}",
-            )
-            return
-        if query == "recovery_snapshot_stage":
-            if not api_state.recovery_paused() or not recovery_is_paused(config):
-                raise TransferError("pause backup before staging a historical folder snapshot")
-            publish_runtime_status(
-                api_state,
-                config,
-                state="staging",
-                last_command="recovery snapshot",
-                last_progress="Building and verifying the selected historical folder snapshot",
-            )
-            def on_snapshot_progress(line: str) -> None:
-                summary = summarize_progress_line(line) or line.strip()
-                if summary:
-                    publish_runtime_status(
-                        api_state,
-                        config,
-                        state="staging",
-                        last_progress=summary,
-                        current_file=current_file_from_progress(summary),
-                    )
-
-            result = create_recovery_snapshot(
-                config,
-                str(payload["folder"]),
-                str(payload["generation"]),
-                progress_callback=on_snapshot_progress,
-            )
-            api_state.complete_query(ticket, {"ok": True, "snapshot": result})
-            publish_runtime_status(
-                api_state,
-                config,
-                state="recovery_paused",
-                recovery_paused=True,
-                last_progress="Historical folder snapshot is ready to inspect",
-                _activity_event=f"Recovery snapshot staged: {result['id']}",
             )
             return
         if query != "compare":
@@ -3628,7 +3639,7 @@ def _recovery_diff(current: Path, staged: Path, *, max_bytes: int = 1024 * 1024,
 
 def create_recovery_job(config: dict[str, Any], folder_id: str, relative_path: str, revision: str) -> dict[str, Any]:
     if not recovery_is_paused(config):
-        raise TransferError("pause backup with 'safe-sync recovery pause' before staging a Dropbox revision")
+        raise TransferError("enter Recovery Mode before staging a Dropbox revision")
     folder = local_folder_by_id(config, folder_id)
     relative = normalize_subpath(relative_path)
     revisions = recovery_revisions(config, folder_id, relative, 100)
@@ -4067,13 +4078,14 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
         failed_folder=None,
         interrupted_folder=None,
         recovery_pending=False,
+        recovery_resume_pending=False,
         backoff_seconds=None,
         backoff_until=None,
         backoff_remaining_seconds=0,
         retry_after_seconds=None,
         retry_attempt=None,
         retry_kind=None,
-        note="Backup paused for Dropbox recovery" if initial_recovery_pause else "startup reconcile queued",
+        note="Machine-wide Recovery Mode is active" if initial_recovery_pause else "startup reconcile queued",
         recovery_paused=initial_recovery_pause,
         reconciled_jobs=reconciled_jobs,
     )
@@ -4165,7 +4177,16 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 )
             if api_state.consume_backup_request():
                 manual_backup_pending = True
-                publish_runtime_status(api_state, config, state="dirty", last_error=None, queued_backup=True, note="manual backup queued")
+                recovery_resume_pending = bool(api_state.snapshot().get("recovery_resume_pending"))
+                publish_runtime_status(
+                    api_state,
+                    config,
+                    state="dirty",
+                    last_error=None,
+                    queued_backup=True,
+                    note="Recovery complete; preparing normal backup" if recovery_resume_pending else "manual backup queued",
+                    last_progress="Recovery complete; normal backup is queued" if recovery_resume_pending else "Backup queued",
+                )
                 record_event(
                     config,
                     "backup.queued",
@@ -4183,8 +4204,9 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     config,
                     state="recovery_paused",
                     recovery_paused=True,
+                    recovery_resume_pending=False,
                     queued_backup=False,
-                    note="Backup paused for Dropbox recovery",
+                    note="Machine-wide Recovery Mode is active",
                 )
 
             job_operation = api_state.consume_job_operation()
@@ -4352,6 +4374,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                 publish_runtime_status(api_state, config, state="cooldown", cooldown_remaining_seconds=round(daemon.min_interval_remaining(now), 1))
 
             if should_run:
+                recovery_resume_pending = bool(api_state.snapshot().get("recovery_resume_pending"))
                 manual_backup_pending = False
                 retry_backup_pending = False
                 if manual_run or startup_reconcile_pending or fallback_run:
@@ -4383,6 +4406,8 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                     last_start=now_iso(),
                     last_command="backup" if manual_run else "daemon",
                     queued_backup=False,
+                    recovery_resume_pending=False,
+                    note="Normal backup started after Recovery Mode" if recovery_resume_pending else "Backup running",
                 )
                 failed_folder = None
                 try:
@@ -4418,7 +4443,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                         queued_backup=False,
                         last_error=None,
                         last_warning=None,
-                        note="Backup paused for Dropbox recovery",
+                        note="Machine-wide Recovery Mode is active",
                     )
                 elif code == 0:
                     publish_runtime_status(
@@ -4436,6 +4461,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                         failed_folder=None,
                         interrupted_folder=None,
                         recovery_pending=False,
+                        recovery_resume_pending=False,
                         queued_backup=False,
                         backoff_seconds=None,
                         backoff_until=None,
@@ -4443,6 +4469,7 @@ def run_daemon(args: argparse.Namespace, config_path: Path, config: dict[str, An
                         retry_after_seconds=None,
                         retry_attempt=None,
                         retry_kind=None,
+                        note="Backup cycle complete",
                     )
                 elif rate_limited:
                     manual_backup_pending = manual_backup_pending or manual_run
@@ -4791,15 +4818,952 @@ def state_root_path(config: dict[str, Any]) -> Path:
     return Path(normalized_config(config)["state_root"]).expanduser()
 
 
+def recovery_mode_path(config: dict[str, Any]) -> Path:
+    return state_root_path(config) / "recovery-mode.json"
+
+
 def recovery_pause_path(config: dict[str, Any]) -> Path:
+    """Legacy marker path retained only for safe upgrade detection."""
     return state_root_path(config) / "recovery-pause.json"
 
 
+def recovery_barrier_path(config: dict[str, Any]) -> Path:
+    return state_root_path(config) / "recovery-backup.barrier"
+
+
+def recovery_download_catalog_path(config: dict[str, Any]) -> Path:
+    return state_root_path(config) / "recovery-downloads.json"
+
+
+def recovery_download_catalog_lock_path(config: dict[str, Any]) -> Path:
+    return state_root_path(config) / "recovery-downloads.lock"
+
+
+def _recovery_download_records(config: dict[str, Any]) -> list[dict[str, Any]]:
+    path = recovery_download_catalog_path(config)
+    if not path.exists():
+        return []
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TransferError(f"Could not read the recovery download catalog: {exc}") from exc
+    if not isinstance(document, dict) or int(document.get("schema_version") or 0) != 1 or not isinstance(document.get("downloads"), list):
+        raise TransferError("The recovery download catalog has an unsupported or damaged format")
+    return [dict(item) for item in document["downloads"] if isinstance(item, dict)]
+
+
+def _recovery_download_folder_facts(config: dict[str, Any], folder_id: str) -> dict[str, Any]:
+    for profile in normalized_config(config)["profiles"]:
+        for folder in profile.get("folders") or []:
+            if str(folder.get("id") or "") != folder_id:
+                continue
+            folder_cfg = folder_config(config_for_profile(config, profile), folder)
+            return {
+                "profile_id": profile.get("id"),
+                "folder_id": folder_id,
+                "folder_label": folder.get("label") or folder_id,
+                "remote_root": folder_cfg.get("remote_root"),
+            }
+    return {"folder_id": folder_id or None, "folder_label": folder_id or None}
+
+
+def _migrate_recovery_download_events(config: dict[str, Any]) -> None:
+    """Seed the catalog once from retained events plus standard export folders."""
+    path = recovery_download_catalog_path(config)
+    lock_path = recovery_download_catalog_lock_path(config)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            return
+        audit_by_name: dict[str, dict[str, Any]] = {}
+        journal = event_journal(config)
+        for event_type, kind in (
+            ("recovery.cancel_remote_copy_verified", "dropbox_safety_copy"),
+            ("recovery.export_verified", "historical_recovery_copy"),
+        ):
+            for event in journal.events(limit=None, event_type=event_type):
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                recorded_destination = str(data.get("destination") or "")
+                name = Path(recorded_destination).name
+                if not name:
+                    continue
+                audit_by_name[name] = {"event": event, "data": data, "kind": kind}
+
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        cfg = normalized_config(config)
+        for profile in cfg["profiles"]:
+            for folder in profile.get("folders") or []:
+                folder_id = str(folder.get("id") or "")
+                local_root = Path(str(folder.get("local_path") or "")).expanduser().resolve(strict=False)
+                bases = {
+                    local_root.parent,
+                    Path.home() / "Safe Sync Restores",
+                    state_root_path(config) / "recovery-exports",
+                }
+                patterns = (
+                    (f"{local_root.name}_dropbox_before_cancel_*", "dropbox_safety_copy"),
+                    (f"{local_root.name}_restore_*", "historical_recovery_copy"),
+                )
+                for base in bases:
+                    if not base.is_dir():
+                        continue
+                    for pattern, discovered_kind in patterns:
+                        for destination in base.glob(pattern):
+                            if not destination.is_dir():
+                                continue
+                            destination_text = str(destination.resolve(strict=False))
+                            if destination_text in seen:
+                                continue
+                            seen.add(destination_text)
+                            audit = audit_by_name.get(destination.name, {})
+                            event = audit.get("event") if isinstance(audit.get("event"), dict) else {}
+                            data = audit.get("data") if isinstance(audit.get("data"), dict) else {}
+                            correlation = event.get("correlation") if isinstance(event.get("correlation"), dict) else {}
+                            completed_at = event.get("occurred_at") or dt.datetime.fromtimestamp(
+                                destination.stat().st_mtime, tz=dt.timezone.utc
+                            ).isoformat().replace("+00:00", "Z")
+                            records.append(
+                                {
+                                    "id": event.get("event_id") or f"discovered_{hashlib.sha256(destination_text.encode()).hexdigest()[:24]}",
+                                    "kind": audit.get("kind") or discovered_kind,
+                                    **_recovery_download_folder_facts(config, str(correlation.get("folder_id") or folder_id)),
+                                    "destination": destination_text,
+                                    "created_at": completed_at,
+                                    "completed_at": completed_at,
+                                    "entry_count": data.get("entry_count"),
+                                    "byte_count": data.get("byte_count"),
+                                    "operation_id": correlation.get("operation_id"),
+                                    "migrated_from_audit": bool(event),
+                                    "migrated_from_standard_location": True,
+                                }
+                            )
+        atomic_write_text(path, json.dumps({"schema_version": 1, "downloads": records}, indent=2, sort_keys=True) + "\n")
+
+
+def recovery_downloads(config: dict[str, Any]) -> list[dict[str, Any]]:
+    if not recovery_download_catalog_path(config).exists():
+        _migrate_recovery_download_events(config)
+    records = _recovery_download_records(config)
+    records.sort(key=lambda item: str(item.get("completed_at") or item.get("created_at") or ""), reverse=True)
+    for record in records:
+        destination = Path(str(record.get("destination") or "")).expanduser()
+        record["available"] = bool(record.get("destination")) and destination.is_dir()
+        record["deletable"] = not destination.is_symlink() and _managed_recovery_download_destination(config, destination)
+    return records
+
+
+def _remember_recovery_download(config: dict[str, Any], record: dict[str, Any]) -> None:
+    lock_path = recovery_download_catalog_lock_path(config)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        records = _recovery_download_records(config)
+        destination = str(record.get("destination") or "")
+        download_id = str(record.get("id") or "")
+        records = [
+            item
+            for item in records
+            if str(item.get("id") or "") != download_id and str(item.get("destination") or "") != destination
+        ]
+        records.append(dict(record))
+        document = {"schema_version": 1, "downloads": records}
+        atomic_write_text(recovery_download_catalog_path(config), json.dumps(document, indent=2, sort_keys=True) + "\n")
+
+
+def _managed_recovery_download_destination(config: dict[str, Any], destination: Path) -> bool:
+    """Allow UI deletion only for generated destinations in standard locations."""
+    if not destination.is_absolute():
+        return False
+    resolved = destination.resolve(strict=False)
+    if resolved == Path.home().resolve(strict=False) or resolved == state_root_path(config).resolve(strict=False):
+        return False
+    cfg = normalized_config(config)
+    for profile in cfg["profiles"]:
+        for folder in profile.get("folders") or []:
+            local_root = Path(str(folder.get("local_path") or "")).expanduser().resolve(strict=False)
+            allowed_parents = {
+                local_root.parent,
+                (Path.home() / "Safe Sync Restores").resolve(strict=False),
+                (state_root_path(config) / "recovery-exports").resolve(strict=False),
+            }
+            if resolved.parent not in allowed_parents:
+                continue
+            name = re.escape(local_root.name)
+            if re.fullmatch(rf"{name}_(?:restore|dropbox_before_cancel)_\d{{8}}T\d{{6}}Z", resolved.name):
+                return True
+    return False
+
+
+def remove_recovery_downloads(config: dict[str, Any], *, download_id: str | None = None, remove_all: bool = False) -> dict[str, Any]:
+    if recovery_mode_document(config) is not None:
+        raise TransferError("Downloaded recovery copies cannot be deleted while Recovery Mode is active")
+    if remove_all == bool(download_id):
+        raise TransferError("Choose exactly one downloaded copy or request all copies")
+    lock_path = recovery_download_catalog_lock_path(config)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    removed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        records = _recovery_download_records(config)
+        selected = records if remove_all else [item for item in records if str(item.get("id") or "") == str(download_id)]
+        if not selected and not remove_all:
+            raise TransferError("The selected recovery download record no longer exists")
+        removed_ids: set[str] = set()
+        for record in selected:
+            record_id = str(record.get("id") or "")
+            destination = Path(str(record.get("destination") or "")).expanduser()
+            if not destination.exists() and not destination.is_symlink():
+                removed.append({"id": record_id, "destination": str(destination), "folder_removed": False})
+                removed_ids.add(record_id)
+                continue
+            if destination.is_symlink() or not destination.is_dir() or not _managed_recovery_download_destination(config, destination):
+                skipped.append(
+                    {
+                        "id": record_id,
+                        "destination": str(destination),
+                        "reason": "not a generated recovery folder in a standard Safe Sync location; delete it manually",
+                    }
+                )
+                continue
+            validate_recovery_destination(config, destination)
+            shutil.rmtree(destination)
+            removed.append({"id": record_id, "destination": str(destination), "folder_removed": True})
+            removed_ids.add(record_id)
+        remaining = [item for item in records if str(item.get("id") or "") not in removed_ids]
+        atomic_write_text(
+            recovery_download_catalog_path(config),
+            json.dumps({"schema_version": 1, "downloads": remaining}, indent=2, sort_keys=True) + "\n",
+        )
+    record_event(
+        config,
+        "recovery.downloads_removed",
+        component="recovery",
+        severity="warning",
+        data={"remove_all": remove_all, "removed": removed, "skipped": skipped},
+    )
+    return {"removed": removed, "skipped": skipped, "downloads": recovery_downloads(config)}
+
+
+def recovery_mode_document(config: dict[str, Any]) -> dict[str, Any] | None:
+    path = recovery_mode_path(config)
+    if path.exists():
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "schema_version": 0,
+                "active": True,
+                "phase": "invalid_locked",
+                "last_error": f"Recovery Mode state is unreadable; backup remains locked: {exc}",
+            }
+        if not isinstance(value, dict) or value.get("active") is not True:
+            return {
+                "schema_version": 0,
+                "active": True,
+                "phase": "invalid_locked",
+                "last_error": "Recovery Mode state is invalid; backup remains locked",
+            }
+        return value
+    legacy = recovery_pause_path(config)
+    if legacy.exists():
+        return {
+            "schema_version": 1,
+            "active": True,
+            "phase": "legacy_locked",
+            "entered_at": None,
+            "reason": "Legacy recovery pause requires explicit force-exit or a new guided recovery",
+        }
+    return None
+
+
 def recovery_is_paused(config: dict[str, Any]) -> bool:
-    return recovery_pause_path(config).exists()
+    # Marker existence is deliberately sufficient. A damaged state document
+    # must fail closed and keep every outbound backup blocked.
+    return recovery_mode_path(config).exists() or recovery_pause_path(config).exists()
+
+
+def recovery_barrier_draining(config: dict[str, Any]) -> bool:
+    path = recovery_barrier_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
+
+
+def recovery_operation_draining(config: dict[str, Any]) -> bool:
+    if recovery_barrier_draining(config):
+        return True
+    try:
+        status = dict(daemon_api(config, "status", _timeout_seconds=2.0).get("status") or {})
+    except OSError:
+        return False
+    return str(status.get("state") or "") in {"syncing", "transferring", "publishing", "staging", "applying"}
+
+
+def _all_watched_roots(config: dict[str, Any]) -> list[Path]:
+    cfg = normalized_config(config)
+    roots: list[Path] = []
+    for profile in cfg["profiles"]:
+        for folder in profile.get("folders") or []:
+            if folder.get("enabled", True):
+                roots.append(Path(str(folder["local_path"])).expanduser().resolve(strict=False))
+    return roots
+
+
+def _path_within(candidate: Path, root: Path) -> bool:
+    return candidate == root or root in candidate.parents
+
+
+def validate_recovery_destination(config: dict[str, Any], destination: Path) -> Path:
+    resolved = destination.expanduser().resolve(strict=False)
+    for root in _all_watched_roots(config):
+        if _path_within(resolved, root):
+            raise TransferError(f"Recovery destination must be outside every watched folder: {resolved} is inside {root}")
+    if resolved.exists() and not resolved.is_dir():
+        raise TransferError(f"Recovery destination exists and is not a folder: {resolved}")
+    return resolved
+
+
+def default_recovery_destination(config: dict[str, Any], local_root: Path) -> Path:
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    name = f"{local_root.name}_restore_{stamp}"
+    candidates = [
+        local_root.parent / name,
+        Path.home() / "Safe Sync Restores" / name,
+        state_root_path(config) / "recovery-exports" / name,
+    ]
+    for candidate in candidates:
+        try:
+            resolved = validate_recovery_destination(config, candidate)
+        except TransferError:
+            continue
+        if not resolved.exists():
+            return resolved
+    raise TransferError("Could not choose a safe recovery destination outside watched folders")
+
+
+def default_cancel_remote_copy_destination(config: dict[str, Any], local_root: Path) -> Path:
+    """Choose a new isolated destination for an on-demand pre-cancel copy."""
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    name = f"{local_root.name}_dropbox_before_cancel_{stamp}"
+    candidates = [
+        local_root.parent / name,
+        Path.home() / "Safe Sync Restores" / name,
+        state_root_path(config) / "recovery-exports" / name,
+    ]
+    for candidate in candidates:
+        try:
+            resolved = validate_recovery_destination(config, candidate)
+        except TransferError:
+            continue
+        if not resolved.exists():
+            return resolved
+    raise TransferError("Could not choose a safe destination for the Dropbox safety copy")
+
+
+def _recovery_target(config: dict[str, Any], document: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    cfg = normalized_config(config)
+    target = document.get("target") if isinstance(document.get("target"), dict) else {}
+    profile_id = str(target.get("profile_id") or "")
+    folder_id = str(target.get("folder_id") or "")
+    for profile in cfg["profiles"]:
+        if str(profile["id"]) != profile_id:
+            continue
+        for folder in profile.get("folders") or []:
+            if str(folder["id"]) == folder_id and folder.get("enabled", True):
+                profile_cfg = config_for_profile(cfg, profile)
+                folder_cfg = folder_config(profile_cfg, folder)
+                if str(folder_cfg["local_path"]) != str(target.get("local_path")) or str(folder_cfg["remote_root"]) != str(target.get("remote_root")):
+                    raise TransferError("The recovery folder configuration changed; restore it before continuing Recovery Mode")
+                return folder_cfg, folder
+    raise TransferError("The folder selected for Recovery Mode is no longer configured and enabled")
+
+
+def _write_recovery_mode(config: dict[str, Any], document: dict[str, Any]) -> dict[str, Any]:
+    document = dict(document)
+    document["updated_at"] = now_iso()
+    atomic_write_text(recovery_mode_path(config), json.dumps(document, indent=2, sort_keys=True) + "\n")
+    return document
+
+
+def recovery_mode_status(config: dict[str, Any]) -> dict[str, Any]:
+    document = recovery_mode_document(config)
+    if document is None:
+        return {
+            "active": False,
+            "paused": False,
+            "phase": "inactive",
+            "locked": False,
+            "draining": False,
+            "instructions": "Enter Recovery Mode before using Dropbox Rewind.",
+        }
+    draining = recovery_operation_draining(config) if str(document.get("phase") or "") == "entering" else recovery_barrier_draining(config)
+    stored_phase = str(document.get("phase") or "locked")
+    phase = "entering" if draining else "locked" if stored_phase == "entering" else stored_phase
+    return {
+        **document,
+        "active": True,
+        "paused": True,
+        "phase": phase,
+        "locked": not draining,
+        "draining": draining,
+        "mode_path": str(recovery_mode_path(config)),
+        "instructions": "Recovery Mode blocks every outbound backup until the guarded workflow verifies current local and Dropbox state.",
+    }
+
+
+def enter_recovery_mode(config: dict[str, Any], folder_id: str, destination: str | None = None) -> dict[str, Any]:
+    if recovery_is_paused(config):
+        raise TransferError("Recovery Mode is already active; finish or explicitly force-exit the existing recovery")
+    folder = local_folder_by_id(config, folder_id)
+    folder_cfg = folder_config(config, folder)
+    local_root = Path(str(folder_cfg["local_path"])).expanduser().resolve(strict=False)
+    restore_path = validate_recovery_destination(config, Path(destination)) if destination else default_recovery_destination(config, local_root)
+    if restore_path.exists():
+        try:
+            next(restore_path.iterdir())
+        except StopIteration:
+            pass
+        else:
+            raise TransferError(f"Recovery destination must be new or empty: {restore_path}")
+    document = {
+        "schema_version": 2,
+        "active": True,
+        "phase": "entering",
+        "entered_at": now_iso(),
+        "target": {
+            "profile_id": str(folder_cfg["profile_id"]),
+            "folder_id": str(folder["id"]),
+            "label": str(folder.get("label") or folder["id"]),
+            "local_path": str(folder_cfg["local_path"]),
+            "remote_root": str(folder_cfg["remote_root"]),
+            "filter_fingerprint": effective_filter_fingerprint(folder_cfg),
+        },
+        "destination": str(restore_path),
+    }
+    _write_recovery_mode(config, document)
+    record_event(config, "recovery.mode_entered", component="recovery", data={"target": document["target"], "destination": str(restore_path)})
+    return recovery_mode_status(config)
+
+
+def _require_recovery_phase(config: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    document = recovery_mode_document(config)
+    if document is None:
+        raise TransferError("Recovery Mode is not active")
+    status = recovery_mode_status(config)
+    if status["draining"]:
+        raise TransferError("The current outbound folder operation is still finishing; wait until Recovery Mode is locked")
+    phase = str(status["phase"])
+    if phase not in allowed:
+        raise TransferError(f"Recovery action is not allowed during phase '{phase}'")
+    return document
+
+
+def mark_recovery_rewind_complete(config: dict[str, Any]) -> dict[str, Any]:
+    document = _require_recovery_phase(config, {"locked"})
+    document["phase"] = "rewound"
+    document["rewind_completed_at"] = now_iso()
+    _write_recovery_mode(config, document)
+    record_event(config, "recovery.rewind_confirmed", component="recovery", data={"target": document.get("target")})
+    return recovery_mode_status(config)
+
+
+def _filtered_remote_inventory(config: dict[str, Any], remote_root: str) -> dict[str, dict[str, Any]]:
+    result = rclone_capture(config, ["lsjson", remote_root, "--recursive", "--hash", *filter_args(config)])
+    if result.returncode != 0:
+        raise TransferError((result.stdout or "remote inventory failed").strip())
+    return parse_rclone_inventory(result.stdout or "[]")
+
+
+def _filtered_local_inventory(config: dict[str, Any], local_root: Path) -> dict[str, dict[str, Any]]:
+    result = rclone_capture(config, ["lsjson", str(local_root), "--recursive", *filter_args(config)])
+    if result.returncode != 0:
+        raise TransferError((result.stdout or "local inventory failed").strip())
+    inventory = parse_rclone_inventory(result.stdout or "[]")
+    for relative, entry in inventory.items():
+        if entry.get("type") == "file":
+            entry.setdefault("hashes", {})["dropboxhash"] = dropbox_content_hash(local_root / relative)
+    return inventory
+
+
+def export_rewound_folder(config: dict[str, Any]) -> dict[str, Any]:
+    document = _require_recovery_phase(config, {"rewound", "export_failed", "exporting"})
+    folder_cfg, _folder = _recovery_target(config, document)
+    destination = validate_recovery_destination(config, Path(str(document["destination"])))
+    if destination.exists() and str(document.get("phase")) == "rewound":
+        try:
+            next(destination.iterdir())
+        except StopIteration:
+            pass
+        else:
+            raise TransferError(f"Recovery destination is no longer empty: {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    document["phase"] = "exporting"
+    document["export_started_at"] = now_iso()
+    _write_recovery_mode(config, document)
+    before = _filtered_remote_inventory(folder_cfg, str(folder_cfg["remote_root"]))
+    operation_id = new_operation_id("recovery-export")
+    code = run_command(
+        {**folder_cfg, "_operation_id": operation_id},
+        copy_cmd(folder_cfg, str(folder_cfg["remote_root"]), str(destination), False),
+    )
+    if code != 0:
+        document["phase"] = "export_failed"
+        document["last_error"] = f"rclone exit {code}"
+        _write_recovery_mode(config, document)
+        raise TransferError(f"Historical folder export failed with rclone exit {code}; partial staging remains isolated and can be retried")
+    after = _filtered_remote_inventory(folder_cfg, str(folder_cfg["remote_root"]))
+    staged = local_inventory(destination, include_hashes=True, missing_ok=False)
+    if not inventories_equal(before, after) or not inventories_equal(staged, after):
+        document["phase"] = "export_failed"
+        document["last_error"] = "Dropbox changed during export or the staged copy did not verify"
+        _write_recovery_mode(config, document)
+        raise TransferError("Dropbox changed during export or the staged copy did not verify; wait for Rewind to finish and retry")
+    document["phase"] = "exported"
+    document["export_completed_at"] = now_iso()
+    document["export_entry_count"] = len(staged)
+    document["export_byte_count"] = sum(
+        max(0, int(entry.get("size") or 0)) for entry in staged.values() if entry.get("type") == "file"
+    )
+    document.pop("last_error", None)
+    target = document.get("target") if isinstance(document.get("target"), dict) else {}
+    _remember_recovery_download(
+        config,
+        {
+            "id": operation_id,
+            "kind": "historical_recovery_copy",
+            "profile_id": target.get("profile_id"),
+            "folder_id": target.get("folder_id"),
+            "folder_label": target.get("label"),
+            "remote_root": target.get("remote_root"),
+            "destination": str(destination),
+            "created_at": document.get("export_started_at"),
+            "completed_at": document.get("export_completed_at"),
+            "entry_count": document.get("export_entry_count"),
+            "byte_count": document.get("export_byte_count"),
+            "operation_id": operation_id,
+        },
+    )
+    _write_recovery_mode(config, document)
+    record_event(
+        config,
+        "recovery.export_verified",
+        component="recovery",
+        data={
+            "destination": str(destination),
+            "entry_count": len(staged),
+            "byte_count": document.get("export_byte_count"),
+        },
+        correlation={"operation_id": operation_id, "folder_id": folder_cfg.get("folder_id")},
+    )
+    return recovery_mode_status(config)
+
+
+def mark_recovery_undo_complete(config: dict[str, Any]) -> dict[str, Any]:
+    document = _require_recovery_phase(config, {"exported", "undo_complete", "verification_failed"})
+    document["phase"] = "undo_complete"
+    document["undo_rewind_completed_at"] = now_iso()
+    document.pop("last_error", None)
+    _write_recovery_mode(config, document)
+    record_event(config, "recovery.undo_rewind_confirmed", component="recovery", data={"target": document.get("target")})
+    return recovery_mode_status(config)
+
+
+def verify_recovery_current_state(config: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    document = _require_recovery_phase(config, {"undo_complete", "verification_failed", "verified"})
+    equal, verification = _live_recovery_equality(config, document)
+    document["verification"] = verification
+    document["phase"] = "verified" if equal else "verification_failed"
+    if equal:
+        document.pop("last_error", None)
+    else:
+        document["last_error"] = "Current Dropbox folder does not yet match the watched local folder"
+    _write_recovery_mode(config, document)
+    record_event(
+        config,
+        "recovery.verification_passed" if equal else "recovery.verification_failed",
+        component="recovery",
+        severity="info" if equal else "warning",
+        data=document["verification"],
+    )
+    return equal, recovery_mode_status(config)
+
+
+def _live_recovery_equality(config: dict[str, Any], document: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    folder_cfg, _folder = _recovery_target(config, document)
+    if effective_filter_fingerprint(folder_cfg) != str((document.get("target") or {}).get("filter_fingerprint")):
+        raise TransferError("The folder filter changed during Recovery Mode; restore the original filter before verification")
+    remote_before = _filtered_remote_inventory(folder_cfg, str(folder_cfg["remote_root"]))
+    local = _filtered_local_inventory(folder_cfg, Path(str(folder_cfg["local_path"])).expanduser())
+    remote_after = _filtered_remote_inventory(folder_cfg, str(folder_cfg["remote_root"]))
+    comparison = compare_inventories(local, remote_after)
+    equal = inventories_equal(remote_before, remote_after) and inventories_equal(local, remote_after)
+    return equal, {
+        "checked_at": now_iso(),
+        "equal": equal,
+        "remote_stable": inventories_equal(remote_before, remote_after),
+        "counts": comparison.get("counts") or {},
+        "local_entries": len(local),
+        "remote_entries": len(remote_after),
+    }
+
+
+def _notify_recovery_mode(config: dict[str, Any], active: bool) -> dict[str, Any]:
+    try:
+        return daemon_api(config, "recovery_pause" if active else "recovery_resume")
+    except OSError:
+        return {"ok": True, "daemon_running": False}
+
+
+def clear_legacy_recovery_pause(config: dict[str, Any]) -> dict[str, Any]:
+    """Remove only the pre-Recovery-Mode pause marker after explicit consent."""
+    mode_path = recovery_mode_path(config)
+    legacy_path = recovery_pause_path(config)
+    if mode_path.exists():
+        raise TransferError("A guided or damaged Recovery Mode state exists; Clear Old Pause cannot unlock it")
+    if not legacy_path.exists():
+        raise TransferError("No old recovery pause exists")
+
+    try:
+        legacy_contents = legacy_path.read_text()
+    except OSError as exc:
+        raise TransferError(f"Could not safely read the old recovery pause: {exc}") from exc
+
+    barrier = recovery_barrier_path(config)
+    barrier.parent.mkdir(parents=True, exist_ok=True)
+    with barrier.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        # Recheck after taking the machine-wide backup barrier so a newer
+        # Recovery Mode transaction can never be mistaken for legacy state.
+        if mode_path.exists() or not legacy_path.exists():
+            raise TransferError("Recovery state changed; refresh the page before clearing the old pause")
+        legacy_path.unlink()
+        response = _notify_recovery_mode(config, False)
+        if not response.get("ok"):
+            atomic_write_text(legacy_path, legacy_contents)
+            raise TransferError(str(response.get("error") or "could not notify daemon; old recovery pause was restored"))
+
+    record_event(
+        config,
+        "recovery.legacy_pause_cleared",
+        component="recovery",
+        severity="warning",
+        data={"daemon_running": response.get("daemon_running", True)},
+    )
+    return recovery_mode_status(config)
+
+
+def save_remote_copy_before_cancel(config: dict[str, Any]) -> dict[str, Any]:
+    """Download and verify the current Dropbox folder without unlocking recovery."""
+    document = recovery_mode_document(config)
+    if document is None:
+        raise TransferError("Recovery Mode is not active")
+    phase = str(document.get("phase") or "")
+    if int(document.get("schema_version") or 0) < 2 or phase in {"legacy_locked", "invalid_locked"}:
+        raise TransferError("A Dropbox safety copy requires a valid guided Recovery Mode transaction")
+
+    barrier = recovery_barrier_path(config)
+    barrier.parent.mkdir(parents=True, exist_ok=True)
+    with barrier.open("a+b") as handle:
+        # Keep outbound work excluded and prevent another recovery mutation
+        # while proving that Dropbox remained stable for the whole download.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        document = recovery_mode_document(config)
+        if document is None or int(document.get("schema_version") or 0) < 2:
+            raise TransferError("Recovery state changed; refresh before saving the Dropbox copy")
+        folder_cfg, _folder = _recovery_target(config, document)
+        if effective_filter_fingerprint(folder_cfg) != str((document.get("target") or {}).get("filter_fingerprint")):
+            raise TransferError("The folder filter changed during Recovery Mode; restore it before saving Dropbox")
+
+        existing = document.get("cancel_remote_copy") if isinstance(document.get("cancel_remote_copy"), dict) else {}
+        existing_destination = str(existing.get("destination") or "")
+        if existing.get("status") == "verified" and existing_destination:
+            destination = validate_recovery_destination(config, Path(existing_destination))
+            if destination.is_dir():
+                return recovery_mode_status(config)
+
+        local_root = Path(str(folder_cfg["local_path"])).expanduser().resolve(strict=False)
+        destination_text = str(existing.get("destination") or "")
+        destination = (
+            validate_recovery_destination(config, Path(destination_text))
+            if destination_text
+            else default_cancel_remote_copy_destination(config, local_root)
+        )
+        destination.mkdir(parents=True, exist_ok=True)
+        copy_state = {
+            **existing,
+            "status": "exporting",
+            "destination": str(destination),
+            "started_at": now_iso(),
+        }
+        copy_state.pop("last_error", None)
+        document["cancel_remote_copy"] = copy_state
+        _write_recovery_mode(config, document)
+        record_event(
+            config,
+            "recovery.cancel_remote_copy_started",
+            component="recovery",
+            data={"target": document.get("target"), "destination": str(destination)},
+        )
+
+        try:
+            before = _filtered_remote_inventory(folder_cfg, str(folder_cfg["remote_root"]))
+            remote_bytes = sum(
+                max(0, int(entry.get("size") or 0))
+                for entry in before.values()
+                if entry.get("type") == "file"
+            )
+            free_bytes = shutil.disk_usage(destination).free
+            reserve_bytes = 512 * 1024 * 1024
+            if remote_bytes > max(0, free_bytes - reserve_bytes):
+                raise TransferError(
+                    "Not enough free disk space for the Dropbox safety copy "
+                    f"({remote_bytes} bytes required; {free_bytes} bytes available with a {reserve_bytes}-byte safety reserve)"
+                )
+            operation_id = new_operation_id("recovery-cancel-export")
+            operation_cfg = {**folder_cfg, "_operation_id": operation_id}
+            command = copy_cmd(
+                operation_cfg,
+                str(folder_cfg["remote_root"]),
+                str(destination),
+                False,
+                exact=True,
+            )
+            # The destination is a dedicated generated recovery directory.
+            # Exact mirroring makes an interrupted/retried export converge
+            # instead of retaining paths that disappeared remotely meanwhile.
+            command.append("--ignore-times")
+            code = _run_command_unlocked(operation_cfg, command)
+            if code != 0:
+                raise TransferError(f"Dropbox safety copy failed with rclone exit {code}")
+            after = _filtered_remote_inventory(folder_cfg, str(folder_cfg["remote_root"]))
+            staged = local_inventory(destination, include_hashes=True, missing_ok=False)
+            if not inventories_equal(before, after):
+                raise TransferError("Dropbox changed while its safety copy was downloading; retry when it is stable")
+            if not inventories_equal(staged, after):
+                raise TransferError("The downloaded Dropbox safety copy did not pass content verification")
+
+            copy_state.update(
+                {
+                    "status": "verified",
+                    "completed_at": now_iso(),
+                    "entry_count": len(staged),
+                    "byte_count": remote_bytes,
+                    "operation_id": operation_id,
+                }
+            )
+            copy_state.pop("last_error", None)
+            document["cancel_remote_copy"] = copy_state
+            target = document.get("target") if isinstance(document.get("target"), dict) else {}
+            _remember_recovery_download(
+                config,
+                {
+                    "id": operation_id,
+                    "kind": "dropbox_safety_copy",
+                    "profile_id": target.get("profile_id"),
+                    "folder_id": target.get("folder_id"),
+                    "folder_label": target.get("label"),
+                    "remote_root": target.get("remote_root"),
+                    "destination": str(destination),
+                    "created_at": copy_state.get("started_at"),
+                    "completed_at": copy_state.get("completed_at"),
+                    "entry_count": copy_state.get("entry_count"),
+                    "byte_count": copy_state.get("byte_count"),
+                    "operation_id": operation_id,
+                },
+            )
+            _write_recovery_mode(config, document)
+            record_event(
+                config,
+                "recovery.cancel_remote_copy_verified",
+                component="recovery",
+                data={"destination": str(destination), "entry_count": len(staged), "byte_count": remote_bytes},
+                correlation={"operation_id": operation_id, "folder_id": folder_cfg.get("folder_id")},
+            )
+        except BaseException as exc:
+            document = recovery_mode_document(config) or document
+            copy_state = document.get("cancel_remote_copy") if isinstance(document.get("cancel_remote_copy"), dict) else copy_state
+            copy_state = {**copy_state, "status": "failed", "last_error": str(exc), "failed_at": now_iso()}
+            document["cancel_remote_copy"] = copy_state
+            _write_recovery_mode(config, document)
+            record_event(
+                config,
+                "recovery.cancel_remote_copy_failed",
+                component="recovery",
+                severity="error",
+                data={"error": str(exc), "destination": str(destination)},
+            )
+            raise
+
+    return recovery_mode_status(config)
+
+
+def cancel_recovery_mode(config: dict[str, Any]) -> dict[str, Any]:
+    """Safely abandon guided recovery, reconciling Dropbox from local if needed."""
+    document = recovery_mode_document(config)
+    if document is None:
+        raise TransferError("Recovery Mode is not active")
+    phase = str(document.get("phase") or "")
+    if int(document.get("schema_version") or 0) < 2 or phase in {"legacy_locked", "invalid_locked"}:
+        raise TransferError("Cancel Recovery is available only for a valid guided Recovery Mode transaction")
+
+    barrier = recovery_barrier_path(config)
+    barrier.parent.mkdir(parents=True, exist_ok=True)
+    reconciled = False
+    verification: dict[str, Any] = {}
+    saved_remote_copy: dict[str, Any] = {}
+    with barrier.open("a+b") as handle:
+        # Cancellation is a guarded outbound transaction. Normal backups stay
+        # outside this exclusive barrier through verification and unlock.
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        document = recovery_mode_document(config)
+        if document is None or int(document.get("schema_version") or 0) < 2:
+            raise TransferError("Recovery state changed; refresh before cancelling")
+        folder_cfg, _folder = _recovery_target(config, document)
+        saved_remote_copy = dict(document.get("cancel_remote_copy") or {}) if isinstance(document.get("cancel_remote_copy"), dict) else {}
+        document["phase"] = "cancel_checking"
+        document["cancel_started_at"] = now_iso()
+        document.pop("last_error", None)
+        _write_recovery_mode(config, document)
+        record_event(
+            config,
+            "recovery.cancel_started",
+            component="recovery",
+            severity="warning",
+            data={"target": document.get("target")},
+        )
+        try:
+            equal, verification = _live_recovery_equality(config, document)
+            if not equal:
+                document["phase"] = "canceling"
+                document["cancel_requires_reconcile"] = True
+                document["verification"] = verification
+                _write_recovery_mode(config, document)
+                preflight(folder_cfg)
+                report_path = backup_report_path(folder_cfg)
+                operation_id = new_operation_id("recovery-cancel")
+                operation_cfg = {**folder_cfg, "_operation_id": operation_id}
+                command = backup_cmd(operation_cfg, False, report_path)
+                # A Dropbox Rewind can restore older contents while retaining
+                # the same path, size, and modification time. Normal rclone
+                # comparison may then skip the file. Cancellation must compare
+                # the shared Dropbox content hash so verification can converge.
+                command.append("--checksum")
+                code = _run_command_unlocked(operation_cfg, command)
+                counts = record_backup_report(folder_cfg, report_path, operation_id, dry_run=False)
+                if code != 0:
+                    raise TransferError(f"Cancel reconciliation failed with rclone exit {code}")
+                reconciled = True
+                equal, verification = _live_recovery_equality(config, document)
+                if not equal:
+                    raise TransferError("Dropbox still differs from local after cancel reconciliation")
+                record_event(
+                    config,
+                    "recovery.cancel_reconciled",
+                    component="recovery",
+                    severity="warning",
+                    data={"counts": counts, "target": document.get("target")},
+                    correlation={"operation_id": operation_id, "folder_id": folder_cfg.get("folder_id")},
+                )
+
+            document["phase"] = "cancel_verified"
+            document["verification"] = verification
+            document["cancel_reconciled_remote"] = reconciled
+            document["cancel_verified_at"] = now_iso()
+            _write_recovery_mode(config, document)
+            recovery_mode_path(config).unlink(missing_ok=True)
+            recovery_pause_path(config).unlink(missing_ok=True)
+            response = _notify_recovery_mode(config, False)
+            if not response.get("ok"):
+                _write_recovery_mode(config, document)
+                raise TransferError(str(response.get("error") or "could not notify daemon; Recovery Mode remains locked"))
+        except BaseException as exc:
+            # Fail closed, including after a partial provider write.
+            if not recovery_mode_path(config).exists():
+                _write_recovery_mode(config, document)
+            document = recovery_mode_document(config) or document
+            document["phase"] = "cancel_failed"
+            document["last_error"] = str(exc)
+            document["verification"] = verification
+            _write_recovery_mode(config, document)
+            record_event(
+                config,
+                "recovery.cancel_failed",
+                component="recovery",
+                severity="error",
+                data={"error": str(exc), "reconciled_remote": reconciled},
+            )
+            raise
+
+    record_event(
+        config,
+        "recovery.cancelled",
+        component="recovery",
+        severity="warning",
+        data={
+            "reconciled_remote": reconciled,
+            "verification": verification,
+            "saved_remote_copy": {
+                "status": saved_remote_copy.get("status"),
+                "destination": saved_remote_copy.get("destination"),
+                "entry_count": saved_remote_copy.get("entry_count"),
+                "byte_count": saved_remote_copy.get("byte_count"),
+            }
+            if saved_remote_copy
+            else None,
+        },
+    )
+    return {
+        **recovery_mode_status(config),
+        "cancelled": True,
+        "remote_reconciled": reconciled,
+        "cancel_remote_copy": saved_remote_copy,
+        "verification": verification,
+    }
+
+
+def exit_recovery_mode(config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    document = recovery_mode_document(config)
+    if document is None:
+        raise TransferError("Recovery Mode is not active")
+    if not force:
+        if str(recovery_mode_status(config)["phase"]) != "verified":
+            raise TransferError("Recovery Mode can exit only after current Dropbox and local state verify equal")
+        equal, status = verify_recovery_current_state(config)
+        if not equal:
+            raise TransferError(f"Final verification failed; Recovery Mode remains locked: {status.get('verification')}")
+    barrier = recovery_barrier_path(config)
+    barrier.parent.mkdir(parents=True, exist_ok=True)
+    with barrier.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if not force:
+            document = recovery_mode_document(config) or document
+            equal, verification = _live_recovery_equality(config, document)
+            if not equal:
+                document["phase"] = "verification_failed"
+                document["verification"] = verification
+                document["last_error"] = "Current Dropbox folder changed before Recovery Mode could exit"
+                _write_recovery_mode(config, document)
+                raise TransferError("Final verification failed; Recovery Mode remains locked")
+        recovery_mode_path(config).unlink(missing_ok=True)
+        recovery_pause_path(config).unlink(missing_ok=True)
+        response = _notify_recovery_mode(config, False)
+        if not response.get("ok"):
+            _write_recovery_mode(config, document)
+            raise TransferError(str(response.get("error") or "could not notify daemon; Recovery Mode remains locked"))
+    record_event(config, "recovery.mode_force_exited" if force else "recovery.mode_exited", component="recovery", severity="warning" if force else "info", data={"force": force})
+    return recovery_mode_status(config)
 
 
 def set_recovery_paused(config: dict[str, Any], paused: bool, *, actor: str = "cli") -> dict[str, Any]:
+    """Compatibility helper for older tests/callers; guided UI uses Recovery Mode."""
     path = recovery_pause_path(config)
     if paused:
         document = {
@@ -4966,14 +5930,7 @@ def publish_generation(
         if canonical_supplied == canonical_pending:
             return 0
 
-    latest_local_path = generation_local_dir(config) / "latest.json"
-    has_snapshot_baseline = False
-    try:
-        latest_local = json.loads(latest_local_path.read_text())
-        has_snapshot_baseline = isinstance(latest_local.get("snapshot"), dict)
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-    if not supplied_changes and (has_snapshot_baseline or not config.get("remote_root")):
+    if not supplied_changes:
         record_event(
             cfg,
             "generation.skipped",
@@ -5014,20 +5971,6 @@ def publish_generation(
             correlation={"operation_id": operation_id, "folder_id": folder_id},
         )
         return int(previous.returncode or 1)
-    snapshot: dict[str, Any] | None = None
-    try:
-        snapshot = capture_recovery_snapshot(config) if config.get("remote_root") else None
-    except DropboxHistoryError as exc:
-        record_event(
-            cfg,
-            "generation.snapshot_unavailable",
-            component="generation",
-            severity="warning",
-            data={"error": str(exc)},
-            correlation={"operation_id": operation_id, "folder_id": folder_id},
-        )
-    if snapshot is not None:
-        snapshot = compact_recovery_snapshot(config, folder_id, parent_generation, snapshot)
     record = generation_record(
         machine_id=str(cfg["machine_id"]),
         install_id=str(cfg["install_id"]),
@@ -5036,7 +5979,6 @@ def publish_generation(
         filter_policy=effective_filter_fingerprint(config),
         changes=supplied_changes,
         parent_generation=parent_generation,
-        snapshot=snapshot,
     )
     correlation = {
         "operation_id": operation_id,
@@ -5532,91 +6474,80 @@ def cmd_links(args: argparse.Namespace) -> int:
 
 def cmd_recovery(args: argparse.Namespace) -> int:
     config = normalized_config(load_config(Path(args.config).expanduser()))
+    if args.recovery_cmd == "downloads":
+        print(json.dumps(recovery_downloads(config), indent=2, sort_keys=True))
+        return 0
+    if args.recovery_cmd == "remove-download":
+        remove_all = bool(args.all)
+        expected = "DELETE-ALL-LOCAL-RECOVERY-COPIES" if remove_all else "DELETE-LOCAL-RECOVERY-COPY"
+        if args.confirm != expected:
+            raise SystemExit(f"remove-download requires --confirm {expected}")
+        value = remove_recovery_downloads(config, download_id=args.download_id, remove_all=remove_all)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0
     if args.recovery_cmd == "status":
         daemon_status: dict[str, Any] | None = None
         try:
             daemon_status = dict(daemon_api(config, "status").get("status") or {})
         except OSError:
             pass
-        value = {
-            "paused": recovery_is_paused(config),
-            "pause_path": str(recovery_pause_path(config)),
-            "daemon_state": (daemon_status or {}).get("state"),
-            "active_operation": (daemon_status or {}).get("last_command"),
-            "instructions": "Keep backup paused until restored Dropbox content is reconciled into the local source.",
-        }
+        value = recovery_mode_status(config)
+        daemon_state = str((daemon_status or {}).get("state") or "")
+        if value.get("active") and value.get("phase") == "entering" and daemon_state in {"syncing", "transferring", "publishing", "staging", "applying"}:
+            value["draining"] = True
+            value["locked"] = False
+        value["daemon_state"] = daemon_state or None
+        value["active_operation"] = (daemon_status or {}).get("last_command")
         print(json.dumps(value, indent=2, sort_keys=True))
         return 0
 
-    if args.recovery_cmd in {"pause", "resume"}:
-        paused = args.recovery_cmd == "pause"
-        document = set_recovery_paused(config, paused)
-        try:
-            response = daemon_api(config, "recovery_pause" if paused else "recovery_resume")
-        except OSError:
-            response = {"ok": True, "daemon_running": False}
+    if args.recovery_cmd == "enter":
+        value = enter_recovery_mode(config, args.folder, args.destination)
+        response = _notify_recovery_mode(config, True)
         if not response.get("ok"):
-            if paused:
-                # The durable marker remains the safer state if notification
-                # fails; the daemon observes it on its next loop/restart.
-                raise SystemExit(str(response.get("error") or "could not notify daemon of recovery pause"))
-            set_recovery_paused(config, True, actor="resume-notification-failed")
-            raise SystemExit(str(response.get("error") or "could not notify daemon of recovery resume"))
+            raise SystemExit(str(response.get("error") or "could not notify daemon; Recovery Mode remains safely locked"))
         status = response.get("status") if isinstance(response.get("status"), dict) else {}
-        value = {
-            **document,
-            "daemon_running": response.get("daemon_running", True),
-            "daemon_state": status.get("state"),
-            "current_operation_finishes_before_pause": paused and status.get("state") in {"syncing", "transferring", "staging", "applying"},
-        }
+        value["daemon_running"] = response.get("daemon_running", True)
+        value["daemon_state"] = status.get("state")
+        value["current_operation_finishes_before_lock"] = status.get("state") in {"syncing", "transferring", "publishing", "staging", "applying"}
         print(json.dumps(value, indent=2, sort_keys=True))
         return 0
 
-    if args.recovery_cmd == "recent":
-        value = recent_recovery_changes(config, args.folder, limit=args.limit, paths_per_cycle=args.paths_per_cycle)
-        print(json.dumps(value, indent=2, sort_keys=True))
-        return 0
-
-    if args.recovery_cmd == "snapshot":
-        payload = {"folder": args.folder, "generation": args.generation}
-        try:
-            response = daemon_api(config, "recovery_snapshot_stage", _timeout_seconds=7200, **payload)
-            if not response.get("ok"):
-                raise SystemExit(str(response.get("error") or "historical folder staging failed"))
-            value = response.get("snapshot")
-        except OSError:
-            with Lock(lock_file(config)):
-                value = create_recovery_snapshot(config, args.folder, args.generation)
-        print(json.dumps(value, indent=2, sort_keys=True))
-        return 0
-
-    payload = {"folder": args.folder, "path": args.path}
-    if args.recovery_cmd == "revisions":
-        payload["limit"] = args.limit
-        try:
-            response = daemon_api(config, "recovery_revisions", _timeout_seconds=610, **payload)
-            if not response.get("ok"):
-                raise SystemExit(str(response.get("error") or "Dropbox revision lookup failed"))
-            value = response.get("history")
-        except OSError:
-            with Lock(lock_file(config)):
-                value = recovery_revisions(config, args.folder, args.path, args.limit)
-        print(json.dumps(value, indent=2, sort_keys=True))
-        return 0
-
-    if args.recovery_cmd == "stage":
-        payload["revision"] = args.revision
-        try:
-            response = daemon_api(config, "recovery_stage", _timeout_seconds=610, **payload)
-            if not response.get("ok"):
-                raise SystemExit(str(response.get("error") or "Dropbox revision staging failed"))
-            value = response.get("job")
-        except OSError:
-            with Lock(lock_file(config)):
-                value = create_recovery_job(config, args.folder, args.path, args.revision)
-        print(json.dumps(value, indent=2, sort_keys=True))
-        return 0
-    raise SystemExit(f"Unknown recovery command: {args.recovery_cmd}")
+    if args.recovery_cmd == "mark-rewound":
+        value = mark_recovery_rewind_complete(config)
+    elif args.recovery_cmd == "clear-legacy":
+        if args.confirm != "CLEAR-OLD-PAUSE":
+            raise SystemExit("clear-legacy requires --confirm CLEAR-OLD-PAUSE")
+        value = clear_legacy_recovery_pause(config)
+    elif args.recovery_cmd == "cancel":
+        if args.confirm != "REPLACE-DROPBOX-WITH-LOCAL":
+            raise SystemExit("cancel requires --confirm REPLACE-DROPBOX-WITH-LOCAL")
+        with redirect_stdout(sys.stderr):
+            value = cancel_recovery_mode(config)
+    elif args.recovery_cmd == "save-remote-copy":
+        # The copy may be long-running; keep stdout as a single JSON response
+        # for the desktop bridge and send rclone progress to stderr.
+        with redirect_stdout(sys.stderr):
+            value = save_remote_copy_before_cancel(config)
+    elif args.recovery_cmd == "export":
+        # Keep stdout machine-readable for the desktop bridge while preserving
+        # rclone's long-running progress and diagnostics on the terminal.
+        with redirect_stdout(sys.stderr):
+            value = export_rewound_folder(config)
+    elif args.recovery_cmd == "mark-undo-complete":
+        value = mark_recovery_undo_complete(config)
+    elif args.recovery_cmd == "verify":
+        _equal, value = verify_recovery_current_state(config)
+    elif args.recovery_cmd == "exit":
+        value = exit_recovery_mode(config)
+    elif args.recovery_cmd == "force-exit":
+        if args.confirm != "FORCE-UNLOCK-RECOVERY":
+            raise SystemExit("force-exit requires --confirm FORCE-UNLOCK-RECOVERY")
+        value = exit_recovery_mode(config, force=True)
+    else:
+        raise SystemExit(f"Unknown recovery command: {args.recovery_cmd}")
+    print(json.dumps(value, indent=2, sort_keys=True))
+    return 0
 
 
 def cmd_registry(args: argparse.Namespace) -> int:
@@ -5810,30 +6741,40 @@ def parser() -> argparse.ArgumentParser:
     links_remove.add_argument("link_id")
     links_remove.set_defaults(func=cmd_links)
 
-    recovery = sub.add_parser("recovery", help="Pause backup and safely inspect/stage Dropbox file revisions")
+    recovery = sub.add_parser("recovery", help="Run guarded machine-wide recovery around Dropbox Rewind")
     recovery_sub = recovery.add_subparsers(dest="recovery_cmd", required=True)
-    recovery_sub.add_parser("status", help="Show whether outbound backup is paused for recovery").set_defaults(func=cmd_recovery)
-    recovery_sub.add_parser("pause", help="Durably pause new outbound backups before recovery").set_defaults(func=cmd_recovery)
-    recovery_sub.add_parser("resume", help="Resume backup after local/Dropbox reconciliation").set_defaults(func=cmd_recovery)
-    recovery_recent_cmd = recovery_sub.add_parser("recent", help="List recent backed-up path changes as an in-app recovery picker")
-    recovery_recent_cmd.add_argument("--folder", help="Restrict results to one configured folder id")
-    recovery_recent_cmd.add_argument("--limit", type=int, default=20, help="Maximum backup cycles to return (1-100)")
-    recovery_recent_cmd.add_argument("--paths-per-cycle", type=int, default=50, help="Maximum changed paths per cycle (1-200)")
-    recovery_recent_cmd.set_defaults(func=cmd_recovery)
-    recovery_snapshot_cmd = recovery_sub.add_parser("snapshot", help="Stage a complete historical folder snapshot for inspection")
-    recovery_snapshot_cmd.add_argument("folder", help="Local configured folder id")
-    recovery_snapshot_cmd.add_argument("generation", help="Backup cycle identity returned by recovery recent")
-    recovery_snapshot_cmd.set_defaults(func=cmd_recovery)
-    recovery_revisions_cmd = recovery_sub.add_parser("revisions", help="List Dropbox versions for one configured file path")
-    recovery_revisions_cmd.add_argument("folder", help="Local configured folder id")
-    recovery_revisions_cmd.add_argument("path", help="Relative file path inside the configured folder")
-    recovery_revisions_cmd.add_argument("--limit", type=int, default=30, help="Maximum revisions to return (1-100)")
-    recovery_revisions_cmd.set_defaults(func=cmd_recovery)
-    recovery_stage_cmd = recovery_sub.add_parser("stage", help="Download one immutable Dropbox revision into safe local staging")
-    recovery_stage_cmd.add_argument("folder", help="Local configured folder id")
-    recovery_stage_cmd.add_argument("path", help="Relative file path inside the configured folder")
-    recovery_stage_cmd.add_argument("revision", help="Dropbox revision identity returned by recovery revisions")
-    recovery_stage_cmd.set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("status", help="Show the durable Recovery Mode phase and guards").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("downloads", help="List verified local folders downloaded by Recovery Mode").set_defaults(func=cmd_recovery)
+    recovery_remove_download = recovery_sub.add_parser(
+        "remove-download",
+        help="Permanently delete a generated local recovery copy and remove its catalog record",
+    )
+    recovery_remove_download.add_argument("download_id", nargs="?", help="Recovery download id")
+    recovery_remove_download.add_argument("--all", action="store_true", help="Delete all generated local recovery copies")
+    recovery_remove_download.add_argument("--confirm", required=True, help="Explicit destructive confirmation token")
+    recovery_remove_download.set_defaults(func=cmd_recovery)
+    recovery_enter = recovery_sub.add_parser("enter", help="Lock all outbound backup and start guided recovery")
+    recovery_enter.add_argument("folder", help="Configured folder id to recover")
+    recovery_enter.add_argument("--destination", help="New/empty local export folder outside all watched folders")
+    recovery_enter.set_defaults(func=cmd_recovery)
+    recovery_clear_legacy = recovery_sub.add_parser("clear-legacy", help="Clear only an old-format pause when no recovery is in progress")
+    recovery_clear_legacy.add_argument("--confirm", required=True, help="Must be CLEAR-OLD-PAUSE")
+    recovery_clear_legacy.set_defaults(func=cmd_recovery)
+    recovery_cancel = recovery_sub.add_parser("cancel", help="Safely cancel recovery, reconciling Dropbox from local before unlock if needed")
+    recovery_cancel.add_argument("--confirm", required=True, help="Must be REPLACE-DROPBOX-WITH-LOCAL")
+    recovery_cancel.set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser(
+        "save-remote-copy",
+        help="Download and verify the current Dropbox folder before optional cancellation",
+    ).set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("mark-rewound", help="Confirm Dropbox finished the historical Rewind").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("export", help="Copy and verify the rewound remote folder into isolated local staging").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("mark-undo-complete", help="Confirm Dropbox finished undoing the Rewind").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("verify", help="Verify current Dropbox content equals the watched local folder").set_defaults(func=cmd_recovery)
+    recovery_sub.add_parser("exit", help="Exit Recovery Mode only after a fresh successful verification").set_defaults(func=cmd_recovery)
+    recovery_force = recovery_sub.add_parser("force-exit", help="Emergency unlock without verification (dangerous)")
+    recovery_force.add_argument("--confirm", required=True, help="Must be FORCE-UNLOCK-RECOVERY")
+    recovery_force.set_defaults(func=cmd_recovery)
 
     pull = sub.add_parser("pull", help="Compatibility alias that now creates a safe staged receive job")
     pull.add_argument("source", help="Full rclone source path, e.g. dropbox:computer-backups/test/linux/test_sync/data")

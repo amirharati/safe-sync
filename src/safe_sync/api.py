@@ -46,6 +46,28 @@ class DaemonApiState:
                 self._backup_requested = False
         self.wake()
 
+    def resume_recovery_and_request_backup(self) -> dict[str, Any]:
+        """Unlock recovery and publish an immediate, truthful resume state."""
+        with self._lock:
+            self._recovery_paused = False
+            self._backup_requested = True
+            self._status.update(
+                {
+                    "state": "dirty",
+                    "recovery_paused": False,
+                    "recovery_resume_pending": True,
+                    "queued_backup": True,
+                    "sync_phase": "preparing",
+                    "current_file": None,
+                    "last_error": None,
+                    "note": "Recovery complete; preparing normal backup",
+                    "last_progress": "Recovery complete; normal backup is queued",
+                }
+            )
+            status = dict(self._status)
+        self.wake()
+        return status
+
     def recovery_paused(self) -> bool:
         with self._lock:
             return self._recovery_paused
@@ -182,7 +204,7 @@ class _DaemonApiHandler(socketserver.StreamRequestHandler):
                 response = {"ok": True, "status": self.server.api_state.snapshot()}
             elif command == "backup":
                 if self.server.api_state.recovery_paused():
-                    response = {"ok": False, "error": "backup is paused for recovery; resume recovery mode first"}
+                    response = {"ok": False, "error": "machine-wide Recovery Mode blocks outbound backup until guarded verification and exit"}
                 else:
                     self.server.api_state.request_backup()
                     response = {"ok": True, "queued": True}
@@ -190,39 +212,12 @@ class _DaemonApiHandler(socketserver.StreamRequestHandler):
                 self.server.api_state.set_recovery_paused(True)
                 response = {"ok": True, "paused": True, "status": self.server.api_state.snapshot()}
             elif command == "recovery_resume":
-                self.server.api_state.set_recovery_paused(False)
                 # Resume any durable backup queue immediately instead of
-                # waiting for the periodic fallback scan.
-                self.server.api_state.request_backup()
-                response = {"ok": True, "paused": False, "queued_backup": True, "status": self.server.api_state.snapshot()}
-            elif command in {"recovery_revisions", "recovery_stage", "recovery_snapshot_stage"}:
-                folder = str(request.get("folder") or "")
-                path = str(request.get("path") or "")
-                revision = str(request.get("revision") or "")
-                generation = str(request.get("generation") or "")
-                if not folder or (command != "recovery_snapshot_stage" and not path):
-                    response = {"ok": False, "error": "folder and relative file path are required"}
-                elif command == "recovery_stage" and not revision:
-                    response = {"ok": False, "error": "Dropbox revision identity is required"}
-                elif command == "recovery_snapshot_stage" and not generation:
-                    response = {"ok": False, "error": "backup cycle identity is required"}
-                else:
-                    ticket = self.server.api_state.request_query(
-                        command,
-                        {
-                            "folder": folder,
-                            "path": path,
-                            "revision": revision,
-                            "generation": generation,
-                            "limit": request.get("limit", 30),
-                        },
-                    )
-                    if ticket is None:
-                        response = {"ok": False, "error": "another remote query is already queued"}
-                    elif not ticket["event"].wait(600):
-                        response = {"ok": False, "error": "Dropbox recovery request timed out in the daemon work lane"}
-                    else:
-                        response = ticket["response"] or {"ok": False, "error": "Dropbox recovery produced no response"}
+                # waiting for the periodic fallback scan. Publish the
+                # transition atomically so the UI never continues to show the
+                # stale Recovery lock while the daemon loop wakes up.
+                status = self.server.api_state.resume_recovery_and_request_backup()
+                response = {"ok": True, "paused": False, "queued_backup": True, "status": status}
             elif command == "pull":
                 source = str(request.get("source") or "")
                 destination = str(request.get("destination") or "")

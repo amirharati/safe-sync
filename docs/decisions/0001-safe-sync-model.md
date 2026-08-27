@@ -56,8 +56,13 @@ Automatic live two-way sync is reserved only for small folders that truly need i
 - Do not delete files across computers automatically.
 - Automatic backup may mirror local deletes into that machine's remote backup.
   Safe Sync keeps no app-owned trash; Dropbox's plan-bounded version/deleted-file
-  history is the recovery payload. Recovery pauses outbound backup and stages a
-  selected immutable revision locally before any explicit replacement.
+  history and Rewind are the recovery authority. Machine-wide Recovery Mode
+  locks all outbound backup, opens the exact Dropbox folder, exports its
+  temporary rewound state into a separate verified local folder, guides the
+  undo-Rewind, and unlocks only after current Dropbox equals unchanged local.
+  Before explicitly cancelling into a local-to-remote replacement, the user
+  can create and inspect a separate verified local copy of the current remote
+  state; a failed copy leaves Recovery Mode locked.
 - Pull/copy operations do not delete destination files by default.
 - Conflicts produce renamed files rather than overwriting silently.
 - Rclone remains the sync/copy engine; Safe Sync only provides guardrails, status, registry, and workflow commands.

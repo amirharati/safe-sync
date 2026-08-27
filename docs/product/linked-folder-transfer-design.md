@@ -52,9 +52,9 @@ entry points for selective transfer, cloning, linked folders, and history.
 | Transfer | Download into verified staging on the destination filesystem. |
 | Apply | Move staged files into place; never download/copy directly over live files. |
 | Conflict | Keep local, keep both, replace selected, delete selected, or leave staged. No timestamp winner. |
-| Recovery | Use Dropbox revisions as historical payload; pause backup and stage locally before explicit apply. Preserve replaced local files only in the receive job's rollback checkpoint. |
+| Recovery | Enter machine-wide Recovery Mode, use Dropbox Rewind, export the temporary historical remote into a separate verified local folder, undo-Rewind, and verify current remote/local equality before unlock. |
 | Clone | Clone into a new/empty destination and create a new local ownership identity. |
-| History | Recover selected versions first; do not promise full time travel until generation/inventory gates pass. |
+| History | Dropbox owns retained history; Safe Sync keeps only the bounded state of an explicitly initiated recovery transaction. |
 
 ## Relationship to the Existing Backup Model
 
@@ -508,24 +508,21 @@ the peer reviews changes when it next runs.
 ### Dropbox-native history
 
 As accepted in `RECOVERY-001`, normal backup keeps no Safe Sync-owned remote
-trash or latest snapshot. Dropbox's plan-bounded versions and deleted-file
-history are the historical payload. Safe Sync generations and audit identify
-changed paths without duplicating file contents.
+trash or latest snapshot. Dropbox's plan-bounded versions, deleted-file history,
+and Rewind are the historical authority. Safe Sync generations and audit are
+operational/link evidence only and are not presented as recovery history.
 
-Selected recovery durably pauses outbound backup, lists revisions for one
-configured relative path, downloads the selected immutable revision into the
-existing excluded receive-job staging area, verifies the Dropbox content hash,
-and requires explicit Keep Both or Replace before local mutation. Broad Dropbox
-Rewind remains a website operation; Safe Sync stays paused until the rewound
-remote state is reconciled into the local source.
+Folder recovery enters a durable machine-wide Recovery Mode, opens the exact
+backup folder in Dropbox, copies the temporary rewound state into a separate
+verified local export, guides undo-Rewind, and unlocks only after current
+Dropbox equals the unchanged watched local folder. Dropbox Rewind remains a
+website operation because Dropbox exposes no public Rewind or Rewind-status API.
 
 ### Generation history
 
-Start publishing generation change records before depending on time travel.
-Reliable whole-folder reconstruction additionally requires proven periodic
-inventories/deltas, empty-directory semantics, complete generation ancestry,
-and retention rules. Until those gates pass, the UI must say "recover selected
-versions" rather than "restore the whole folder to this time."
+Generation change records currently support linked-folder notification and
+scope filtering only. They are not recovery snapshots and must not be expanded
+into a whole-folder reconstruction or time-travel system.
 
 ### Dropbox revisions
 
@@ -596,10 +593,12 @@ safe-sync links review <link-id>
 safe-sync links remove <link-id>
 
 safe-sync recovery status
-safe-sync recovery pause
-safe-sync recovery revisions <folder-id> <relative-path>
-safe-sync recovery stage <folder-id> <relative-path> <revision>
-safe-sync recovery resume
+safe-sync recovery enter <folder-id>
+safe-sync recovery mark-rewound
+safe-sync recovery export
+safe-sync recovery mark-undo-complete
+safe-sync recovery verify
+safe-sync recovery exit
 ```
 
 Commands should produce structured JSON internally and concise human output.
@@ -733,15 +732,16 @@ delete-versus-modify become visible conflicts; accepted changes do not loop.
 ### Phase 8: History and revision recovery
 
 - Keep no app-owned remote trash or snapshots.
-- Durably pause outbound backup while continuing to collect local watcher
-  changes.
-- List and download Dropbox revisions as the historical payload provider.
-- Hash-verify and compare in local receive-job staging; keep direct remote
-  restore/Rewind outside normal selected-file recovery.
+- Enter durable machine-wide Recovery Mode while continuing to collect local
+  watcher changes.
+- Open the exact Dropbox backup folder and guide the user through Rewind.
+- Export and verify the rewound remote into a new local folder outside watched
+  trees, guide undo-Rewind, then verify current remote equals local twice before
+  unlocking.
 
-**Gate:** recovery first stages the selected version, identifies its source and
-timestamp, compares it with current local data, and supports checkpointed apply
-and rollback.
+**Gate:** the app locks every backup path, opens the correct folder, guides both
+Rewinds, detects remote movement, produces a verified isolated export, survives
+restart in every phase, and cannot exit without fresh equality verification.
 
 ### Phase 9: Low-latency and retention polish
 

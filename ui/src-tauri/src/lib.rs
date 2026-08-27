@@ -217,6 +217,25 @@ fn dropbox_home_url(remote_root: &str) -> Result<String, String> {
     Ok(format!("https://www.dropbox.com/home/{encoded}"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::dropbox_home_url;
+
+    #[test]
+    fn dropbox_folder_url_targets_exact_encoded_backup_path() {
+        assert_eq!(
+            dropbox_home_url("dropbox:computer-backups/my mac/project #1").unwrap(),
+            "https://www.dropbox.com/home/computer-backups/my%20mac/project%20%231"
+        );
+    }
+
+    #[test]
+    fn dropbox_folder_url_rejects_non_dropbox_or_empty_paths() {
+        assert!(dropbox_home_url("s3:bucket/folder").is_err());
+        assert!(dropbox_home_url("dropbox:").is_err());
+    }
+}
+
 struct AppState {
     // Held until process exit. This is the final singleton guard if desktop D-Bus is unavailable.
     _ui_lock: Option<File>,
@@ -417,7 +436,7 @@ fn status_label(status: &SafeSyncStatus) -> String {
             Some("backoff") => "Safe Sync: Backoff".to_string(),
             Some("cooldown") => "Safe Sync: Cooling down".to_string(),
             Some("dirty") => "Safe Sync: Changes queued".to_string(),
-            Some("recovery_paused") => "Safe Sync: Recovery paused".to_string(),
+            Some("recovery_paused") => "Safe Sync: Recovery Mode locked".to_string(),
             Some("watching") => "Safe Sync: Watching".to_string(),
             Some(other) => format!("Safe Sync: Running ({other})"),
             None => "Safe Sync: Running".to_string(),
@@ -860,52 +879,63 @@ async fn get_recovery_status() -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn control_recovery(action: String) -> Result<Value, String> {
-    if !matches!(action.as_str(), "pause" | "resume") {
-        return Err("recovery action must be pause or resume".to_string());
-    }
-    let stdout = run_safe_sync_blocking(vec!["recovery".to_string(), action]).await?;
-    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery control returned invalid JSON: {err}"))
+async fn get_recovery_downloads() -> Result<Value, String> {
+    let stdout = run_safe_sync_blocking(vec!["recovery".to_string(), "downloads".to_string()]).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery downloads returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
-async fn get_recovery_recent(folder: Option<String>) -> Result<Value, String> {
-    let mut args = vec!["recovery".to_string(), "recent".to_string()];
-    if let Some(folder_id) = folder.filter(|value| !value.trim().is_empty()) {
-        args.extend(["--folder".to_string(), folder_id]);
+async fn remove_recovery_download(download_id: Option<String>, all: bool) -> Result<Value, String> {
+    let mut args = vec!["recovery".to_string(), "remove-download".to_string()];
+    if all {
+        args.extend([
+            "--all".to_string(),
+            "--confirm".to_string(),
+            "DELETE-ALL-LOCAL-RECOVERY-COPIES".to_string(),
+        ]);
+    } else {
+        let download_id = download_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "recovery download id is required".to_string())?;
+        args.extend([
+            download_id,
+            "--confirm".to_string(),
+            "DELETE-LOCAL-RECOVERY-COPY".to_string(),
+        ]);
     }
     let stdout = run_safe_sync_blocking(args).await?;
-    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery recent returned invalid JSON: {err}"))
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery remove-download returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
-async fn stage_recovery_snapshot(folder: String, generation: String) -> Result<Value, String> {
-    if folder.trim().is_empty() || generation.trim().is_empty() {
-        return Err("folder and backup cycle are required".to_string());
+async fn control_recovery(action: String, folder: Option<String>) -> Result<Value, String> {
+    let mut args = vec!["recovery".to_string()];
+    match action.as_str() {
+        "enter" => {
+            let folder = folder.filter(|value| !value.trim().is_empty()).ok_or_else(|| "folder is required to enter Recovery Mode".to_string())?;
+            args.extend(["enter".to_string(), folder]);
+        }
+        "mark-rewound" | "export" | "mark-undo-complete" | "verify" | "exit" | "save-remote-copy" => {
+            args.push(action);
+        }
+        "clear-legacy" => {
+            args.extend([
+                "clear-legacy".to_string(),
+                "--confirm".to_string(),
+                "CLEAR-OLD-PAUSE".to_string(),
+            ]);
+        }
+        "cancel" => {
+            args.extend([
+                "cancel".to_string(),
+                "--confirm".to_string(),
+                "REPLACE-DROPBOX-WITH-LOCAL".to_string(),
+            ]);
+        }
+        _ => return Err("invalid Recovery Mode action".to_string()),
     }
-    let stdout = run_safe_sync_blocking(vec![
-        "recovery".to_string(),
-        "snapshot".to_string(),
-        folder,
-        generation,
-    ])
-    .await?;
-    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery snapshot returned invalid JSON: {err}"))
-}
-
-#[tauri::command]
-async fn get_recovery_revisions(folder: String, path: String) -> Result<Value, String> {
-    if folder.trim().is_empty() || path.trim().is_empty() {
-        return Err("choose a local backup folder and enter a relative file path".to_string());
-    }
-    let stdout = run_safe_sync_blocking(vec![
-        "recovery".to_string(),
-        "revisions".to_string(),
-        folder,
-        path,
-    ])
-    .await?;
-    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery revisions returned invalid JSON: {err}"))
+    let stdout = run_safe_sync_blocking(args).await?;
+    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery control returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
@@ -956,22 +986,6 @@ async fn set_log_level(request: LogLevelRequest) -> Result<Value, String> {
 async fn sync_audit_logs() -> Result<Value, String> {
     let stdout = run_safe_sync_blocking(vec!["logs".to_string(), "sync".to_string()]).await?;
     serde_json::from_str(&stdout).map_err(|err| format!("safe-sync logs sync returned invalid JSON: {err}"))
-}
-
-#[tauri::command]
-async fn stage_recovery_revision(folder: String, path: String, revision: String) -> Result<Value, String> {
-    if folder.trim().is_empty() || path.trim().is_empty() || revision.trim().is_empty() {
-        return Err("folder, relative path, and Dropbox revision are required".to_string());
-    }
-    let stdout = run_safe_sync_blocking(vec![
-        "recovery".to_string(),
-        "stage".to_string(),
-        folder,
-        path,
-        revision,
-    ])
-    .await?;
-    serde_json::from_str(&stdout).map_err(|err| format!("safe-sync recovery stage returned invalid JSON: {err}"))
 }
 
 #[tauri::command]
@@ -1218,11 +1232,9 @@ pub fn run() {
             remove_link,
             review_link,
             get_recovery_status,
+            get_recovery_downloads,
+            remove_recovery_download,
             control_recovery,
-            get_recovery_recent,
-            stage_recovery_snapshot,
-            get_recovery_revisions,
-            stage_recovery_revision,
             get_log_status,
             get_activity,
             set_log_level,

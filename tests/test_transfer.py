@@ -95,6 +95,15 @@ def test_rclone_inventory_and_combined_report_are_normalized():
     ]
 
 
+def test_dropbox_hash_aliases_compare_as_the_same_content_hash():
+    local = {"type": "file", "size": 3, "hashes": {"dropboxhash": "abc"}, "mtime_ns": 1}
+    remote = {"type": "file", "size": 3, "hashes": {"dropbox": "abc"}, "mtime": "different"}
+
+    assert transfer.entries_equal(local, remote) == (True, "hash:dropbox")
+    remote["hashes"]["dropbox"] = "def"
+    assert transfer.entries_equal(local, remote) == (False, "hash:dropbox")
+
+
 def test_two_way_and_three_way_comparison_categories(tmp_path):
     baseline_root = tmp_path / "baseline"
     local_root = tmp_path / "local"
@@ -459,7 +468,9 @@ def test_parser_exposes_safe_transfer_surfaces():
     assert apply.policy == ["a.txt=replace"]
     assert cli.parser().parse_args(["links", "status"]).func is cli.cmd_links
     assert cli.parser().parse_args(["links", "review", "link-1"]).func is cli.cmd_links
-    assert cli.parser().parse_args(["recovery", "revisions", "folder-a", "file.txt"]).func is cli.cmd_recovery
+    assert cli.parser().parse_args(["recovery", "enter", "folder-a"]).func is cli.cmd_recovery
+    assert cli.parser().parse_args(["recovery", "verify"]).func is cli.cmd_recovery
+    assert cli.parser().parse_args(["recovery", "exit"]).func is cli.cmd_recovery
 
 
 def test_generation_publication_writes_immutable_before_latest(tmp_path, monkeypatch):
@@ -499,6 +510,7 @@ def test_generation_publication_writes_immutable_before_latest(tmp_path, monkeyp
     latest = json.loads((tmp_path / "state/generations/machine-a/folder-a/latest.json").read_text())
     assert latest["install_id"] == "install-a"
     assert [change["path"] for change in latest["changes"]] == ["changed.txt", "new.txt"]
+    assert "snapshot" not in latest
 
 
 def test_generation_publication_reuses_pending_id_after_failed_upload(tmp_path, monkeypatch):

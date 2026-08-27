@@ -301,58 +301,127 @@ on both sides, and real conflicts including delete-versus-modify.
 ## 9. Dropbox History and Recovery
 
 Safe Sync does not retain duplicate file payloads in app-owned remote trash.
-Dropbox version/deleted-file history is the recovery payload for the account's
-plan window. New successful backup cycles record a complete revision manifest:
-one full baseline followed by compact deltas. This metadata lets Safe Sync
-reconstruct the complete folder at a chosen cycle without duplicating file
-contents in its own cloud storage.
+Dropbox version/deleted-file history and Rewind own historical recovery for the
+account's plan window. Safe Sync does not maintain a second snapshot database or
+reconstruct historical folders file by file.
 
-Recovery presents one compact card per successful backup cycle. Choose **Stage
-Complete Folder** to download and verify that historical folder under the
-excluded `.safe-sync-work/recovery-snapshots` area. **Open Staging Folder** and
-**Open Watched Folder** support side-by-side inspection. Staging never modifies
-the watched folder; copy or move selected content only after review. Cycles
-created before snapshot manifests are labeled **Change record only** and cannot
-be represented as complete folders. Exact-path file history remains under the
-Advanced section. The matching headless commands are:
+Use the **Restore** tab for a guarded, non-destructive historical export. The
+watched local folder is never changed. Dropbox is changed temporarily, then
+returned to the present before backup is unlocked:
+
+1. Choose the tracked folder and click **Enter Recovery Mode**. This establishes
+   one durable machine-wide barrier across every profile and folder. If an
+   outbound folder operation is active, it finishes first; do not touch Dropbox
+   until the status says **Recovery locked**. During that transition, the tray,
+   Status, and Restore surfaces show a spinner, the folder being finished, and
+   elapsed wait time. The indicator is intentionally indeterminate because a
+   provider scan does not expose a reliable remaining percentage.
+2. Open the exact Dropbox backup folder. Choose **Settings -> Folder settings ->
+   Rewind this folder**, select the desired historical point, confirm, and wait
+   for Dropbox's completion email. Then confirm that Rewind finished in Safe
+   Sync.
+3. Click **Create Historical Copy**. Safe Sync copies the rewound remote folder
+   into a new sibling such as `test_restore_20260820T170000Z`, outside every
+   watched tree. It verifies that Dropbox stayed stable during the copy and that
+   every staged path and Dropbox content hash matches. Open this folder to
+   inspect or use the historical data.
+4. Open the same Dropbox folder and use Rewind again, selecting the point
+   immediately before the first Rewind. This is Dropbox's documented undo-Rewind
+   procedure. Wait for the second completion email, then confirm it in Safe
+   Sync.
+5. Click **Verify Current State**. Safe Sync performs a fresh filtered path,
+   type, size, and content-hash comparison between current Dropbox and the
+   unchanged watched local folder. It also proves Dropbox stayed stable during
+   the check.
+6. Click **Exit Recovery Mode**. Exit repeats the full verification while
+   holding the backup execution barrier, removes the durable lock only on
+   success, and then allows queued watcher work to continue.
+
+The matching headless workflow is:
 
 ```bash
-safe-sync recovery pause
+safe-sync recovery enter FOLDER_ID
 safe-sync recovery status
-safe-sync recovery recent
-# Or restrict the activity picker: safe-sync recovery recent --folder FOLDER_ID
-safe-sync recovery snapshot FOLDER_ID GENERATION_ID
-# Advanced single-file recovery:
-safe-sync recovery revisions FOLDER_ID path/to/file
-safe-sync recovery stage FOLDER_ID path/to/file DROPBOX_REVISION
-safe-sync jobs list
-safe-sync jobs apply JOB_ID --policy path/to/file=keep_both
-# Or, after review: --policy path/to/file=replace
-safe-sync recovery resume
+safe-sync recovery mark-rewound
+safe-sync recovery export
+safe-sync recovery mark-undo-complete
+safe-sync recovery verify
+safe-sync recovery exit
 ```
 
-Pausing is durable across daemon restarts. If a backup is already transferring,
-its current folder operation finishes safely, then no new folder backup begins.
-Watcher events continue to accumulate for the later resume.
+Recovery Mode survives UI, daemon, and computer restarts. Automatic, startup,
+scheduled, watcher-triggered, and normal manual backup are all rejected while
+it is active; watcher changes remain queued. The export is explicitly
+remote-to-isolated-local and never writes the watched source. Do not place its
+destination inside any configured watched folder.
 
-Complete-folder staging starts from the current remote folder, removes items
-that did not exist at the chosen cycle, and replaces changed/deleted items by
-immutable Dropbox revision identity. A full content-hash inventory must match
-the selected manifest before the snapshot is marked ready. Renames therefore
-appear at their historical path even when Dropbox currently stores the item at
-its new path. Advanced single-file staging continues to offer reviewed Jobs,
-Keep Both, Replace, checkpoints, and conditional rollback.
+To abandon a guided recovery, use **Cancel Recovery & Resume** from Restore,
+Status, or the tray. Cancellation does not merely remove the lock. Safe Sync
+first compares the selected Dropbox backup with the current local folder. If
+they already match, it unlocks without transferring files. If they differ—for
+example, because Dropbox is still rewound—it explicitly mirrors the current
+local folder to that Dropbox backup, verifies stable equality, and only then
+unlocks queued backup work. This can replace the rewound remote state, so the
+UI requires a warning confirmation.
 
-Resume only after the reviewed local state is correct. The next normal backup
-publishes that local choice as a new forward Dropbox version. For broad damage,
-keep Safe Sync paused, use Dropbox Rewind on the website, stage/reconcile the
-rewound remote state back into the local source, and only then resume. A
-remote-only rewind can otherwise be overwritten by the still-current local
-source.
+Before that replacement, **Save Dropbox Copy Locally** is the recommended
+optional safety step. It downloads the selected backup's current remote state
+into a new timestamped folder outside every watched tree, proves Dropbox stayed
+stable during the download, and verifies every filtered path and content hash.
+Recovery Mode remains locked afterward so you can use **Open Saved Copy** and
+inspect it before deciding. A failed or interrupted copy remains isolated and
+retryable and never unlocks backup. This is an on-demand local export, not a
+continuously maintained second history system. You may explicitly skip it when
+you do not need the current remote state.
 
-Successful backups publish immutable changed-path generation records, compact
-snapshot manifests, and an updated `latest.json` pointer. Snapshot metadata is
-not file content and remains bounded by deltas after its first full baseline.
+Every successfully verified **Save Dropbox Copy Locally** download and full
+historical-folder export is retained in Restore under **Downloaded Recovery
+Copies** after Recovery Mode ends. The list shows the source folder, copy type,
+completion time, entry count, size, destination, and an **Open Folder** action.
+If you remove a downloaded folder yourself, Safe Sync preserves the audit
+record and marks it **Folder Missing**; it does not silently delete recovery
+copies or their records.
+
+The list is time-sortable and kept inside a bounded scrolling panel. **Delete
+Local Copy** permanently removes one generated download from this computer and
+clears its catalog record; **Delete All Local Copies** does the same for every
+managed download. Both require explicit confirmation, are refused while
+Recovery Mode is active, and are restricted to Safe Sync's timestamped recovery
+folders outside all watched roots. Custom destinations that do not match those
+guards must be deleted manually. Neither action changes Dropbox or a watched
+folder.
+
+Any comparison, transfer, provider, or verification failure leaves Recovery
+Mode locked. The matching headless commands are:
+
+After a successful unlock, Status immediately shows **Preparing backup** /
+**resuming** while the daemon wakes and queues its normal catch-up cycle. It
+changes to **Syncing** when folder comparison begins; this transition is not a
+second Recovery lock and does not mean the resume failed.
+
+```bash
+safe-sync recovery save-remote-copy       # optional, recommended if Dropbox differs
+safe-sync recovery downloads              # list verified local recovery copies
+safe-sync recovery remove-download ID --confirm DELETE-LOCAL-RECOVERY-COPY
+safe-sync recovery remove-download --all --confirm DELETE-ALL-LOCAL-RECOVERY-COPIES
+safe-sync recovery cancel --confirm REPLACE-DROPBOX-WITH-LOCAL
+```
+
+After upgrading from an older Safe Sync recovery pause, the Restore tab may
+show **Legacy recovery lock**. If Dropbox was not rewound and no recovery is in
+progress, click **Clear Old Pause and Resume Backups** and confirm. This action
+is intentionally limited to the old marker; it refuses to clear a current or
+damaged Recovery Mode transaction. The headless equivalent is
+`safe-sync recovery clear-legacy --confirm CLEAR-OLD-PAUSE`.
+
+Dropbox does not expose Rewind or Rewind-job status through its public API.
+Selecting the historical time, confirming each Rewind, and waiting for the two
+completion emails therefore remain guided steps in Dropbox's authenticated
+website. Safe Sync detects remote movement, verifies stable content, and owns
+the machine-wide write barrier. For an exceptional emergency only,
+`safe-sync recovery force-exit --confirm FORCE-UNLOCK-RECOVERY` removes the
+guard without verification; using it can immediately overwrite a rewound
+remote folder and is recorded as a warning event.
 
 ## 10. Profiles and Settings
 
@@ -450,8 +519,8 @@ happens to become active later. Backup traffic has priority over log copying.
 
 This journal records what happened; it does not contain file contents and is
 not a recovery database. Dropbox revisions supply historical file contents;
-backup generations provide changed-path context; receive-job staging and
-checkpoints provide safe local review, apply, and rollback.
+Receive comparison, staging, and checkpoints provide safe local review, apply,
+and rollback after a Dropbox Rewind.
 
 ## 13. Troubleshooting
 
@@ -562,9 +631,9 @@ Safe Sync trash left by an older installation.
 - `safe-sync pull` is a compatibility alias for staged receive.
 - `safe-sync jobs` reviews, applies, reconciles, and rolls back receive jobs.
 - `safe-sync links` manages granular linked-folder declarations and status.
-- `safe-sync recovery` pauses/resumes backup and lists/stages immutable Dropbox
-  revisions for safe local review.
+- `safe-sync recovery` runs the machine-wide guarded Rewind, isolated export,
+  undo-Rewind, verification, and unlock workflow.
 - `safe-sync config show` displays effective local settings.
 - `safe-sync autostart backend` controls login startup.
-- `safe-sync rclone` runs the Safe Sync-managed rclone when advanced recovery
-  or authorization requires it.
+- `safe-sync rclone` runs the Safe Sync-managed rclone for advanced diagnostics
+  or authorization.

@@ -28,27 +28,31 @@ dropbox:computer-backups/.trash/test/macbook/<timestamp>
 
 ### Dropbox-native recovery acceptance
 
-The accepted `RECOVERY-001` design keeps no Safe Sync-owned trash or duplicate
-snapshot payload. Dropbox's native version/deleted-file history is the recovery
-payload. Safe Sync records one full revision-metadata baseline followed by
-compact deltas so complete historical folders can be reconstructed in excluded
-local staging. Existing trash is not deleted during implementation or migration.
+The accepted `RECOVERY-001` design keeps no Safe Sync-owned trash, snapshot
+payload, snapshot manifest, or reconstructed history database. Dropbox's native
+version/deleted-file history and Rewind are the recovery authority. Existing
+legacy trash and manifests are not deleted automatically during migration.
 
 Before resuming recovery dogfooding, use only disposable files to prove that a
 normal backup without `--backup-dir` preserves recoverable Dropbox history for
 an overwrite and deletion, and record how Dropbox presents a local rename.
-First confirm that the post-update reconciliation publishes a complete baseline
-even when no payload changed. Then choose a later cycle, stage its complete
-folder, and verify unchanged, modified, deleted, renamed, and later-added paths
-against the manifest before opening the staging folder. Confirm the watched
-folder is untouched. For advanced selected-file recovery, download a chosen Dropbox
-revision into excluded per-job local staging without changing the live remote,
-compare it with the current local path, and exercise both `Keep both` and
-explicit `Replace local`. Resume backup and prove replacement creates a new
-forward Dropbox version. Separately test broad Dropbox Rewind, which restores
-only to the existing remote location; stage/reconcile that state back to local
-before resuming. Prove that the daemon cannot silently overwrite a remote-only
-restoration while recovery is paused.
+Enter machine-wide Recovery Mode, prove a running folder operation drains and
+every backup entry point is blocked, then perform a website Rewind to a known
+point. After Dropbox's email, export to the generated local restore folder and
+verify the watched source is unchanged. Undo-Rewind in Dropbox, wait for the
+second email, and prove Verify and Exit remain blocked until current filtered
+paths and content hashes match local. Exercise restart in every phase, remote
+movement during export/verification, export retry, and guarded final unlock.
+Also exercise **Cancel Recovery** from Restore, main Status, and the tray in two
+states: before Rewind, where equal local/remote state must unlock without a
+write; and after Rewind, where cancellation must mirror current local to the
+selected Dropbox backup, verify stable equality, and only then unlock. Inject a
+transfer and verification failure and prove both remain fail-closed. Before the
+after-Rewind cancellation, use **Save Dropbox Copy Locally**, verify its exact
+isolated contents and Open Saved Copy action, then prove cancellation preserves
+that local copy while replacing Dropbox. Interrupt and retry the safety export,
+and prove a changing remote or failed hash verification leaves Recovery Mode
+locked. Also exercise the explicitly warned skip-copy path.
 
 Older trash-path checks below document tests of the currently installed
 implementation and remain applicable only until `RECOVERY-001` is deployed.

@@ -869,6 +869,80 @@ def test_every_open_control_panel_button_is_wired():
     assert 'querySelector("[data-action=\'open-control-panel\']")?.addEventListener' not in main
 
 
+def test_recovery_controls_do_not_flash_during_status_refresh_and_show_progress():
+    project = Path(__file__).parents[1]
+    page = (project / "ui" / "index.html").read_text()
+    main = (project / "ui" / "src" / "main.ts").read_text()
+    styles = (project / "ui" / "src" / "styles.css").read_text()
+
+    assert page.count("data-recovery-control") == 17
+    assert 'if (button.hasAttribute("data-recovery-control")) continue;' in main
+    assert "data-recovery-operation-modal" in page
+    assert "showRecoveryOperation(action);" in main
+    assert "recoveryActionInFlight = true;" in main
+    assert "if (recoveryActionInFlight) return latestRecovery ?? {};" in main
+    assert 'window.localStorage.setItem("safe-sync.active-tab", tab)' in main
+    assert page.count('data-action="cancel-recovery"') == 2
+    assert page.count('data-action="save-recovery-remote-copy"') == 2
+    assert page.count('data-action="open-recovery-remote-copy"') == 2
+    assert 'controlRecovery("save-remote-copy")' in main
+    assert "openCancelRemoteCopy()" in main
+    assert "REPLACE-DROPBOX-WITH-LOCAL" in main
+    assert 'syncState(status) === "recovery_paused"' in main
+    assert "Cancel failed: ${lastError}" in main
+    assert "await refreshRecoveryStatus();" in main
+    assert "function recoveryStatusNeedsRefresh(status: SafeSyncStatus | null)" in main
+    assert "latestRecovery?.active === true" in main
+    assert "if (recoveryStatusNeedsRefresh(status)) await refreshRecoveryStatus();" in main
+    assert "if (recoveryStatusNeedsRefresh(latestStatus))" in main
+    assert 'stateLabel.textContent = "Entering Recovery Mode"' in main
+    assert 'syncLabel.textContent = "finishing current sync"' in main
+    assert "these safety actions become available after the lock completes" in main
+    assert "Available after the current folder operation finishes and Recovery Mode is locked." in main
+    assert page.count("data-recovery-entry-progress hidden") == 2
+    assert "Finishing ${activeFolder} before Recovery Mode locks" in main
+    assert "waiting ${elapsedSeconds.toLocaleString()}s" in main
+    assert "latestRecovery?.active === true ||" in main
+    assert ".inline-spinner" in styles
+    assert "Downloaded Recovery Copies" in page
+    assert 'invoke<Array<Record<string, unknown>>>("get_recovery_downloads")' in main
+    assert 'data-action="open-recovery-download"' in main
+    assert 'data-action="load-recovery-downloads"' in page
+    assert 'data-recovery-download-sort' in page
+    assert 'data-action="remove-all-recovery-downloads"' in page
+    assert 'data-action="remove-recovery-download"' in main
+    assert 'invoke<Record<string, unknown>>("remove_recovery_download"' in main
+    assert "max-height: 390px;" in styles
+    assert "overflow-y: auto;" in styles
+    assert 'return "Preparing backup";' in main
+    assert 'status.sync_state?.recovery_resume_pending === true ? "resuming"' in main
+    assert "Recovery complete; preparing normal backup" in main
+    assert 'grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));' in styles
+    assert ':root[data-panel="quick"] .recovery-status-actions' in styles
+    assert "white-space: normal;" in styles
+    assert "button.secondary.danger {" in styles
+    assert ':root[data-panel="quick"] .actions button.danger:not(.secondary) {' in styles
+    solid_danger = styles[styles.index("button.danger {"):styles.index("input {")]
+    assert "--button-background: #a12222;" in solid_danger
+    assert "--button-foreground: #ffffff;" in solid_danger
+    assert "--button-hover-background: #861b1b;" in solid_danger
+    assert "--button-hover-foreground: #ffffff;" in solid_danger
+    outline_danger = styles[styles.index("button.secondary.danger {"):styles.index(".output {")]
+    assert "--button-background: #ffffff;" in outline_danger
+    assert "--button-foreground: #9f2d2d;" in outline_danger
+    assert "--button-hover-background: #fff1f1;" in outline_danger
+    assert "--button-hover-foreground: #7d1d1d;" in outline_danger
+    quick_danger_start = styles.index(':root[data-panel="quick"] .actions button.danger:not(.secondary) {')
+    quick_danger = styles[quick_danger_start:styles.index(':root[data-panel="quick"] [data-action="open-control-panel"]', quick_danger_start)]
+    assert "--button-background: #a12222;" in quick_danger
+    assert "--button-foreground: #ffffff;" in quick_danger
+    assert "--button-hover-background: #861b1b;" in quick_danger
+    assert "--button-hover-foreground: #ffffff;" in quick_danger
+    generic_hover = styles[styles.index("button:hover:not(:disabled) {"):styles.index("button:active:not(:disabled)")]
+    assert "background: var(--button-hover-background);" in generic_hover
+    assert "color: var(--button-hover-foreground);" in generic_hover
+
+
 def test_status_ui_separates_configured_folders_from_runtime_folder():
     project = Path(__file__).parents[1]
     page = (project / "ui" / "index.html").read_text()

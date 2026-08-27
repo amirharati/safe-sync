@@ -91,15 +91,20 @@ protocol in `docs/operations/test-plan.md`.
 - [x] Granular linked folders reject unsafe/overlapping scopes, installation or
   filter mismatches, detect local watcher changes and relevant peer generations,
   and require Review & Sync before staging/apply.
-- [x] Dropbox-native recovery can durably pause backup and stage a selected,
-  hash-verified immutable revision into the same safe receive pipeline.
-- [x] Complete recovery snapshots use one full provider-revision baseline plus
-  compact deltas, stage into an excluded folder, remove later additions,
-  recover changed/deleted historical revisions, and verify the full inventory
-  without modifying the watched folder.
-- [ ] Real-provider validation proves overwrite/delete history, records rename
-  presentation, stages and opens a complete folder snapshot, and exercises the
-  advanced Keep Both/Replace/rollback/resume path.
+- [x] Machine-wide Recovery Mode durably blocks every outbound backup entry
+  point, including the final rclone execution boundary, across restarts.
+- [x] Restore opens the exact Dropbox folder, verifies an isolated historical
+  export, guides undo-Rewind, and requires two current remote/local equality
+  checks before guarded exit.
+- [x] Restore, Status, and tray expose guarded Cancel Recovery; equal state
+  unlocks without writing, while differing state reconciles local to Dropbox
+  and verifies before unlock. Failures remain locked.
+- [x] Before a differing-state cancellation, Restore, Status, and tray offer an
+  optional exact remote-to-isolated-local safety copy, verify remote stability
+  and content hashes, expose Open Saved Copy, and remain locked on failure.
+- [ ] Real-provider validation proves Rewind, verified export, undo-Rewind,
+  remote stability detection, restart recovery, guarded final unlock, and both
+  no-write and reconcile-required cancellation paths.
 - [x] `.safe-sync-work` is excluded by a separate mandatory internal rclone
   filter plus watcher/inventory rules, independent of the user's existing
   filter file.

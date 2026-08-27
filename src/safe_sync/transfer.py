@@ -333,8 +333,15 @@ def parse_rclone_inventory(value: str | list[dict[str, Any]]) -> dict[str, dict[
 
 
 def _common_hash(left: dict[str, Any], right: dict[str, Any]) -> tuple[str, str, str] | None:
-    left_hashes = left.get("hashes") if isinstance(left.get("hashes"), dict) else {}
-    right_hashes = right.get("hashes") if isinstance(right.get("hashes"), dict) else {}
+    def canonical_hashes(entry: dict[str, Any]) -> dict[str, Any]:
+        raw = entry.get("hashes") if isinstance(entry.get("hashes"), dict) else {}
+        # rclone names Dropbox's content hash `dropbox`; older Safe Sync
+        # inventories called the same algorithm `dropboxhash`. Treat these as
+        # one hash type so equality never falls back to incomparable mtimes.
+        return {"dropbox" if str(name).lower() == "dropboxhash" else str(name).lower(): value for name, value in raw.items()}
+
+    left_hashes = canonical_hashes(left)
+    right_hashes = canonical_hashes(right)
     for name in sorted(set(left_hashes) & set(right_hashes)):
         if left_hashes[name] and right_hashes[name]:
             return name, str(left_hashes[name]), str(right_hashes[name])
